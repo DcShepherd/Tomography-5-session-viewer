@@ -2,6 +2,8 @@
 
 Tomography Session Browser is a desktop application for reviewing **Thermo Fisher Tomography 5** session folders. It brings atlas screening and data collection sessions into one workspace, shows acquisition images and metadata, highlights incomplete or failed tilt series, and exports scoped PDF reports.
 
+This app was vibecoded using a combination of Codex and Claude Code. 
+
 The application is **read-only**. It does not edit, repair, rename, move, or normalise files in your microscope output folders.
 
 ## Platform support
