@@ -1,0 +1,112 @@
+# Public-repository policy: ignore everything unless it is explicitly allowed.
+# This reduces the chance of accidentally publishing microscope data, local
+# configuration, credentials, reports, or machine-specific files.
+*
+
+# Repository policy and public root files
+!.gitignore
+!README.md
+!LICENSE
+!LICENSE.*
+!NOTICE
+!CONTRIBUTING.md
+!CODE_OF_CONDUCT.md
+!SECURITY.md
+!requirements.txt
+!environment.yml
+!pyproject.toml
+
+# Application source, tests, and public maintenance tools
+!tomography_session_browser/
+!tomography_session_browser/**
+!tests/
+!tests/**
+!tools/
+!tools/**
+
+# Never publish local agent/editor/configuration state or credentials
+.agents/
+.codex/
+.idea/
+.vscode/
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*credentials*
+*secrets*
+settings.json
+
+# Generated Python, test, build, log, and temporary output
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+tmp/
+temp/
+*.log
+*.tmp
+*.bak
+*.swp
+*.crash
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Original Tomography 5 session structures and metadata
+**/Sample[0-9]*/
+**/Sample-[0-9]*/
+**/Atlas/
+**/Batch/
+**/SearchMaps/
+**/SearchMap_*/
+*.dm
+*.mdoc
+BatchPositionsList.xml
+Atlas_*.xml
+Tile_*.xml
+SearchMap*.xml
+*_Search.xml
+*_Tracking.xml
+*_Exposure.xml
+
+# Microscope images, scientific arrays, exports, reports, and archives
+*.mrc
+*.mrcs
+*.rec
+*.st
+*.tif
+*.tiff
+*.eer
+*.hdf
+*.h5
+*.jpg
+*.jpeg
+*.png
+*.pdf
+*.csv
+*.tsv
+*.db
+*.sqlite
+*.sqlite3
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+
+# The only publishable raster images are synthetic README screenshots.
+!docs/
+!docs/images/
+!docs/images/readme/
+!docs/images/readme/*.png
