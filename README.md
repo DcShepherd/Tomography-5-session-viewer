@@ -39,7 +39,7 @@ On the repository page, select **Code**, copy the HTTPS URL, open PowerShell, an
 
 ```powershell
 git clone PASTE_REPOSITORY_URL_HERE
-Set-Location Tomography_app_codex
+Set-Location Tomography_5_session_viewer
 conda env create -f environment.yml
 conda activate tomoapp_session
 python -m pip install -e .
@@ -52,7 +52,7 @@ On the repository page, select **Code**, copy the HTTPS URL, open a terminal, an
 
 ```bash
 git clone PASTE_REPOSITORY_URL_HERE
-cd Tomography_app_codex
+cd Tomography_5_session_viewer
 conda env create -f environment.yml
 conda activate tomoapp_session
 python -m pip install -e .
@@ -65,7 +65,7 @@ On the repository page, select **Code** and copy the HTTPS URL. These commands w
 
 ```bash
 git clone PASTE_REPOSITORY_URL_HERE
-cd Tomography_app_codex
+cd Tomography_5_session_viewer
 conda env create -f environment.yml
 conda activate tomoapp_session
 python -m pip install -e .
