@@ -662,13 +662,10 @@ def _dedupe_atlases_static(atlases: list[Atlas]) -> list[Atlas]:
 
 
 def _linked_atlases_for_session_static(sessions: list[Session], session: Session) -> list[Atlas]:
-    groups = build_project_tree_groups(sessions)
-    for group in groups:
-        if group.kind != "linked" or group.atlas_session is None:
-            continue
-        if any(candidate is session for candidate in group.collection_sessions):
-            return _display_atlases_for_session(group.atlas_session)
-    return []
+    atlases: list[Atlas] = []
+    for sample in session.samples:
+        atlases.extend(_linked_atlases_for_sample_static(sessions, sample))
+    return _dedupe_atlases_static(atlases)
 
 
 def _linked_atlases_for_sample_static(sessions: list[Session], sample: Sample) -> list[Atlas]:
@@ -4801,9 +4798,9 @@ class MainWindow(QMainWindow):
     def _atlas_linkage_context_lines(self, value: Any) -> list[str]:
         direct, linked = self._atlas_associations_for_context(value)
         if direct:
-            return self._atlas_linkage_lines("Direct atlas", direct)
+            return self._atlas_linkage_lines("Direct atlas", direct, value)
         if linked:
-            return self._atlas_linkage_lines("Linked atlas from screening session", linked)
+            return self._atlas_linkage_lines("Linked atlas from screening session", linked, value)
         return []
 
     def _atlas_associations_for_context(self, value: Any) -> tuple[list[Atlas], list[Atlas]]:
@@ -4828,20 +4825,55 @@ class MainWindow(QMainWindow):
             return self._atlas_associations_for_context(context)
         return [], []
 
-    def _atlas_linkage_lines(self, label: str, atlases: list[Atlas]) -> list[str]:
+    def _atlas_linkage_lines(self, label: str, atlases: list[Atlas], value: Any) -> list[str]:
         if not atlases:
             return []
         atlas = atlases[0]
         lines = [f"Atlas: {label}"]
-        sample_label = _atlas_display_label_static(self._sessions, atlas)
-        if sample_label:
-            lines.append(f"Sample: {sample_label}")
+        sample_labels = self._atlas_linkage_sample_labels(value, atlas)
+        if sample_labels:
+            lines.append(f"Sample: {', '.join(sample_labels)}")
         path = self._atlas_context_path(atlas)
         if path:
             lines.append(f"Path: {path}")
         if len(atlases) > 1:
             lines.append(f"Additional atlases: {len(atlases) - 1}")
         return lines
+
+    def _atlas_linkage_sample_labels(self, value: Any, atlas: Atlas) -> list[str]:
+        samples = self._samples_for_context(value)
+        if not samples and isinstance(value, Atlas | Overview | SearchMap | SearchTile | BatchPosition | TiltSeries):
+            samples = [sample for sample in self._all_samples() if self._sample_contains(sample, value)]
+        if not samples:
+            context = self._context_for_object(value)
+            samples = self._samples_for_context(context)
+
+        atlas_key = _atlas_key_static(atlas)
+        matches: list[Sample] = []
+        for sample in samples:
+            if sample.atlas is atlas:
+                matches.append(sample)
+                continue
+            if any(
+                _atlas_key_static(candidate) == atlas_key
+                for candidate in self._linked_atlases_for_sample(sample)
+            ):
+                matches.append(sample)
+
+        collection_matches = [
+            sample for sample in matches if _sample_has_collection_data_static(sample)
+        ]
+        preferred = collection_matches or matches
+        labels: list[str] = []
+        seen: set[str] = set()
+        for sample in preferred:
+            label = _display_sample_name_static(sample.name)
+            key = label.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            labels.append(label)
+        return labels
 
     @staticmethod
     def _atlas_context_path(atlas: Atlas) -> str | None:

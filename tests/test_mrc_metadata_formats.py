@@ -68,6 +68,8 @@ def test_fei2_documented_offsets_and_bitmasks_are_parsed(tmp_path: Path) -> None
     assert raw["alpha_tilt_max"] == pytest.approx(60.0)
     assert raw["scan_rotation"] == pytest.approx(0.125)
     assert raw["diffraction_pattern_rotation"] == pytest.approx(0.25)
+    assert raw["probe_mode"] == 1
+    assert raw["field_presence"]["probe_mode"] == "bitmask1:29"
 
 
 def test_fei2_extension_rotation_planned_tilt_and_detector_fields_are_parsed(tmp_path: Path) -> None:

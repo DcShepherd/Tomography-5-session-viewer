@@ -469,12 +469,14 @@ def test_collection_context_panel_reports_linked_atlas() -> None:
 
     app = QApplication.instance() or QApplication([])
     atlas = _atlas_session("Atlas_Screening_Demo", "C:/project")
+    atlas.samples[0].name = "Screening grid slot 1"
     atlas.samples[0].atlas.image_path = Path("C:/project/Atlas_Screening_Demo/Sample1/Atlas/Atlas.mrc")
     collection = _collection_session(
         "Data_Collection_Demo",
         "C:/project",
         "Atlas_Screening_Demo/Sample1/Atlas/Atlas.dm",
     )
+    collection.samples[0].name = "Specimen Alpha"
     window = MainWindow()
     window._sessions = [atlas, collection]
     window._rebuild_sample_index()
@@ -485,12 +487,43 @@ def test_collection_context_panel_reports_linked_atlas() -> None:
     text = window.context_panel.toPlainText()
 
     assert "Atlas: Linked atlas from screening session" in text
-    assert "Sample: Sample1" in text
+    assert "Sample: Specimen Alpha" in text
+    assert "Sample: Screening grid slot 1" not in text
     assert "Path:" in text
     assert "Atlas_Screening_Demo" in text
     assert "Sample1" in text
     assert "Atlas.mrc" in text
     assert "No atlas associated" not in text
+
+
+def test_collection_session_atlas_scope_includes_only_per_sample_atlas_id_matches() -> None:
+    from tomography_session_browser.ui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    atlas = _atlas_session("Atlas_Screening_Demo", "C:/project")
+    second_atlas = Atlas(id="atlas-screening-demo-atlas-2")
+    atlas.samples.append(
+        Sample(
+            id="atlas-screening-demo-sample-2",
+            name="Screening slot 2",
+            path=Path("C:/project") / "Atlas_Screening_Demo" / "Sample2",
+            atlas=second_atlas,
+        )
+    )
+    collection = _collection_session(
+        "Data_Collection_Demo",
+        "C:/project",
+        "Atlas_Screening_Demo/Sample2/Atlas/Atlas.dm",
+    )
+    collection.samples[0].name = "Specimen Beta"
+    window = MainWindow()
+    window._sessions = [atlas, collection]
+    window._rebuild_sample_index()
+    window._active_context = collection
+    app.processEvents()
+
+    assert window._context_atlases(collection) == [second_atlas]
+    assert "Sample: Specimen Beta" in window._context_description(collection)
 
 
 def test_collection_context_panel_reports_missing_atlas_only_when_unresolved() -> None:

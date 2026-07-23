@@ -188,7 +188,7 @@ def _apply_exposure_beam_diameter(
 def _apply_mrc_acquisition_metadata(positions: list[BatchPosition]) -> None:
     _apply_exposure_mrc_beam_diameter(positions)
     _apply_mrc_spot_indices(positions)
-    _apply_mrc_detector_and_probe_fallbacks(positions)
+    _apply_mrc_detector_and_probe_settings(positions)
 
 
 def _apply_exposure_mrc_beam_diameter(positions: list[BatchPosition]) -> None:
@@ -243,7 +243,7 @@ def _apply_mrc_spot_indices(positions: list[BatchPosition]) -> None:
             _apply_position_setting(position, replace(setting, label=LEGACY_SPOT_LABEL), overwrite=True)
 
 
-def _apply_mrc_detector_and_probe_fallbacks(positions: list[BatchPosition]) -> None:
+def _apply_mrc_detector_and_probe_settings(positions: list[BatchPosition]) -> None:
     for position in positions:
         metadata = position.exposure_mrc_metadata or position.search_mrc_metadata
         if metadata is None:
@@ -268,24 +268,29 @@ def _apply_mrc_detector_and_probe_fallbacks(positions: list[BatchPosition]) -> N
                 overwrite=False,
             )
 
-        probe_field = _mrc_raw_text(metadata, ("probe_mode",))
-        if probe_field and acquisition_setting_value(position.metadata, "Probe mode") is None:
-            probe_code, field = probe_field
-            path = position.exposure_image_path or position.search_image_path
+        probe_context = "exposure MRC" if position.exposure_mrc_metadata is not None else "search MRC"
+        probe_code = _mrc_probe_mode_code(metadata, position.warnings, probe_context)
+        if probe_code is not None:
+            exposure_probe = position.exposure_mrc_metadata is not None
+            path = position.exposure_image_path if exposure_probe else position.search_image_path
             _apply_position_setting(
                 position,
                 AcquisitionSetting(
                     label="Probe mode",
-                    value=f"FEI code {probe_code}",
+                    value=_format_fei_probe_mode(probe_code),
                     source=_mrc_spot_source_label(path),
-                    field=field,
+                    field="probe_mode",
                     source_path=str(path) if path else None,
                     source_kind="mrc_fei_extended_header",
                     field_path="frame_metadata/raw_fields/probe_mode",
                     authority="fei_extended_header",
-                    fallback=True,
+                    fallback=not exposure_probe,
                 ),
-                overwrite=False,
+                # The Exposure MRC records the microscope state used for data
+                # acquisition. Search XML/MRC values describe a different
+                # low-dose state and are only fallbacks when no exposure
+                # header is available.
+                overwrite=exposure_probe,
             )
 
 
@@ -330,6 +335,39 @@ def _mrc_spot_index(metadata: Any, warnings: list[str], context: str) -> str | N
         warnings.append(f"{context} FEI extended header has inconsistent spot_index values: {text}.")
         return None
     return str(next(iter(values)))
+
+
+def _mrc_probe_mode_code(metadata: Any, warnings: list[str], context: str) -> int | None:
+    if metadata is None:
+        return None
+    values: set[int] = set()
+    for frame in getattr(metadata, "frame_metadata", None) or []:
+        raw_fields = frame.get("raw_fields") if isinstance(frame, dict) else None
+        if not isinstance(raw_fields, dict):
+            continue
+        value = raw_fields.get("probe_mode")
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        values.add(parsed)
+    if not values:
+        return None
+    if len(values) > 1:
+        text = ", ".join(str(value) for value in sorted(values))
+        warnings.append(f"{context} FEI extended header has inconsistent probe_mode values: {text}.")
+        return None
+    return next(iter(values))
+
+
+def _format_fei_probe_mode(code: int) -> str:
+    if code == 1:
+        return "Microprobe"
+    if code == 2:
+        return "Nanoprobe"
+    return f"Unknown (FEI code {code})"
 
 
 def _mrc_raw_text(metadata: Any, fields: tuple[str, ...]) -> tuple[str, str] | None:

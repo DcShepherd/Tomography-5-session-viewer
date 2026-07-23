@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from tomography_session_browser.domain.models import BatchPosition, MdocSection, Sample, TiltSeries
+from tomography_session_browser.domain.models import BatchPosition, MdocSection, MrcMetadata, Sample, TiltSeries
+from tomography_session_browser.parsers import batch_parser
 from tomography_session_browser.parsers.batch_parser import parse_batch_folder
 from tomography_session_browser.parsers.xml_parser import find_first
 from tomography_session_browser.reports.report_generator import _acquisition_settings_table
@@ -188,6 +189,111 @@ def test_batch_parser_prefers_probe_mode_over_illumination_mode_and_fills_beam_d
     assert acquisition_setting_source(metadata, "Probe mode") == "search.xml ProbeMode"
 
 
+@pytest.mark.parametrize(
+    ("probe_code", "expected"),
+    [
+        (1, "Microprobe"),
+        (2, "Nanoprobe"),
+        (7, "Unknown (FEI code 7)"),
+    ],
+)
+def test_exposure_mrc_probe_mode_decodes_and_overrides_search_xml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_code: int,
+    expected: str,
+) -> None:
+    batch = tmp_path / "Batch"
+    batch.mkdir()
+    (batch / "BatchPositionsList.xml").write_text(
+        """
+        <Root>
+          <BatchPositionParameters>
+            <Name>Position_1</Name>
+          </BatchPositionParameters>
+        </Root>
+        """,
+        encoding="utf-8",
+    )
+    (batch / "search.xml").write_text(
+        "<MicroscopeImage><ProbeMode>MicroProbe</ProbeMode></MicroscopeImage>",
+        encoding="utf-8",
+    )
+    exposure_path = batch / "Position_1_Exposure.mrc"
+    exposure_path.write_bytes(b"")
+
+    monkeypatch.setattr(
+        batch_parser,
+        "read_mrc_metadata",
+        lambda path: MrcMetadata(
+            path=path,
+            size_bytes=0,
+            frame_metadata=[{"raw_fields": {"probe_mode": probe_code}}],
+        ),
+    )
+
+    position = parse_batch_folder(batch)[0]
+
+    assert acquisition_setting_value(position.metadata, "Probe mode") == expected
+    assert acquisition_setting_source(position.metadata, "Probe mode") == (
+        "Position_1_Exposure.mrc FEI extended header probe_mode"
+    )
+    if expected != "Microprobe":
+        assert any(
+            "Probe mode conflict:" in warning
+            and f"probe_mode={expected}" in warning
+            and "overrides search.xml ProbeMode=Microprobe" in warning
+            for warning in position.warnings
+        )
+
+
+def test_inconsistent_exposure_mrc_probe_modes_keep_xml_fallback_and_warn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = tmp_path / "Batch"
+    batch.mkdir()
+    (batch / "BatchPositionsList.xml").write_text(
+        """
+        <Root>
+          <BatchPositionParameters>
+            <Name>Position_1</Name>
+          </BatchPositionParameters>
+        </Root>
+        """,
+        encoding="utf-8",
+    )
+    (batch / "search.xml").write_text(
+        "<MicroscopeImage><ProbeMode>MicroProbe</ProbeMode></MicroscopeImage>",
+        encoding="utf-8",
+    )
+    exposure_path = batch / "Position_1_Exposure.mrc"
+    exposure_path.write_bytes(b"")
+
+    monkeypatch.setattr(
+        batch_parser,
+        "read_mrc_metadata",
+        lambda path: MrcMetadata(
+            path=path,
+            size_bytes=0,
+            frame_metadata=[
+                {"raw_fields": {"probe_mode": 1}},
+                {"raw_fields": {"probe_mode": 2}},
+            ],
+        ),
+    )
+
+    position = parse_batch_folder(batch)[0]
+
+    assert acquisition_setting_value(position.metadata, "Probe mode") == "Microprobe"
+    assert acquisition_setting_source(position.metadata, "Probe mode") == "search.xml ProbeMode"
+    assert any(
+        "exposure MRC FEI extended header has inconsistent probe_mode values: 1, 2."
+        in warning
+        for warning in position.warnings
+    )
+
+
 def test_reference_collection_a_exposure_mrc_supplies_tilt_series_beam_diameter() -> None:
     """Lamella tilt-series beam diameter comes from the Exposure MRC FEI header."""
 
@@ -241,10 +347,12 @@ def test_reference_collection_b_exposure_mrc_supplies_tilt_series_beam_diameter(
     assert metadata["BeamDiameterContext"] == "exposure_mrc_illuminated_area"
     expected_radius_px = (4.2e-06 / 2) / pixel_size
     assert _beam_radius_pixels(position, pixel_size) == pytest.approx(expected_radius_px, rel=1e-6)
-    # ProbeMode parsing continues to come from the search XML — unchanged
-    # by the exposure-MRC override. The existing reference behaviour is
-    # preserved verbatim.
-    assert acquisition_setting_value(metadata, "Probe mode") == "Microprobe"
+    # The Exposure MRC is the acquisition-time source; FEI probe_mode code 2
+    # overrides the conflicting search-state XML value.
+    assert acquisition_setting_value(metadata, "Probe mode") == "Nanoprobe"
+    assert acquisition_setting_source(metadata, "Probe mode").endswith(
+        "_Exposure.mrc FEI extended header probe_mode"
+    )
     assert acquisition_setting_value(metadata, SEARCH_SPOT_LABEL) == "8"
     assert acquisition_setting_value(metadata, ACQUISITION_SPOT_LABEL) == "6"
     assert acquisition_setting_value(metadata, LEGACY_SPOT_LABEL) == "6"

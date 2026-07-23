@@ -625,6 +625,7 @@ _FEI_FIELD_PRESENCE_SPECS: tuple[tuple[str, int, int, bool, int, int], ...] = (
     ("z_stage", 1, 11, True, 132, 8),
     ("pixel_size_x", 1, 14, True, 156, 8),
     ("pixel_size_y", 1, 15, True, 164, 8),
+    ("probe_mode", 1, 29, False, 284, 4),
     ("magnification", 1, 31, True, 289, 8),
     ("spot_index", 2, 1, False, 309, 4),
     ("illuminated_area", 2, 2, False, 313, 8),
