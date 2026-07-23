@@ -192,8 +192,8 @@ def test_batch_parser_prefers_probe_mode_over_illumination_mode_and_fills_beam_d
 @pytest.mark.parametrize(
     ("probe_code", "expected"),
     [
-        (1, "Microprobe"),
-        (2, "Nanoprobe"),
+        (1, "Nanoprobe"),
+        (2, "Microprobe"),
         (7, "Unknown (FEI code 7)"),
     ],
 )
@@ -348,8 +348,8 @@ def test_reference_collection_b_exposure_mrc_supplies_tilt_series_beam_diameter(
     expected_radius_px = (4.2e-06 / 2) / pixel_size
     assert _beam_radius_pixels(position, pixel_size) == pytest.approx(expected_radius_px, rel=1e-6)
     # The Exposure MRC is the acquisition-time source; FEI probe_mode code 2
-    # overrides the conflicting search-state XML value.
-    assert acquisition_setting_value(metadata, "Probe mode") == "Nanoprobe"
+    # is MicroProbe according to the Tomography 5.26 MRC header definition.
+    assert acquisition_setting_value(metadata, "Probe mode") == "Microprobe"
     assert acquisition_setting_source(metadata, "Probe mode").endswith(
         "_Exposure.mrc FEI extended header probe_mode"
     )

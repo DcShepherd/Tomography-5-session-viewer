@@ -363,10 +363,11 @@ def _mrc_probe_mode_code(metadata: Any, warnings: list[str], context: str) -> in
 
 
 def _format_fei_probe_mode(code: int) -> str:
+    # Tomography 5.26 MRC header: Probe mode, offset 284, Bitmask 1 #29.
     if code == 1:
-        return "Microprobe"
-    if code == 2:
         return "Nanoprobe"
+    if code == 2:
+        return "Microprobe"
     return f"Unknown (FEI code {code})"
 
 
