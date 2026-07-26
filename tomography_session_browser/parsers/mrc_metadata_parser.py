@@ -29,6 +29,7 @@ class MrcMainHeaderInfo:
     ny: int
     nz: int
     mode: int
+    endian: str
     nsymbt: int
     exttyp: str | None
     mapc: int | None
@@ -101,6 +102,7 @@ def parse_mrc_metadata(path: Path) -> ParsedMrcMetadata:
         ny=ny,
         nz=nz,
         mode=mode,
+        endian=endian,
         nsymbt=max(0, nsymbt or 0),
         exttyp=exttyp,
         mapc=mapc,
@@ -306,8 +308,8 @@ def _parse_fei_metadata_record(
     }
     alpha_tilt = _read_fei_double(record, 100, bitmasks, 1, 7, fallback=True, low=-90, high=90)
     beta_tilt = _read_fei_double(record, 108, bitmasks, 1, 8, fallback=True, low=-90, high=90)
-    pixel_size_x = _read_fei_double(record, 156, bitmasks, 1, 14, fallback=True, low=0, high=1e-3)
-    pixel_size_y = _read_fei_double(record, 164, bitmasks, 1, 15, fallback=True, low=0, high=1e-3)
+    pixel_size_x = _read_fei_double(record, 156, bitmasks, 1, 14, fallback=True, low=1e-15, high=1e-3)
+    pixel_size_y = _read_fei_double(record, 164, bitmasks, 1, 15, fallback=True, low=1e-15, high=1e-3)
     timestamp_raw = _read_fei_double(record, 12, bitmasks, 1, 0, low=1, high=100_000)
     dose = _read_fei_double(record, 92, bitmasks, 1, 6, low=0, high=1e25)
     shift_x = _read_fei_double(record, 403, bitmasks, 2, 14, low=-1, high=1)
@@ -561,9 +563,9 @@ def _read_fei_ascii(
 ) -> str | None:
     if not _field_present(bitmasks, bitmask_index, bit_index):
         return None
-    if offset < 0 or offset >= len(record):
+    if offset < 0 or size <= 0 or offset + size > len(record):
         return None
-    raw = record[offset : min(len(record), offset + size)].split(b"\x00", 1)[0].strip()
+    raw = record[offset : offset + size].split(b"\x00", 1)[0].strip()
     if not raw:
         return None
     return raw.decode("ascii", errors="replace").strip() or None
@@ -689,11 +691,11 @@ def _dose_e_per_angstrom2(value: float | None) -> float | None:
 
 
 def _meters_to_angstrom(value: float | None) -> float | None:
-    if value is None:
+    """Convert a documented FEI extended-header metre value to Angstroms."""
+
+    if value is None or value <= 0:
         return None
-    if 0 < abs(value) < 1e-6:
-        return value * 1e10
-    return value
+    return value * 1e10
 
 
 def _plausible(value: float | None, low: float, high: float) -> float | None:

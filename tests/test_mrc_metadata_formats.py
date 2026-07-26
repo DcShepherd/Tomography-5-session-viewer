@@ -8,7 +8,7 @@ import pytest
 
 from tomography_session_browser.domain.models import MdocSection, MrcMetadata, TiltSeries
 from tomography_session_browser.parsers.mrc_metadata_parser import MRC_HEADER_BYTES, parse_mrc_metadata
-from tomography_session_browser.parsers.mrc_parser import read_mrc_metadata
+from tomography_session_browser.parsers.mrc_parser import MrcPreviewSource, inspect_mrc, read_mrc_metadata
 from tomography_session_browser.services.tilt_angle_service import stack_order_tilt_angles, tilt_angle_metadata_warnings
 
 
@@ -72,6 +72,47 @@ def test_fei2_documented_offsets_and_bitmasks_are_parsed(tmp_path: Path) -> None
     assert raw["field_presence"]["probe_mode"] == "bitmask1:29"
 
 
+def test_fei_pixel_size_above_one_micrometre_is_still_converted_from_metres(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "fei2_large_pixel.mrc"
+    _write_fei2_mrc(
+        path,
+        [0.0],
+        metadata_size=784,
+        documented_fields=True,
+        pixel_size_m=1.2e-6,
+    )
+
+    metadata = parse_mrc_metadata(path)
+    frame = metadata.frame_metadata[0]
+
+    assert frame.raw_fields["pixel_size_x"] == pytest.approx(1.2e-6)
+    assert frame.pixel_size == pytest.approx(12_000.0)
+
+
+def test_zero_fei_pixel_size_is_rejected_as_missing(tmp_path: Path) -> None:
+    path = tmp_path / "fei2_zero_pixel.mrc"
+    _write_fei2_mrc(
+        path,
+        [0.0],
+        metadata_size=784,
+        documented_fields=True,
+        pixel_size_m=0.0,
+    )
+    payload = bytearray(path.read_bytes())
+    struct.pack_into("<3f", payload, 40, 0.0, 0.0, 0.0)
+    path.write_bytes(payload)
+
+    metadata = parse_mrc_metadata(path)
+    frame = metadata.frame_metadata[0]
+
+    assert "pixel_size_x" not in frame.raw_fields
+    assert "pixel_size_y" not in frame.raw_fields
+    assert frame.pixel_size is None
+    assert metadata.main_header.voxel_size == (None, None, None)
+
+
 def test_fei2_extension_rotation_planned_tilt_and_detector_fields_are_parsed(tmp_path: Path) -> None:
     path = tmp_path / "fei2_extension_fields.mrc"
     _write_fei2_mrc(path, [-1.5, 1.5], metadata_size=864, documented_fields=True)
@@ -108,6 +149,30 @@ def test_fei1_bitmask4_does_not_authorise_fei2_extension_fields(tmp_path: Path) 
     )
 
 
+def test_truncated_fei_ascii_field_stays_ignored_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "truncated_ascii.mrc"
+    header = bytearray(MRC_HEADER_BYTES)
+    struct.pack_into("<4i", header, 0, 4, 4, 1, 2)
+    struct.pack_into("<3f", header, 40, 4.0, 4.0, 1.0)
+    struct.pack_into("<3i", header, 64, 1, 2, 3)
+    struct.pack_into("<i", header, 92, 440)
+    header[104:108] = b"FEI2"
+
+    extended = bytearray(440)
+    struct.pack_into("<ii", extended, 0, 440, 1)
+    struct.pack_into("<I", extended, 297, 1 << 19)
+    extended[435:440] = b"CetaD"
+    path.write_bytes(bytes(header) + bytes(extended))
+
+    metadata = parse_mrc_metadata(path)
+    raw = metadata.frame_metadata[0].raw_fields
+
+    assert "camera_name" not in raw
+    assert raw["field_presence_ignored"]["camera_name"] == (
+        "bitmask2:19 beyond 440-byte FEI record"
+    )
+
+
 def test_fei2_absent_bitmask_fields_are_not_reported(tmp_path: Path) -> None:
     path = tmp_path / "fei2_absent_fields.mrc"
     _write_fei2_mrc(path, [0.0, 2.0], metadata_size=512)
@@ -124,8 +189,6 @@ def test_fei2_absent_bitmask_fields_are_not_reported(tmp_path: Path) -> None:
 
 
 def test_mrc_preview_preserves_top_left_pixel_origin(tmp_path: Path) -> None:
-    from tomography_session_browser.parsers.mrc_parser import MrcPreviewSource
-
     path = tmp_path / "asymmetric_origin.mrc"
     header = bytearray(MRC_HEADER_BYTES)
     nx, ny, nz, mode = 3, 2, 1, 2
@@ -138,6 +201,27 @@ def test_mrc_preview_preserves_top_left_pixel_origin(tmp_path: Path) -> None:
     preview = MrcPreviewSource(path).get_frame_preview(0, max_size=16)
     pixels = np.asarray(preview.image)
 
+    assert pixels[0, 0] == pixels.max()
+    assert pixels[-1, 0] < pixels[0, 0]
+
+
+def test_mrc_preview_uses_detected_big_endian_pixel_dtype(tmp_path: Path) -> None:
+    path = tmp_path / "big_endian.mrc"
+    header = bytearray(MRC_HEADER_BYTES)
+    nx, ny, nz, mode = 3, 2, 1, 2
+    struct.pack_into(">4i", header, 0, nx, ny, nz, mode)
+    struct.pack_into(">3f", header, 40, float(nx), float(ny), float(nz))
+    struct.pack_into(">3i", header, 64, 1, 2, 3)
+    data = np.array([[1000.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=">f4")
+    path.write_bytes(bytes(header) + data.tobytes(order="C"))
+
+    inspection = inspect_mrc(path)
+    preview = MrcPreviewSource(path, inspection).get_frame_preview(0, max_size=16)
+    pixels = np.asarray(preview.image)
+
+    assert inspection.endian == ">"
+    assert inspection.dtype == np.dtype(">f4")
+    assert any("big-endian" in warning for warning in inspection.warnings)
     assert pixels[0, 0] == pixels.max()
     assert pixels[-1, 0] < pixels[0, 0]
 
@@ -384,6 +468,7 @@ def _write_fei2_mrc(
     *,
     metadata_size: int,
     documented_fields: bool = False,
+    pixel_size_m: float | None = None,
 ) -> None:
     header = bytearray(MRC_HEADER_BYTES)
     nx, ny, nz, mode = 4, 4, len(angles), 2
@@ -454,9 +539,16 @@ def _write_fei2_mrc(
             struct.pack_into("<d", extended, base + 124, -2.3e-6)
             struct.pack_into("<d", extended, base + 132, 3.4e-6)
             struct.pack_into("<d", extended, base + 140, 12.0)
-        struct.pack_into("<d", extended, base + 156, 1.5e-10 if documented_fields else 1.0e-10)
+        pixel_size = (
+            pixel_size_m
+            if pixel_size_m is not None
+            else 1.5e-10
+            if documented_fields
+            else 1.0e-10
+        )
+        struct.pack_into("<d", extended, base + 156, pixel_size)
         if documented_fields:
-            struct.pack_into("<d", extended, base + 164, 1.5e-10)
+            struct.pack_into("<d", extended, base + 164, pixel_size)
             struct.pack_into("<d", extended, base + 220, -2.0e-6)
             struct.pack_into("<d", extended, base + 236, -1.5e-6)
             struct.pack_into("<i", extended, base + 284, 1)

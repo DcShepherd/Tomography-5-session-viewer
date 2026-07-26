@@ -8,10 +8,10 @@ from tomography_session_browser.ui.session_presenter import (
     DoseInformationPlotModel,
     dose_information_point_tooltip,
 )
-from tomography_session_browser.ui.widgets.applied_defocus_plot import AppliedDefocusScatterPlot
+from tomography_session_browser.ui.widgets.defocus_plot import DefocusScatterPlot
 
 
-class DoseInformationScatterPlot(AppliedDefocusScatterPlot):
+class DoseInformationScatterPlot(DefocusScatterPlot):
     """Theme-aware scatter plot for camera dose per tilt image."""
 
     def __init__(self, parent=None) -> None:
@@ -34,6 +34,12 @@ class DoseInformationScatterPlot(AppliedDefocusScatterPlot):
 
     def _format_y_tick(self, value: float) -> str:
         return f"{value:.1f}"
+
+    def _y_range(self, points: list[Any]) -> tuple[float, float]:
+        """Keep dose/fluence axes physically meaningful after chart padding."""
+
+        lower, upper = super()._y_range(points)
+        return max(0.0, lower), max(0.1, upper)
 
     def _empty_title(self) -> str:
         return "No camera-dose metadata available"

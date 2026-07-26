@@ -12,7 +12,14 @@ from tomography_session_browser.parsers.search_tile_parser import (
     _TileCandidate,
     _match_tile_from_search_map_projection,
 )
-from tomography_session_browser.services.marker_service import MarkerContext, atlas_markers, search_map_markers, search_tile_markers
+from tomography_session_browser.services.marker_service import (
+    MarkerContext,
+    _image_frame,
+    _mrc_pixel_size,
+    atlas_markers,
+    search_map_markers,
+    search_tile_markers,
+)
 
 
 def _mrc_metadata(
@@ -151,6 +158,57 @@ def _tile_candidate() -> _TileCandidate:
         image_size=(20, 20),
         pixel_size=1.0,
     )
+
+
+def test_mrc_pixel_size_uses_explicit_field_units() -> None:
+    raw_metres = MrcMetadata(
+        path=Path("raw.mrc"),
+        size_bytes=4,
+        frame_metadata=[{"raw_fields": {"pixel_size_x": 1.2e-6}}],
+    )
+    frame_angstrom = MrcMetadata(
+        path=Path("frame.mrc"),
+        size_bytes=4,
+        frame_metadata=[{"pixel_size": 12_000.0}],
+    )
+    voxel_angstrom = MrcMetadata(
+        path=Path("voxel.mrc"),
+        size_bytes=4,
+        voxel_size=(12_000.0, 12_000.0, None),
+    )
+
+    assert _mrc_pixel_size(raw_metres) == pytest.approx(1.2e-6)
+    assert _mrc_pixel_size(frame_angstrom) == pytest.approx(1.2e-6)
+    assert _mrc_pixel_size(voxel_angstrom) == pytest.approx(1.2e-6)
+
+
+def test_image_frame_diagnostic_is_debug_not_info(caplog: pytest.LogCaptureFixture) -> None:
+    overview = Overview(
+        id="overview",
+        name="Overview",
+        image_path=Path("overview.mrc"),
+        mrc_metadata=MrcMetadata(
+            path=Path("overview.mrc"),
+            size_bytes=4,
+            nx=10,
+            ny=10,
+            frame_metadata=[
+                {
+                    "stage_x": 0.0,
+                    "stage_y": 0.0,
+                    "raw_fields": {"pixel_size_x": 1e-6},
+                }
+            ],
+        ),
+    )
+
+    with caplog.at_level("DEBUG"):
+        frame = _image_frame(overview)
+
+    assert frame is not None
+    records = [record for record in caplog.records if record.message.startswith("image frame:")]
+    assert records
+    assert all(record.levelname == "DEBUG" for record in records)
 
 
 def test_atlas_tab_overview_and_search_map_regions_do_not_use_exposure_correction() -> None:

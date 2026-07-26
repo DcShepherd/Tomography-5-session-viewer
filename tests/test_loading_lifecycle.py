@@ -24,7 +24,7 @@ from tomography_session_browser.domain.models import (
 )
 from tomography_session_browser.ui import main_window
 from tomography_session_browser.ui.main_window import MainWindow, _prepare_session_ui_payload
-from tomography_session_browser.ui.widgets.applied_defocus_plot import AppliedDefocusScatterPlot
+from tomography_session_browser.ui.widgets.defocus_plot import DefocusScatterPlot
 from tomography_session_browser.ui.widgets.dose_information_plot import DoseInformationScatterPlot
 from tomography_session_browser.ui.widgets.session_dashboard import SessionDashboard
 import tomography_session_browser.ui.widgets.loading_overlay as loading_overlay_module
@@ -177,13 +177,13 @@ def test_dashboard_deferred_model_skips_plot_widgets_until_requested(tmp_path: P
     dashboard.set_model(model, defer_heavy_cards=True)
     app.processEvents()
 
-    assert dashboard.findChild(AppliedDefocusScatterPlot) is None
+    assert dashboard.findChild(DefocusScatterPlot) is None
     assert dashboard.findChild(DoseInformationScatterPlot) is None
 
     dashboard.set_model(model, defer_heavy_cards=False)
     app.processEvents()
 
-    assert dashboard.findChild(AppliedDefocusScatterPlot) is not None
+    assert dashboard.findChild(DefocusScatterPlot) is not None
 
 
 def test_loading_overlay_records_animation_timer_gaps(monkeypatch) -> None:

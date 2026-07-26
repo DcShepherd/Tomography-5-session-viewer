@@ -5,10 +5,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from tomography_session_browser.domain.models import Atlas, BatchPosition, Overview, SearchMap, SearchTile, TiltSeries
-from tomography_session_browser.services.batch_inference import (
-    batch_inference_key,
-    batch_inference_keys,
-    inferred_batch_label_for_tilt,
+from tomography_session_browser.services.batch_inference import inferred_batch_label_for_tilt
+from tomography_session_browser.services.tilt_series_validation import (
+    STATUS_FAILED,
+    validate_tilt_series,
 )
 
 
@@ -55,7 +55,9 @@ def resolve_tilt_series_navigation_targets(
     search_tile = _search_tile_for_tilt(tilt, batch, tiles)
     search_map = _search_map_for_tilt(tilt, batch, maps)
     overview = _overview_for_tilt(batch, search_map, overview_items)
-    inferred_label = None if batch is not None else inferred_batch_label_for_tilt(tilt)
+    inferred_label = None
+    if batch is None and validate_tilt_series(tilt).status == STATUS_FAILED:
+        inferred_label = inferred_batch_label_for_tilt(tilt)
     return TiltSeriesNavigationTargets(
         batch_position=batch,
         search_tile=search_tile,
@@ -82,14 +84,7 @@ def _batch_position_for_tilt(
     )
     if direct is not None:
         return direct
-    inferred_label = inferred_batch_label_for_tilt(tilt)
-    inferred_key = batch_inference_key(inferred_label)
-    if not inferred_key:
-        return None
-    return next(
-        (batch for batch in batch_positions if inferred_key in batch_inference_keys(batch)),
-        None,
-    )
+    return None
 
 
 def _search_map_for_tilt(
@@ -115,12 +110,13 @@ def _search_tile_for_tilt(
     batch: BatchPosition | None,
     search_tiles: tuple[SearchTile, ...],
 ) -> SearchTile | None:
-    direct = next(
-        (tile for tile in search_tiles if tilt.id in (tile.linked_tilt_series_ids or [])),
-        None,
-    )
-    if direct is not None:
-        return direct
+    direct = [
+        tile for tile in search_tiles if tilt.id in (tile.linked_tilt_series_ids or [])
+    ]
+    if len(direct) == 1:
+        return direct[0]
+    if len(direct) > 1:
+        return None
     if batch is not None and batch.linked_search_tile_id:
         linked = next(
             (tile for tile in search_tiles if tile.id == batch.linked_search_tile_id),
@@ -129,10 +125,9 @@ def _search_tile_for_tilt(
         if linked is not None:
             return linked
     if batch is not None:
-        return next(
-            (tile for tile in search_tiles if tile.batch_position_id == batch.id),
-            None,
-        )
+        candidates = [tile for tile in search_tiles if tile.batch_position_id == batch.id]
+        if len(candidates) == 1:
+            return candidates[0]
     return None
 
 

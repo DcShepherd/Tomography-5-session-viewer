@@ -19,6 +19,7 @@ from tomography_session_browser.services.marker_service import (
     reflect_point_through_image_center,
     search_map_markers,
 )
+from tomography_session_browser.services.timeline_service import datetime_sort_key
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,7 +483,12 @@ def _tilts_by_batch(
             out.setdefault(batch.id, []).append(tilt)
             known.add(tilt.id)
     for rows in out.values():
-        rows.sort(key=lambda tilt: (tilt.acquisition_time_start or "", natural_key(tilt.name or tilt.id)))
+        rows.sort(
+            key=lambda tilt: (
+                *datetime_sort_key(tilt.acquisition_time_start),
+                natural_key(tilt.name or tilt.id),
+            )
+        )
     return out
 
 

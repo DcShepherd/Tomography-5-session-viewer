@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt
@@ -18,21 +20,21 @@ from tomography_session_browser.domain.models import BatchPosition, MdocSection,
 from tomography_session_browser.reports.report_generator import _SessionContext, _aggregate_totals
 from tomography_session_browser.services.timeline_service import TimelineSegment, SessionTimeline, build_session_timeline
 from tomography_session_browser.ui.session_presenter import (
-    AppliedDefocusPlotModel,
-    AppliedDefocusPointModel,
     DashboardEntityScope,
+    DefocusPlotModel,
+    DefocusPointModel,
     DoseInformationPlotModel,
     DoseInformationPointModel,
-    applied_defocus_point_tooltip,
     build_linked_sample_group,
+    defocus_point_tooltip,
     dose_information_point_tooltip,
     session_counts,
     session_dashboard_model,
 )
 from tomography_session_browser.ui.image_viewer import ImagePreviewView
 from tomography_session_browser.ui.theme import current_palette
-from tomography_session_browser.ui.widgets.applied_defocus_plot import AppliedDefocusScatterPlot
 from tomography_session_browser.ui.widgets.dashboard_card import DASHBOARD_CARD_MARGINS
+from tomography_session_browser.ui.widgets.defocus_plot import DefocusScatterPlot
 from tomography_session_browser.ui.widgets.dose_information_plot import DoseInformationScatterPlot
 from tomography_session_browser.ui.widgets.session_dashboard import SessionDashboard
 from tomography_session_browser.ui.widgets.stat_card import StatCard
@@ -289,10 +291,10 @@ def test_timeline_status_stays_at_tilt_series_granularity(tmp_path: Path) -> Non
     assert model.timeline_items["ts-1"].status == "complete"
 
 
-def test_applied_defocus_model_uses_mdoc_defocus_and_time(tmp_path: Path) -> None:
+def test_defocus_readout_model_prefers_mrc_defocus_and_cross_checks_mdoc(tmp_path: Path) -> None:
     session = _defocus_session(tmp_path, include_times=True)
 
-    model = session_dashboard_model(session).applied_defocus
+    model = session_dashboard_model(session).defocus_readout
 
     assert model.x_mode == "absolute_time"
     assert model.x_axis_label == "Acquisition time"
@@ -301,46 +303,124 @@ def test_applied_defocus_model_uses_mdoc_defocus_and_time(tmp_path: Path) -> Non
     assert model.timestamp_tilt_series == 2
     assert len(model.points) == 4
     assert [point.frame_index for point in model.points] == [1, 2, 1, 2]
-    assert [point.applied_defocus_um for point in model.points] == [-2.0, -2.2, -3.0, -3.2]
-    assert model.points[0].metadata_source == "MDOC Defocus"
-    assert model.points[1].metadata_source == "MDOC TargetDefocus"
+    assert [point.defocus_um for point in model.points] == pytest.approx(
+        [-1.2, -1.4, -2.2, -2.4]
+    )
+    assert model.points[0].metadata_source == "MRC FEI extended header Defocus"
+    assert model.points[1].metadata_source == "MRC FEI extended header Defocus"
+    assert model.points[0].mdoc_defocus_um == pytest.approx(-1.196)
+    assert model.points[0].sources_agree is True
+    assert model.points[0].target_defocus_um == pytest.approx(-8.0)
+    assert model.points[0].application_applied_defocus_um == pytest.approx(-8.0)
     assert model.points[0].tilt_angle == -60.0
     assert model.points[0].tooltip is None
-    assert "not measured CTF defocus" in applied_defocus_point_tooltip(model.points[0])
+    tooltip = defocus_point_tooltip(model.points[0])
+    assert "Source: MRC FEI extended header Defocus" in tooltip
+    assert "MRC and MDOC Defocus agree within 0.01 µm" in tooltip
+    assert "TargetDefocus: -8 µm" in tooltip
+    assert "Application AppliedDefocus: -8 µm" in tooltip
+    assert "measured CTF defocus" in tooltip
 
 
-def test_applied_defocus_model_falls_back_to_frame_order_without_timestamps(tmp_path: Path) -> None:
+def test_defocus_readout_model_uses_mdoc_defocus_fallback(
+    tmp_path: Path,
+) -> None:
+    session = _defocus_session(tmp_path, include_times=True)
+    for sample in session.samples:
+        sample.tilt_series[0].mrc_metadata = None
+
+    model = session_dashboard_model(session).defocus_readout
+
+    assert [point.defocus_um for point in model.points] == pytest.approx(
+        [-1.196, -1.396, -2.196, -2.396]
+    )
+    assert {point.metadata_source for point in model.points} == {"MDOC Defocus fallback"}
+    assert model.defocus_tilt_series == 2
+
+
+def test_defocus_readout_angle_aligns_tomography5_mdoc_to_stack_order(
+    tmp_path: Path,
+) -> None:
+    session = _defocus_session(tmp_path, include_times=False)
+    tilt = session.samples[0].tilt_series[0]
+    for frame in tilt.mrc_metadata.frame_metadata:
+        frame["raw_fields"].pop("defocus")
+    tilt.sections.reverse()
+    tilt.metadata = {
+        "_sections": ["[Tomography 5]"],
+        "ImageFile": tilt.mrc_path.name,
+    }
+
+    model = session_dashboard_model(tilt).defocus_readout
+
+    assert [point.tilt_angle for point in model.points] == [-60.0, -58.0]
+    assert [point.defocus_um for point in model.points] == pytest.approx([-1.196, -1.396])
+
+
+def test_defocus_readout_tooltip_reports_mrc_mdoc_disagreement(
+    tmp_path: Path,
+) -> None:
+    tilt = _defocus_session(tmp_path, include_times=True).samples[0].tilt_series[0]
+    tilt.sections[0].metadata["Defocus"] = -3.0
+
+    point = session_dashboard_model(tilt).defocus_readout.points[0]
+    tooltip = defocus_point_tooltip(point)
+
+    assert point.defocus_um == pytest.approx(-1.2)
+    assert point.sources_agree is False
+    assert "MRC and MDOC Defocus differ by 1.8 µm" in tooltip
+    assert "the MRC value is plotted" in tooltip
+
+
+def test_defocus_readout_model_does_not_substitute_target_or_applied_defocus(
+    tmp_path: Path,
+) -> None:
+    session = _defocus_session(tmp_path, include_times=True)
+    for sample in session.samples:
+        tilt = sample.tilt_series[0]
+        for section in tilt.sections:
+            section.metadata.pop("Defocus")
+        for frame in tilt.mrc_metadata.frame_metadata:
+            frame["raw_fields"].pop("defocus")
+
+    model = session_dashboard_model(session).defocus_readout
+
+    assert model.points == []
+    assert model.defocus_tilt_series == 0
+
+
+def test_defocus_readout_model_falls_back_to_frame_order_without_timestamps(tmp_path: Path) -> None:
     session = _defocus_session(tmp_path, include_times=False)
 
-    model = session_dashboard_model(session).applied_defocus
+    model = session_dashboard_model(session).defocus_readout
 
     assert model.x_mode == "frame_order"
     assert model.x_axis_label == "Frame order"
     assert model.note == "Acquisition timestamps unavailable; points are shown in frame order."
     assert [point.frame_order for point in model.points] == [1, 2, 3, 4]
-    assert "Frame order 1" in applied_defocus_point_tooltip(model.points[0])
+    assert "Frame order 1" in defocus_point_tooltip(model.points[0])
 
 
-def test_applied_defocus_model_omits_untimestamped_points_when_time_is_available(tmp_path: Path) -> None:
+def test_defocus_readout_model_omits_untimestamped_points_when_time_is_available(tmp_path: Path) -> None:
     session = _defocus_session(tmp_path, include_times=True)
     session.samples[1].tilt_series[0].sections[0].metadata.pop("DateTime")
     session.samples[1].tilt_series[0].sections[1].metadata.pop("DateTime")
 
-    model = session_dashboard_model(session).applied_defocus
+    model = session_dashboard_model(session).defocus_readout
 
     assert model.x_mode == "absolute_time"
     assert model.defocus_tilt_series == 2
     assert model.timestamp_tilt_series == 1
     assert len(model.points) == 2
-    assert model.note == "Timestamps available for 1 / 2 tilt series with applied defocus."
+    assert model.note == "Timestamps available for 1 / 2 tilt series with Defocus metadata."
 
 
-def test_applied_defocus_model_scopes_linked_group_and_single_tilt(tmp_path: Path) -> None:
+def test_defocus_readout_model_scopes_linked_group_and_single_tilt(tmp_path: Path) -> None:
     session = _defocus_session(tmp_path, include_times=True)
     group = build_linked_sample_group("Linked A", session.samples)
 
-    linked_model = session_dashboard_model(group).applied_defocus
-    single_model = session_dashboard_model(session.samples[0].tilt_series[0]).applied_defocus
+    linked_model = session_dashboard_model(group).defocus_readout
+    single_model = session_dashboard_model(session.samples[0].tilt_series[0]).defocus_readout
 
     assert {point.sample_name for point in linked_model.points} == {"Alpha", "Beta"}
     assert {point.linked_group_label for point in linked_model.points} == {"Linked A"}
@@ -452,11 +532,11 @@ def test_dose_information_model_scopes_linked_group_entity_scope_and_single_tilt
     assert {point.tilt_series_name for point in single_model.points} == {"alpha_ts"}
 
 
-def test_applied_defocus_widget_uses_adaptive_point_styles() -> None:
+def test_defocus_readout_widget_uses_adaptive_point_styles() -> None:
     _app()
-    plot = AppliedDefocusScatterPlot()
+    plot = DefocusScatterPlot()
 
-    assert plot.accessibleName() == "Applied defocus plot"
+    assert plot.accessibleName() == "Defocus readout plot"
     assert "Double-click" in plot.accessibleDescription()
 
     plot.set_model(_plot_model_with_points(500))
@@ -471,9 +551,9 @@ def test_applied_defocus_widget_uses_adaptive_point_styles() -> None:
     assert plot.color_for_label("Sample 00").name() == plot.color_for_label("Sample 00").name()
 
 
-def test_applied_defocus_uses_shared_timeline_time_formatter() -> None:
+def test_defocus_readout_uses_shared_timeline_time_formatter() -> None:
     _app()
-    plot = AppliedDefocusScatterPlot()
+    plot = DefocusScatterPlot()
     model = _plot_model_with_points(2)
     start = model.points[0].acquisition_time
     end = start + timedelta(hours=2, minutes=10)
@@ -488,9 +568,9 @@ def test_applied_defocus_uses_shared_timeline_time_formatter() -> None:
     assert plot._x_axis_label(model) == TIME_CHART_ELAPSED_AXIS_LABEL
 
 
-def test_applied_defocus_legend_sits_outside_plot_area() -> None:
+def test_defocus_readout_legend_sits_outside_plot_area() -> None:
     app = _app()
-    plot = AppliedDefocusScatterPlot()
+    plot = DefocusScatterPlot()
     plot.resize(1000, 320)
     plot.set_model(_plot_model_with_points(24, sample_count=12))
     app.processEvents()
@@ -508,9 +588,9 @@ def test_applied_defocus_legend_sits_outside_plot_area() -> None:
     assert not plot._last_y_axis_label_rect.intersects(plot._last_plot_rect)
 
 
-def test_applied_defocus_axis_titles_use_matching_fonts() -> None:
+def test_defocus_readout_axis_titles_use_matching_fonts() -> None:
     app = _app()
-    plot = AppliedDefocusScatterPlot()
+    plot = DefocusScatterPlot()
     plot.resize(900, 320)
     plot.set_model(_plot_model_with_points(12, sample_count=2))
     app.processEvents()
@@ -524,9 +604,9 @@ def test_applied_defocus_axis_titles_use_matching_fonts() -> None:
     assert plot._last_y_axis_label_font.bold() == plot._last_x_axis_label_font.bold()
 
 
-def test_applied_defocus_plot_emits_tilt_series_reference_on_double_click() -> None:
+def test_defocus_readout_plot_emits_tilt_series_reference_on_double_click() -> None:
     app = _app()
-    plot = AppliedDefocusScatterPlot()
+    plot = DefocusScatterPlot()
     plot.resize(900, 320)
     plot.set_model(_plot_model_with_points(1))
     app.processEvents()
@@ -544,9 +624,9 @@ def test_applied_defocus_plot_emits_tilt_series_reference_on_double_click() -> N
     assert emitted == [("ts-0", 1)]
 
 
-def test_applied_defocus_plot_emits_tilt_series_reference_on_single_click() -> None:
+def test_defocus_readout_plot_emits_tilt_series_reference_on_single_click() -> None:
     app = _app()
-    plot = AppliedDefocusScatterPlot()
+    plot = DefocusScatterPlot()
     plot.resize(900, 320)
     plot.set_model(_plot_model_with_points(1))
     app.processEvents()
@@ -588,6 +668,23 @@ def test_dose_information_plot_emits_tilt_series_reference_on_double_click() -> 
     assert emitted == [("dose-ts-0", 1)]
 
 
+def test_camera_dose_y_axis_never_displays_negative_padding() -> None:
+    _app()
+    plot = DoseInformationScatterPlot()
+    model = _dose_plot_model_with_points(2)
+    model.points[0].dose_e_per_angstrom2 = 0.02
+    model.points[1].dose_e_per_angstrom2 = 0.04
+
+    lower, upper = plot._y_range(model.points)
+    tick_labels = [
+        plot._format_y_tick(lower + ((upper - lower) * index / 4))
+        for index in range(5)
+    ]
+
+    assert lower == 0.0
+    assert all(not label.startswith("-") for label in tick_labels)
+
+
 def test_session_dashboard_relays_plot_click_and_double_click_requests(tmp_path: Path) -> None:
     app = _app()
     dashboard = SessionDashboard()
@@ -601,9 +698,9 @@ def test_session_dashboard_relays_plot_click_and_double_click_requests(tmp_path:
     dashboard.point_clicked.connect(lambda tilt_id, frame: clicked.append((tilt_id, frame)))
     dashboard.point_double_clicked.connect(lambda tilt_id, frame: emitted.append((tilt_id, frame)))
     dashboard.timeline_tilt_series_requested.connect(lambda tilt_id, frame: timeline.append((tilt_id, frame)))
-    dashboard.findChild(AppliedDefocusScatterPlot).pointClicked.emit("defocus-ts", 2)
+    dashboard.findChild(DefocusScatterPlot).pointClicked.emit("defocus-ts", 2)
     dashboard.findChild(DoseInformationScatterPlot).pointClicked.emit("dose-ts", 3)
-    dashboard.findChild(AppliedDefocusScatterPlot).pointDoubleClicked.emit("defocus-ts", 2)
+    dashboard.findChild(DefocusScatterPlot).pointDoubleClicked.emit("defocus-ts", 2)
     dashboard.findChild(DoseInformationScatterPlot).pointDoubleClicked.emit("dose-ts", 3)
     dashboard._timeline_segment_clicked("timeline-ts", 4)
 
@@ -653,17 +750,23 @@ def test_session_dashboard_stacks_timeline_and_defocus_full_width(tmp_path: Path
     ]
     assert "ACQUISITION TIMELINE" in timeline_text
     assert widgets[2].minimumHeight() >= 260
-    assert "APPLIED DEFOCUS" in defocus_text
-    assert "MDOC target defocus, not measured CTF" in defocus_text
+    assert "DEFOCUS READOUT" in defocus_text
+    assert "Per-image MRC Defocus, with angle-aligned MDOC fallback" in defocus_text
     assert "0 / 6 tilt series" in defocus_text
+    defocus_subtitle = next(
+        label
+        for label in widgets[3].findChildren(QLabel)
+        if label.text() == "Per-image MRC Defocus, with angle-aligned MDOC fallback"
+    )
+    assert "TargetDefocus, application AppliedDefocus" in defocus_subtitle.toolTip()
     assert widgets[3].minimumHeight() >= 360
-    assert widgets[3].findChild(AppliedDefocusScatterPlot).minimumHeight() >= 300
+    assert widgets[3].findChild(DefocusScatterPlot).minimumHeight() >= 300
     assert "BATCH POSITIONS" in lower_text
     assert "SEARCH MAPS OVERVIEW" in lower_text
     assert "WARNINGS" in lower_text
 
     timeline_title_top, timeline_title_height = _card_title_geometry(widgets[2], "ACQUISITION TIMELINE")
-    defocus_title_top, defocus_title_height = _card_title_geometry(widgets[3], "APPLIED DEFOCUS")
+    defocus_title_top, defocus_title_height = _card_title_geometry(widgets[3], "DEFOCUS READOUT")
     assert timeline_title_top == defocus_title_top
     assert timeline_title_height == defocus_title_height
 
@@ -967,7 +1070,7 @@ def test_summary_plot_single_click_toggles_highlight_without_rebuild(monkeypatch
     monkeypatch.setattr(main_window.ViewerTab, "_load_value", lambda self, value, slice_index: setattr(self, "_current_value", value))
     window._render_dashboard_for_scope()
     app.processEvents()
-    first_plot = window.session_dashboard.findChild(AppliedDefocusScatterPlot)
+    first_plot = window.session_dashboard.findChild(DefocusScatterPlot)
 
     window._on_dashboard_plot_point_clicked(first.id, 1)
     assert window._dashboard_highlighted_tilt_series_id is None
@@ -975,7 +1078,7 @@ def test_summary_plot_single_click_toggles_highlight_without_rebuild(monkeypatch
     window._apply_pending_dashboard_point_click()
 
     assert window._dashboard_highlighted_tilt_series_id == first.id
-    assert window.session_dashboard.findChild(AppliedDefocusScatterPlot) is first_plot
+    assert window.session_dashboard.findChild(DefocusScatterPlot) is first_plot
 
     window._on_dashboard_plot_point_clicked(second.id, 1)
     window._dashboard_point_click_timer.stop()
@@ -1019,7 +1122,7 @@ def test_summary_plot_double_click_cancels_pending_highlight(monkeypatch, tmp_pa
 
 def test_scatter_plot_fades_unhighlighted_points() -> None:
     _app()
-    plot = AppliedDefocusScatterPlot()
+    plot = DefocusScatterPlot()
     model = _plot_model_with_points(2)
     plot.set_model(model)
     base_alpha = plot.point_style()[1]
@@ -1499,16 +1602,28 @@ def _defocus_session(tmp_path: Path, *, include_times: bool) -> Session:
         mrc_path = sample.path / f"{sample.name.lower()}_ts.mrc"
         mrc_path.write_bytes(b"stub")
         sections = []
+        frame_metadata = []
         for frame in range(2):
+            mrc_defocus_um = -1.2 - sample_index - frame * 0.2
             metadata = {
                 "TiltAngle": -60.0 + frame * 2.0,
-                "Defocus" if frame == 0 else "TargetDefocus": -2.0 - sample_index - frame * 0.2,
+                "Defocus": mrc_defocus_um + 0.004,
+                "TargetDefocus": -8.0,
             }
             if include_times:
                 metadata["DateTime"] = (start + timedelta(minutes=sample_index * 10 + frame)).strftime(
                     "%d-%b-%Y  %H:%M:%S"
                 )
             sections.append(MdocSection(z_value=frame, metadata=metadata))
+            frame_metadata.append(
+                {
+                    "tilt_angle": -60.0 + frame * 2.0,
+                    "raw_fields": {
+                        "defocus": mrc_defocus_um * 1e-6,
+                        "applied_defocus": -8.0e-6,
+                    },
+                }
+            )
         sample.tilt_series.append(
             TiltSeries(
                 id=f"{sample.name.lower()}-ts",
@@ -1517,6 +1632,12 @@ def _defocus_session(tmp_path: Path, *, include_times: bool) -> Session:
                 mdoc_path=mrc_path.with_suffix(".mdoc"),
                 sections=sections,
                 number_of_frames=len(sections),
+                mrc_metadata=MrcMetadata(
+                    path=mrc_path,
+                    size_bytes=4,
+                    nz=len(sections),
+                    frame_metadata=frame_metadata,
+                ),
             )
         )
 
@@ -1594,10 +1715,10 @@ def _dose_session(tmp_path: Path, *, include_times: bool) -> Session:
     )
 
 
-def _plot_model_with_points(count: int, *, sample_count: int = 1) -> AppliedDefocusPlotModel:
+def _plot_model_with_points(count: int, *, sample_count: int = 1) -> DefocusPlotModel:
     start = datetime(2026, 1, 1, 14, 0, 0)
     points = [
-        AppliedDefocusPointModel(
+        DefocusPointModel(
             sample_name=f"Sample {index % sample_count:02d}",
             data_collection_name=f"Sample {index % sample_count:02d}",
             linked_group_label=None,
@@ -1608,15 +1729,15 @@ def _plot_model_with_points(count: int, *, sample_count: int = 1) -> AppliedDefo
             tilt_angle=None,
             acquisition_time=start + timedelta(seconds=index),
             frame_order=index + 1,
-            applied_defocus_um=-2.0,
-            metadata_source="MDOC Defocus",
+            defocus_um=-2.0,
+            metadata_source="MRC FEI extended header Defocus",
             has_absolute_time=True,
             has_relative_time=False,
-            tooltip="Values are microscope-applied defocus from MDOC metadata, not measured CTF defocus.",
+            tooltip=None,
         )
         for index in range(count)
     ]
-    return AppliedDefocusPlotModel(
+    return DefocusPlotModel(
         points=points,
         total_tilt_series=count,
         defocus_tilt_series=count,

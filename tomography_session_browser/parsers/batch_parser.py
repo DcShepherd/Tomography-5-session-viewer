@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -399,6 +400,7 @@ def _exposure_mrc_beam_diameter(position: BatchPosition) -> float | None:
     if metadata is None:
         return None
     frames = getattr(metadata, "frame_metadata", None) or []
+    values: list[float] = []
     for frame in frames:
         raw_fields = frame.get("raw_fields") if isinstance(frame, dict) else getattr(frame, "raw_fields", None)
         if not raw_fields:
@@ -408,9 +410,22 @@ def _exposure_mrc_beam_diameter(position: BatchPosition) -> float | None:
             numeric = float(value) if value is not None else None
         except (TypeError, ValueError):
             numeric = None
-        if numeric is not None and numeric > 0:
-            return numeric
-    return None
+        if numeric is not None and math.isfinite(numeric) and numeric > 0:
+            values.append(numeric)
+    if not values:
+        return None
+    reference = values[0]
+    if any(
+        not math.isclose(value, reference, rel_tol=1e-6, abs_tol=1e-12)
+        for value in values[1:]
+    ):
+        text = ", ".join(f"{value:g}" for value in sorted(set(values)))
+        position.warnings.append(
+            "Exposure MRC FEI extended header has inconsistent illuminated_area "
+            f"values: {text}; beam diameter was not applied."
+        )
+        return None
+    return reference
 
 
 def _exposure_mrc_source_label(position: BatchPosition) -> str:

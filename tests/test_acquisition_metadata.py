@@ -7,7 +7,7 @@ import pytest
 
 from tomography_session_browser.domain.models import BatchPosition, MdocSection, MrcMetadata, Sample, TiltSeries
 from tomography_session_browser.parsers import batch_parser
-from tomography_session_browser.parsers.batch_parser import parse_batch_folder
+from tomography_session_browser.parsers.batch_parser import _exposure_mrc_beam_diameter, parse_batch_folder
 from tomography_session_browser.parsers.xml_parser import find_first
 from tomography_session_browser.reports.report_generator import _acquisition_settings_table
 from tomography_session_browser.services.tilt_series_validation import TiltSeriesValidation
@@ -131,23 +131,110 @@ def test_batch_parser_ignores_nested_decoy_batch_position_parameters(tmp_path: P
     assert acquisition_setting_value(positions[0].metadata, SEARCH_SPOT_LABEL) == "8"
 
 
-def test_scoped_xml_spot_indices_keep_search_and_acquisition_contexts_separate() -> None:
+def test_scoped_search_xml_prefers_microscope_optics_and_does_not_invent_acquisition_spot() -> None:
     settings = extract_acquisition_settings(
         {
             "CustomData": {
                 "KeyValueOfstringanyType": {
                     "Key": "BackwardAlignmentTransformation",
-                    "Value": {"Optics": {"SpotIndex": 8}},
+                    "Value": {"Optics": {"SpotIndex": 8, "ProbeMode": "MicroProbe"}},
                 }
             },
-            "microscopeData": {"optics": {"SpotIndex": 6}},
+            "microscopeData": {"optics": {"SpotIndex": 6, "ProbeMode": "NanoProbe"}},
         },
         source="search.xml",
     )
 
-    assert settings[SEARCH_SPOT_LABEL].value == "8"
-    assert settings[ACQUISITION_SPOT_LABEL].value == "6"
-    assert settings[LEGACY_SPOT_LABEL].value == "6"
+    assert settings[SEARCH_SPOT_LABEL].value == "6"
+    assert settings[SEARCH_SPOT_LABEL].field_path == "microscopeData/optics/SpotIndex"
+    assert ACQUISITION_SPOT_LABEL not in settings
+    assert LEGACY_SPOT_LABEL not in settings
+    assert settings["Probe mode"].value == "Nanoprobe"
+
+
+def test_non_search_xml_keeps_microscope_optics_spot_as_acquisition_context() -> None:
+    settings = extract_acquisition_settings(
+        {"microscopeData": {"optics": {"SpotIndex": 7}}},
+        source="exposure.xml",
+    )
+
+    assert SEARCH_SPOT_LABEL not in settings
+    assert settings[ACQUISITION_SPOT_LABEL].value == "7"
+    assert settings[LEGACY_SPOT_LABEL].value == "7"
+
+
+def test_search_xml_optics_agree_with_search_mrc_without_false_conflicts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = tmp_path / "Batch"
+    batch.mkdir()
+    (batch / "BatchPositionsList.xml").write_text(
+        """
+        <Root>
+          <BatchPositionParameters>
+            <Name>vellio_2</Name>
+          </BatchPositionParameters>
+        </Root>
+        """,
+        encoding="utf-8",
+    )
+    (batch / "vellio_2_Search.xml").write_text(
+        """
+        <MicroscopeImage>
+          <CustomData>
+            <KeyValueOfstringanyType>
+              <Key>BackwardAlignmentTransformation</Key>
+              <Value>
+                <Optics>
+                  <SpotIndex>8</SpotIndex>
+                  <ProbeMode>MicroProbe</ProbeMode>
+                </Optics>
+              </Value>
+            </KeyValueOfstringanyType>
+          </CustomData>
+          <microscopeData>
+            <optics>
+              <SpotIndex>6</SpotIndex>
+              <ProbeMode>NanoProbe</ProbeMode>
+            </optics>
+          </microscopeData>
+        </MicroscopeImage>
+        """,
+        encoding="utf-8",
+    )
+    for name in ("vellio_2_Search.mrc", "vellio_2_Exposure.mrc"):
+        (batch / name).write_bytes(b"")
+
+    def _metadata(path: Path) -> MrcMetadata:
+        is_exposure = path.stem.endswith("_Exposure")
+        return MrcMetadata(
+            path=path,
+            size_bytes=0,
+            frame_metadata=[
+                {
+                    "raw_fields": {
+                        "spot_index": 7 if is_exposure else 6,
+                        "probe_mode": 1,
+                    }
+                }
+            ],
+        )
+
+    monkeypatch.setattr(batch_parser, "read_mrc_metadata", _metadata)
+
+    position = parse_batch_folder(batch)[0]
+
+    assert acquisition_setting_value(position.metadata, SEARCH_SPOT_LABEL) == "6"
+    assert acquisition_setting_source(position.metadata, SEARCH_SPOT_LABEL) == "vellio_2_Search.xml SpotIndex"
+    assert acquisition_setting_value(position.metadata, ACQUISITION_SPOT_LABEL) == "7"
+    assert acquisition_setting_source(position.metadata, ACQUISITION_SPOT_LABEL).endswith(
+        "_Exposure.mrc FEI extended header spot_index"
+    )
+    assert acquisition_setting_value(position.metadata, "Probe mode") == "Nanoprobe"
+    assert not any("Search spot size conflict:" in warning for warning in position.warnings)
+    assert not any("Acquisition spot size conflict:" in warning for warning in position.warnings)
+    assert not any("Probe mode conflict:" in warning for warning in position.warnings)
 
 
 def test_batch_parser_prefers_probe_mode_over_illumination_mode_and_fills_beam_diameter(tmp_path: Path) -> None:
@@ -187,6 +274,46 @@ def test_batch_parser_prefers_probe_mode_over_illumination_mode_and_fills_beam_d
     assert _beam_radius_pixels(positions[0], 2.731344928008639e-09) == pytest.approx(415.46097575278407)
     assert acquisition_setting_value(metadata, "Probe mode") == "Nanoprobe"
     assert acquisition_setting_source(metadata, "Probe mode") == "search.xml ProbeMode"
+
+
+def test_inconsistent_exposure_mrc_beam_diameters_are_not_applied(tmp_path: Path) -> None:
+    position = BatchPosition(
+        id="position-1",
+        name="Position 1",
+        exposure_mrc_metadata=MrcMetadata(
+            path=tmp_path / "Position_1_Exposure.mrc",
+            size_bytes=0,
+            frame_metadata=[
+                {"raw_fields": {"illuminated_area": 4.2e-6}},
+                {"raw_fields": {"illuminated_area": 5.0e-6}},
+            ],
+        ),
+    )
+
+    assert _exposure_mrc_beam_diameter(position) is None
+    assert any(
+        "inconsistent illuminated_area values" in warning
+        and "beam diameter was not applied" in warning
+        for warning in position.warnings
+    )
+
+
+def test_consistent_exposure_mrc_beam_diameters_are_applied(tmp_path: Path) -> None:
+    position = BatchPosition(
+        id="position-1",
+        name="Position 1",
+        exposure_mrc_metadata=MrcMetadata(
+            path=tmp_path / "Position_1_Exposure.mrc",
+            size_bytes=0,
+            frame_metadata=[
+                {"raw_fields": {"illuminated_area": 4.2e-6}},
+                {"raw_fields": {"illuminated_area": 4.2e-6}},
+            ],
+        ),
+    )
+
+    assert _exposure_mrc_beam_diameter(position) == pytest.approx(4.2e-6)
+    assert position.warnings == []
 
 
 @pytest.mark.parametrize(

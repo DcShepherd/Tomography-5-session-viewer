@@ -11,6 +11,7 @@ from tomography_session_browser.services.batch_inference import (
     batch_inference_keys,
     inferred_batch_label_for_tilt,
 )
+from tomography_session_browser.services.timeline_service import datetime_sort_key
 from tomography_session_browser.services.tilt_series_validation import (
     STATUS_COMPLETE,
     STATUS_FAILED,
@@ -362,7 +363,12 @@ def _tilt_series_for_batch(
         ):
             linked.append(tilt)
             seen.add(tilt.id)
-    linked.sort(key=lambda tilt: (tilt.acquisition_time_start or "", natural_key(tilt.name or tilt.id)))
+    linked.sort(
+        key=lambda tilt: (
+            *datetime_sort_key(tilt.acquisition_time_start),
+            natural_key(tilt.name or tilt.id),
+        )
+    )
     return linked
 
 

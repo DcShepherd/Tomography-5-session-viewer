@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import logging
 import math
 from pathlib import Path
-import struct
 import time
 
 import numpy as np
@@ -245,7 +244,7 @@ def inspect_mrc(path: Path) -> MrcInspection:
     main = parsed.main_header
     warnings = list(parsed.warnings)
     nx, ny, nz, mode = main.nx, main.ny, main.nz, main.mode
-    endian = "<"
+    endian = main.endian
     dtype = _numpy_dtype(mode, endian)
     if dtype is None:
         raise ValueError(f"MRC mode {mode} is not supported for preview.")
@@ -394,12 +393,6 @@ def _downsample_for_preview(frame: np.ndarray, shrink: int) -> np.ndarray:
     return blocks.mean(axis=(1, 3), dtype=np.float32)
 
 
-def _strided_shape(shape: tuple[int, int], max_size: int) -> tuple[int, int]:
-    shrink = _shrink_factor(shape, max_size)
-    height, width = shape
-    return (max(1, height // shrink), max(1, width // shrink))
-
-
 def _normalise_to_uint8(frame: np.ndarray) -> np.ndarray:
     numeric = np.asarray(frame)
     finite = numeric[np.isfinite(numeric)]
@@ -413,150 +406,6 @@ def _normalise_to_uint8(frame: np.ndarray) -> np.ndarray:
         return np.zeros(numeric.shape, dtype=np.uint8)
     scaled = (numeric.astype(np.float32, copy=False) - low) * (255.0 / (high - low))
     return np.ascontiguousarray(np.clip(scaled, 0, 255).astype(np.uint8))
-
-
-def _unpack_header_shape(header: bytes, warnings: list[str]) -> tuple[int | None, int | None, int | None, int | None]:
-    nx, ny, nz, mode, _endian = _unpack_header_shape_and_endian(header, warnings)
-    return nx, ny, nz, mode
-
-
-def _unpack_header_shape_and_endian(
-    header: bytes, warnings: list[str]
-) -> tuple[int | None, int | None, int | None, int | None, str]:
-    little = struct.unpack("<4i", header[:16])
-    if _looks_plausible(little):
-        return little[0], little[1], little[2], little[3], "<"
-
-    big = struct.unpack(">4i", header[:16])
-    if _looks_plausible(big):
-        warnings.append("MRC header appears to use big-endian byte order.")
-        return big[0], big[1], big[2], big[3], ">"
-
-    warnings.append("MRC header dimensions are not plausible.")
-    return None, None, None, None, "<"
-
-
-def _looks_plausible(values: tuple[int, int, int, int]) -> bool:
-    nx, ny, nz, mode = values
-    return 0 < nx < 1_000_000 and 0 < ny < 1_000_000 and 0 < nz < 1_000_000 and -10 <= mode <= 100
-
-
-def _extended_header_size(header: bytes, endian: str, warnings: list[str]) -> int:
-    try:
-        value = struct.unpack(f"{endian}i", header[92:96])[0]
-    except struct.error:
-        return 0
-    if value < 0:
-        warnings.append("MRC extended header size is negative; preview starts after the standard header.")
-        return 0
-    return value
-
-
-def _extended_header_type(header: bytes) -> str | None:
-    if len(header) < 108:
-        return None
-    raw = header[104:108].rstrip(b"\x00 ")
-    if not raw:
-        return None
-    try:
-        return raw.decode("ascii", errors="replace")
-    except UnicodeDecodeError:
-        return None
-
-
-def _extended_header_tilt_angles(
-    path: Path,
-    extended_header_bytes: int,
-    frame_count: int,
-    endian: str,
-    extended_header_type: str | None,
-    warnings: list[str],
-) -> list[float]:
-    if extended_header_bytes <= 0 or frame_count <= 1 or extended_header_bytes % frame_count != 0:
-        if extended_header_bytes > 0 and frame_count > 1:
-            warnings.append("MRC extended header size is not divisible by frame count; tilt angles unavailable.")
-        LOGGER.debug(
-            "MRC extended header angles unavailable path=%s frames=%s ext_bytes=%s ext_type=%s reason=%s",
-            path,
-            frame_count,
-            extended_header_bytes,
-            extended_header_type,
-            "no extended header or incompatible size",
-        )
-        return []
-    record_size = extended_header_bytes // frame_count
-    if record_size < 4:
-        return []
-    try:
-        with path.open("rb") as handle:
-            handle.seek(MRC_HEADER_BYTES)
-            data = handle.read(extended_header_bytes)
-    except OSError as exc:
-        warnings.append(f"Could not read MRC extended header: {exc}")
-        return []
-    if len(data) != extended_header_bytes:
-        warnings.append("MRC extended header is incomplete; tilt angles unavailable.")
-        return []
-
-    candidates: list[tuple[float, int, list[float]]] = []
-    for offset in range(0, record_size - 3, 4):
-        angles: list[float] = []
-        for index in range(frame_count):
-            start = (index * record_size) + offset
-            value = struct.unpack(f"{endian}f", data[start : start + 4])[0]
-            angles.append(float(value))
-        if _reliable_stack_order_angles(angles):
-            span = max(angles) - min(angles)
-            crosses_zero_bonus = 1000.0 if min(angles) <= 0 <= max(angles) else 0.0
-            candidates.append((crosses_zero_bonus + span, offset, angles))
-    if not candidates:
-        LOGGER.debug(
-            "MRC extended header tilt angles not found path=%s frames=%s ext_bytes=%s ext_type=%s record_size=%s",
-            path,
-            frame_count,
-            extended_header_bytes,
-            extended_header_type,
-            record_size,
-        )
-        return []
-    _score, offset, angles = sorted(candidates, key=lambda item: item[0], reverse=True)[0]
-    LOGGER.debug(
-        "MRC extended header tilt angles found path=%s frames=%s ext_bytes=%s ext_type=%s record_size=%s offset=%s first_angles=%s",
-        path,
-        frame_count,
-        extended_header_bytes,
-        extended_header_type,
-        record_size,
-        offset,
-        angles[:5],
-    )
-    return angles
-
-
-def _reliable_stack_order_angles(angles: list[float]) -> bool:
-    if len(angles) < 2:
-        return False
-    if not all(np.isfinite(angles)):
-        return False
-    if any(abs(angle) > 90 for angle in angles):
-        return False
-    span = max(angles) - min(angles)
-    if span < 1:
-        return False
-    return all(next_angle >= angle for angle, next_angle in zip(angles, angles[1:]))
-
-
-def _axis_mapping(header: bytes, endian: str) -> tuple[int | None, int | None, int | None]:
-    if len(header) < 76:
-        return None, None, None
-    return struct.unpack(f"{endian}3i", header[64:76])
-
-
-def _pixel_size(header: bytes, endian: str, nx: int) -> float | None:
-    if len(header) < 52 or nx <= 0:
-        return None
-    cell_x = struct.unpack(f"{endian}f", header[40:44])[0]
-    return cell_x / nx if cell_x > 0 else None
 
 
 def _numpy_dtype(mode: int, endian: str) -> np.dtype | None:

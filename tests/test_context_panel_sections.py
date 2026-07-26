@@ -31,7 +31,15 @@ from tomography_session_browser.services.acquisition_metadata import (
     LEGACY_SPOT_LABEL,
     SEARCH_SPOT_LABEL,
 )
-from tomography_session_browser.ui.session_presenter import describe_object
+from tomography_session_browser.services.tilt_series_validation import (
+    validate_session_tilt_series,
+)
+from tomography_session_browser.ui.main_window import MainWindow
+from tomography_session_browser.ui.session_presenter import (
+    _common_text,
+    _is_successful_tilt_series,
+    describe_object,
+)
 from tomography_session_browser.ui.widgets.metadata_panel import MetadataPanel
 
 
@@ -104,6 +112,102 @@ def test_tilt_series_description_uses_full_section_list() -> None:
     # Acquisition is conditional on detected settings — the simple fixture
     # above does not provide enough metadata, so it's allowed to be
     # absent. Validation / Quality similarly depend on the validator.
+
+
+def test_failed_tilt_quality_uses_validator_expected_count_not_actual_tilt_count(
+    tmp_path: Path,
+) -> None:
+    mrc_path = tmp_path / "vellio_1.mrc"
+    mrc_path.write_bytes(b"stub")
+    tilt = TiltSeries(
+        id="t",
+        name="vellio_1",
+        mrc_path=mrc_path,
+        mdoc_path=tmp_path / "vellio_1.mdoc",
+        tilt_count=1,
+        sections=[MdocSection(z_value=0, metadata={"TiltAngle": -51.0})],
+        mrc_metadata=MrcMetadata(
+            path=mrc_path,
+            size_bytes=4,
+            nz=1,
+            frame_metadata=[
+                {
+                    "raw_fields": {
+                        "start_tilt_angle": -51.0,
+                        "end_tilt_angle": 51.0,
+                        "tilt_per_image": 3.0,
+                    }
+                }
+            ],
+        ),
+    )
+
+    text = describe_object(tilt)
+
+    assert "Status: FAILED" in text
+    assert "Tilt images: 1 / 35 expected" in text
+    assert "Sections: 1 of 35 expected (partial)" in text
+    assert "Sections: 1 (complete)" not in text
+
+
+def test_context_panel_uses_same_session_majority_expected_count_as_list_row(
+    tmp_path: Path,
+) -> None:
+    _app()
+    failed_path = tmp_path / "vellio_1.mrc"
+    failed_path.write_bytes(b"stub")
+    failed = TiltSeries(
+        id="failed",
+        name="vellio_1",
+        mrc_path=failed_path,
+        tilt_count=1,
+        sections=[MdocSection(z_value=0, metadata={"TiltAngle": -51.0})],
+    )
+    complete = TiltSeries(
+        id="complete",
+        name="vellio_2",
+        mrc_path=tmp_path / "vellio_2.mrc",
+        tilt_count=35,
+        sections=[MdocSection(z_value=index) for index in range(35)],
+    )
+    validations = {
+        result.tilt_series_id: result
+        for result in validate_session_tilt_series([failed, complete])
+    }
+    window = MainWindow()
+    window._viewer_tilt_validations = validations
+
+    text = window._context_description(failed)
+    window.close()
+
+    assert "Tilt images: 1 / 35 expected" in text
+    assert "Expected source: inferred session majority" in text
+    assert "Sections: 1 of 35 expected (partial)" in text
+
+
+def test_common_numeric_summary_orders_values_by_number() -> None:
+    assert _common_text(["3 deg", "10 deg"]) == "3 deg to 10 deg"
+    assert _common_text(["6.78 A", "10.4 A"]) == "6.78 A to 10.4 A"
+    assert _common_text(["2", "10"]) == "2 to 10"
+    assert _common_text(["0.5 s", "2 s"]) == "0.5 s to 2 s"
+
+
+def test_successful_tilt_series_uses_validator_hard_failure_floor(tmp_path: Path) -> None:
+    two_images = TiltSeries(
+        id="two",
+        name="two",
+        mrc_path=tmp_path / "two.mrc",
+        sections=[MdocSection(z_value=index) for index in range(2)],
+    )
+    five_images = TiltSeries(
+        id="five",
+        name="five",
+        mrc_path=tmp_path / "five.mrc",
+        sections=[MdocSection(z_value=index) for index in range(5)],
+    )
+
+    assert _is_successful_tilt_series(two_images) is False
+    assert _is_successful_tilt_series(five_images) is True
 
 
 def test_search_map_description_uses_summary_files_sections() -> None:

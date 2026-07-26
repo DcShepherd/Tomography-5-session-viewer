@@ -3,9 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from reportlab.lib.units import inch
 
-from tomography_session_browser.domain.models import BatchPosition, MrcMetadata, Sample, SearchMap, TiltSeries
+from tomography_session_browser.domain.models import (
+    BatchPosition,
+    MdocSection,
+    MrcMetadata,
+    Sample,
+    SearchMap,
+    TiltSeries,
+)
 from tomography_session_browser.reports.report_generator import (
     _linked_batch_positions_for_search_map,
     _search_map_caption,
@@ -15,6 +23,10 @@ from tomography_session_browser.services.tilt_series_validation import (
     STATUS_COMPLETE,
     STATUS_FAILED,
     STATUS_INCOMPLETE,
+    STATUS_UNKNOWN,
+    SOURCE_INFERRED_MAJORITY,
+    SOURCE_NONE,
+    validate_session_tilt_series,
     validate_tilt_series,
 )
 
@@ -28,7 +40,7 @@ def _tilt_with_expected_count(tmp_path: Path, actual: int, expected: int = 35) -
         name=f"tilt_{actual}",
         mrc_path=mrc_path,
         tilt_range=(-34.0, max_tilt),
-        metadata={"TiltStep": step},
+        metadata={"TiltStart": -34.0, "TiltEnd": max_tilt, "TiltStep": step},
         mrc_metadata=MrcMetadata(path=mrc_path, size_bytes=4, nz=actual),
     )
 
@@ -55,6 +67,68 @@ def test_tilt_series_with_expected_image_count_is_complete(tmp_path: Path) -> No
     assert validation.status == STATUS_COMPLETE
     assert validation.actual_count == 35
     assert validation.expected_count == 35
+
+
+def test_acquired_angle_extent_is_observational_not_an_expected_count(
+    tmp_path: Path,
+) -> None:
+    truncated = TiltSeries(
+        id="truncated",
+        name="truncated",
+        mrc_path=tmp_path / "truncated.mrc",
+        tilt_range=(0.0, 12.0),
+        metadata={"TiltStep": 3.0},
+        sections=[
+            MdocSection(z_value=index, metadata={"TiltAngle": float(index * 3)})
+            for index in range(5)
+        ],
+    )
+
+    standalone = validate_tilt_series(truncated)
+
+    assert standalone.status == STATUS_UNKNOWN
+    assert standalone.expected_count is None
+    assert standalone.evidence_source == SOURCE_NONE
+    assert standalone.min_tilt == pytest.approx(0.0)
+    assert standalone.max_tilt == pytest.approx(12.0)
+    assert standalone.tilt_increment == pytest.approx(3.0)
+
+
+def test_session_majority_overrides_truncated_acquired_angle_extent(
+    tmp_path: Path,
+) -> None:
+    truncated = TiltSeries(
+        id="truncated",
+        name="truncated",
+        mrc_path=tmp_path / "truncated.mrc",
+        sections=[
+            MdocSection(z_value=index, metadata={"TiltAngle": float(index * 3)})
+            for index in range(5)
+        ],
+    )
+    complete = TiltSeries(
+        id="complete",
+        name="complete",
+        mrc_path=tmp_path / "complete.mrc",
+        sections=[MdocSection(z_value=index) for index in range(35)],
+    )
+    complete_peer = TiltSeries(
+        id="complete-peer",
+        name="complete-peer",
+        mrc_path=tmp_path / "complete-peer.mrc",
+        sections=[MdocSection(z_value=index) for index in range(35)],
+    )
+
+    validations = {
+        result.tilt_series_id: result
+        for result in validate_session_tilt_series([truncated, complete, complete_peer])
+    }
+
+    assert validations["truncated"].status == STATUS_INCOMPLETE
+    assert validations["truncated"].expected_count == 35
+    assert validations["truncated"].evidence_source == SOURCE_INFERRED_MAJORITY
+    assert validations["complete"].status == STATUS_COMPLETE
+    assert validations["complete"].expected_count == 35
 
 
 def test_search_map_caption_names_one_associated_batch_position(tmp_path: Path) -> None:

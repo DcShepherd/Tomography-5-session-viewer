@@ -7,19 +7,22 @@ target, so the dashboard previously reported these as "complete" because
 they had at least one mdoc section.
 
 This module supplies the missing layer: a small inference engine that
-combines four sources of evidence to decide whether a tilt series is
-``COMPLETE`` / ``INCOMPLETE`` / ``FAILED`` / ``UNKNOWN``.
+combines planned metadata and peer-series evidence to decide whether a tilt
+series is ``COMPLETE`` / ``INCOMPLETE`` / ``FAILED`` / ``UNKNOWN``.
 
 Sources, in priority order:
 
 1. **Explicit microscope/session metadata** - fields like ``TiltStart``,
    ``TiltEnd``, ``TiltStep`` if recorded.
-2. **MDOC tilt angles** - the angles stored per Z-section.
-3. **MRC extended-header tilt angles** - written by SerialEM / Tomo5 when no
-   mdoc is present.
-4. **Session-level majority vote** - when no per-series source is available,
+2. **Planned MRC extended-header scheme** - ``start_tilt_angle``,
+   ``end_tilt_angle`` and ``tilt_per_image`` when recorded.
+3. **Session-level majority vote** - when no per-series source is available,
    take the most common section count across the same data-collection
    group as the expected value.
+
+Acquired MDOC and MRC tilt angles remain useful observational evidence for the
+displayed range and increment, but never define the expected count: an aborted
+series only records the angles that were actually acquired.
 
 A "failed" verdict overrides everything else when the actual section count
 is below ``HARD_FAILURE_THRESHOLD``: fewer than five tilt images is unsalvageable
@@ -57,6 +60,8 @@ HARD_FAILURE_THRESHOLD = 5
 # Evidence-source labels used in the validation result so the UI can show the
 # user *why* a verdict was reached.
 SOURCE_SESSION_METADATA = "session_metadata"
+# Retained as a compatibility label for older serialized/test data. Acquired
+# MDOC angles are no longer emitted as an expected-count source.
 SOURCE_MDOC = "mdoc"
 SOURCE_MRC_EXTENDED = "mrc_extended_header"
 SOURCE_INFERRED_MAJORITY = "inferred_session_majority"
@@ -116,7 +121,7 @@ def validate_tilt_series(
     """
 
     name = tilt_series.name or tilt_series.id
-    actual = _actual_section_count(tilt_series)
+    actual = actual_tilt_count(tilt_series)
     expected, min_tilt, max_tilt, increment, source = _resolve_expected_count(
         tilt_series, session_majority_count
     )
@@ -168,9 +173,9 @@ def validate_session_tilt_series(
 
     series_list = list(tilt_series)
     counts = [
-        _actual_section_count(ts)
+        actual_tilt_count(ts)
         for ts in series_list
-        if _actual_section_count(ts) >= HARD_FAILURE_THRESHOLD
+        if actual_tilt_count(ts) >= HARD_FAILURE_THRESHOLD
     ]
     majority = _majority(counts)
 
@@ -194,7 +199,7 @@ def summarise_validations(validations: Iterable[TiltSeriesValidation]) -> dict[s
 # ----------------------------------------------------------------- internals
 
 
-def _actual_section_count(tilt_series: TiltSeries) -> int:
+def actual_tilt_count(tilt_series: TiltSeries) -> int:
     """Return the number of tilt images we believe are actually present.
 
     Prefers the parsed mdoc sections (the most reliable source — they are
@@ -213,7 +218,7 @@ def _actual_section_count(tilt_series: TiltSeries) -> int:
 def _resolve_expected_count(
     tilt_series: TiltSeries, session_majority: int | None
 ) -> tuple[int | None, float | None, float | None, float | None, str]:
-    """Walk the four evidence sources in priority order.
+    """Walk planned evidence sources, then the session-majority fallback.
 
     Returns ``(expected_count, min_tilt, max_tilt, increment, source_label)``.
     Any of the float values may be ``None`` even on a successful classification
@@ -230,21 +235,19 @@ def _resolve_expected_count(
     if mrc_plan_count is not None:
         return mrc_plan_count, min_tilt, max_tilt, increment, SOURCE_MRC_EXTENDED
 
-    # --- 3. mdoc sections --------------------------------------------------
-    mdoc_count, min_tilt, max_tilt, increment = _expected_from_mdoc(tilt_series)
-    if mdoc_count is not None:
-        return mdoc_count, min_tilt, max_tilt, increment, SOURCE_MDOC
+    # Acquired angles are observational. Preserve them for the displayed
+    # range/increment, but do not mistake a truncated acquisition extent for
+    # the planned scheme.
+    observed = _observed_from_mdoc(tilt_series)
+    if observed[0] is None and observed[1] is None:
+        observed = _observed_from_mrc(tilt_series)
+    min_tilt, max_tilt, increment = observed
 
-    # --- 4. MRC extended-header stack-order tilt angles --------------------
-    mrc_count, min_tilt, max_tilt, increment = _expected_from_mrc(tilt_series)
-    if mrc_count is not None:
-        return mrc_count, min_tilt, max_tilt, increment, SOURCE_MRC_EXTENDED
-
-    # --- 5. session majority ----------------------------------------------
+    # --- 3. session majority ----------------------------------------------
     if session_majority and session_majority >= HARD_FAILURE_THRESHOLD:
-        return session_majority, None, None, None, SOURCE_INFERRED_MAJORITY
+        return session_majority, min_tilt, max_tilt, increment, SOURCE_INFERRED_MAJORITY
 
-    return None, None, None, None, SOURCE_NONE
+    return None, min_tilt, max_tilt, increment, SOURCE_NONE
 
 
 def _expected_from_session_metadata(
@@ -253,9 +256,9 @@ def _expected_from_session_metadata(
     """Try to derive the expected count from session/microscope metadata.
 
     Tomography 5 stores the planned tilt scheme in the ``TiltStart`` /
-    ``TiltEnd`` / ``TiltStep`` keys (or close variants) on either the parsed
-    ``metadata`` dict or the model's own ``tilt_range`` field. We accept any
-    of the common spellings rather than locking onto one.
+    ``TiltEnd`` / ``TiltStep`` keys (or close variants) in parsed metadata.
+    ``tilt_series.tilt_range`` is deliberately excluded because the parser
+    derives it from acquired MDOC angles.
 
     The previous implementation also accepted ``tilt_series.tilt_count``
     as an "explicit expected count". The parser sets that field to
@@ -264,31 +267,20 @@ def _expected_from_session_metadata(
     ``expected = 1`` and never fell through to session-majority
     inference. We now require real planned-tilt metadata
     (range + increment), letting failed acquisitions drop into the
-    mdoc / mrc / session-majority chain so they pick up the correct
-    35-image planned count.
+    acquired-angle observation / session-majority chain so they pick up the
+    correct 35-image planned count.
     """
 
-    range_pair = getattr(tilt_series, "tilt_range", None)
     metadata = getattr(tilt_series, "metadata", None) or {}
 
-    min_tilt = max_tilt = None
-    if range_pair and len(range_pair) == 2:
-        min_tilt = _safe_float(range_pair[0])
-        max_tilt = _safe_float(range_pair[1])
-
-    # Look for explicit min/max overrides in the metadata.
-    if min_tilt is None:
-        min_tilt = _walk_float(metadata, ("MinTilt", "TiltStart", "tilt_start", "min_tilt"))
-    if max_tilt is None:
-        max_tilt = _walk_float(metadata, ("MaxTilt", "TiltEnd", "tilt_end", "max_tilt"))
+    min_tilt = _walk_float(metadata, ("MinTilt", "TiltStart", "tilt_start", "min_tilt"))
+    max_tilt = _walk_float(metadata, ("MaxTilt", "TiltEnd", "tilt_end", "max_tilt"))
     increment = _walk_float(
         metadata, ("TiltStep", "TiltIncrement", "tilt_step", "tilt_increment", "step")
     )
 
-    # Only return a count when we have real planned-acquisition data
-    # (range + increment). A spurious 1-section "range" that the
-    # parser reconstructs from the only-acquired image would otherwise
-    # short-circuit the inference for failed series.
+    # Only return a count when explicit metadata contains the complete planned
+    # range and increment.
     if (
         min_tilt is not None
         and max_tilt is not None
@@ -342,51 +334,31 @@ def _expected_from_mrc_planned_scheme(
     return None, None, None, None
 
 
-def _expected_from_mdoc(
+def _observed_from_mdoc(
     tilt_series: TiltSeries,
-) -> tuple[int | None, float | None, float | None, float | None]:
+) -> tuple[float | None, float | None, float | None]:
     angles = _mdoc_tilt_angles(tilt_series)
     if not angles:
-        return None, None, None, None
+        return None, None, None
     if len(angles) < 2:
-        return None, angles[0], angles[0], None
+        return angles[0], angles[0], None
     increment = _modal_increment(angles)
-    if increment is None or increment <= 0:
-        return None, min(angles), max(angles), None
-    try:
-        return (
-            calculate_expected_tilt_count(min(angles), max(angles), increment),
-            min(angles),
-            max(angles),
-            increment,
-        )
-    except ValueError:
-        return None, min(angles), max(angles), increment
+    return min(angles), max(angles), increment
 
 
-def _expected_from_mrc(
+def _observed_from_mrc(
     tilt_series: TiltSeries,
-) -> tuple[int | None, float | None, float | None, float | None]:
+) -> tuple[float | None, float | None, float | None]:
     metadata = getattr(tilt_series, "mrc_metadata", None)
     if metadata is None:
-        return None, None, None, None
+        return None, None, None
     angles = list(getattr(metadata, "tilt_angles", []) or [])
     if not angles:
-        return None, None, None, None
+        return None, None, None
     if len(angles) < 2:
-        return None, angles[0], angles[0], None
+        return angles[0], angles[0], None
     increment = _modal_increment(angles)
-    if increment is None or increment <= 0:
-        return None, min(angles), max(angles), None
-    try:
-        return (
-            calculate_expected_tilt_count(min(angles), max(angles), increment),
-            min(angles),
-            max(angles),
-            increment,
-        )
-    except ValueError:
-        return None, min(angles), max(angles), increment
+    return min(angles), max(angles), increment
 
 
 def _mdoc_tilt_angles(tilt_series: TiltSeries) -> list[float]:

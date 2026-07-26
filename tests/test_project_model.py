@@ -11,6 +11,7 @@ from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.models import Atlas, BatchPosition, Overview, Sample, SearchMap, SearchTile, Session, TiltSeries
 from tomography_session_browser.reports import ProjectReportGroup, build_session_report
 from tomography_session_browser.ui.project_model import build_project_tree_groups
+from tomography_session_browser.ui.session_linking import _atlas_lookup, _matching_atlas_sample
 
 
 def _atlas_session(name: str, root: str) -> Session:
@@ -103,6 +104,17 @@ def test_ambiguous_collection_link_stays_unresolved() -> None:
 
     assert [group.kind for group in groups] == ["atlas", "atlas", "unresolved"]
     assert "Ambiguous atlas link" in groups[-1].warnings[0]
+
+
+def test_atlas_link_suffix_must_start_at_path_component_boundary() -> None:
+    atlas = _atlas_session("Atlas_A", "C:/project")
+    collection = _collection_session(
+        "DataCollection_05",
+        "C:/collection",
+        "C:/archive/XAtlas_A/Sample1/Atlas/Atlas.dm",
+    )
+
+    assert _matching_atlas_sample(collection.samples[0], _atlas_lookup([atlas])) is None
 
 
 def test_custom_project_group_name_is_display_only() -> None:

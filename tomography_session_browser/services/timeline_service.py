@@ -12,7 +12,8 @@ derived.
 
 Public API:
 
-* ``parse_section_datetime(section_metadata)`` — best-effort parser for the
+* ``parse_datetime(value)`` — shared best-effort parser for recorded times.
+* ``parse_section_datetime(section_metadata)`` — extracts and parses the
   several ``DateTime`` formats SerialEM / Tomo5 mdoc files use.
 * ``build_acquisition_timeline(tilt_series)`` — collapses one tilt-series
   into a span (start, end, sampled times).
@@ -27,7 +28,7 @@ Pure functions, no UI imports.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from tomography_session_browser.domain.models import Sample, Session, TiltSeries
@@ -103,15 +104,21 @@ class SessionTimeline:
         return max(seg.end for seg in self.segments)
 
 
-def parse_section_datetime(metadata: dict[str, Any] | None) -> datetime | None:
-    """Best-effort parser for the ``DateTime`` field in an mdoc section."""
+def parse_datetime(value: Any) -> datetime | None:
+    """Parse a Tomography 5 / SerialEM timestamp into comparable local time.
 
-    if not metadata:
+    Offset-aware ISO values are normalised to naive UTC so callers can safely
+    sort them alongside the predominantly offset-free microscope timestamps.
+    """
+
+    if value is None:
         return None
-    raw = metadata.get("DateTime") or metadata.get("datetime") or metadata.get("date_time")
-    if raw is None:
-        return None
-    text = str(raw).strip()
+    if isinstance(value, datetime):
+        parsed = value
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    text = str(value).strip()
     if not text:
         return None
     for fmt in _DATETIME_FORMATS:
@@ -121,9 +128,28 @@ def parse_section_datetime(metadata: dict[str, Any] | None) -> datetime | None:
             continue
     # Last-ditch: try ISO 8601 directly. ``fromisoformat`` is permissive on 3.11+.
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def datetime_sort_key(value: Any) -> tuple[bool, datetime]:
+    """Return a chronological key with missing/malformed values sorted last."""
+
+    parsed = parse_datetime(value)
+    return parsed is None, parsed or datetime.max
+
+
+def parse_section_datetime(metadata: dict[str, Any] | None) -> datetime | None:
+    """Best-effort parser for the ``DateTime`` field in an mdoc section."""
+
+    if not metadata:
+        return None
+    raw = metadata.get("DateTime") or metadata.get("datetime") or metadata.get("date_time")
+    return parse_datetime(raw)
 
 
 def build_acquisition_timeline(tilt_series: TiltSeries) -> TimelineSegment | None:

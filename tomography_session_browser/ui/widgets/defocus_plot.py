@@ -1,7 +1,7 @@
-"""Applied-defocus scatter plot for the Session dashboard.
+"""Per-image Defocus scatter plot for the Session dashboard.
 
 The widget is deliberately presentational: it renders
-``AppliedDefocusPlotModel`` records prepared by the presenter and never reads
+``DefocusPlotModel`` records prepared by the presenter and never reads
 MDOC files itself.
 """
 
@@ -17,10 +17,7 @@ from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
-from tomography_session_browser.ui.session_presenter import (
-    AppliedDefocusPlotModel,
-    applied_defocus_point_tooltip,
-)
+from tomography_session_browser.ui.session_presenter import DefocusPlotModel, defocus_point_tooltip
 from tomography_session_browser.ui.widgets.time_chart import (
     TIME_CHART_AXIS_LABEL_GAP,
     TIME_CHART_BOTTOM_AXIS_SPACE,
@@ -36,8 +33,8 @@ from tomography_session_browser.ui.widgets.time_chart import (
 LOGGER = logging.getLogger(__name__)
 
 
-class AppliedDefocusScatterPlot(QWidget):
-    """Theme-aware scatter plot for microscope-applied MDOC defocus values."""
+class DefocusScatterPlot(QWidget):
+    """Theme-aware scatter plot for per-image MRC/MDOC Defocus values."""
 
     pointClicked = Signal(str, object)  # tilt_series_id, 1-based frame_index | None
     pointDoubleClicked = Signal(str, object)  # tilt_series_id, 1-based frame_index | None
@@ -57,15 +54,15 @@ class AppliedDefocusScatterPlot(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAccessibleName("Applied defocus plot")
+        self.setAccessibleName("Defocus readout plot")
         self.setAccessibleDescription(
-            "Scatter plot of per-image microscope-applied defocus values. "
+            "Scatter plot of per-image Defocus metadata values. "
             "Double-click a point to open the corresponding tilt series frame."
         )
 
     # ------------------------------------------------------------------ API
 
-    def set_model(self, model: AppliedDefocusPlotModel | None) -> None:
+    def set_model(self, model: DefocusPlotModel | None) -> None:
         self._model = model
         self.update()
 
@@ -86,22 +83,22 @@ class AppliedDefocusScatterPlot(QWidget):
         return _color_for_label(label, self._series_palette())
 
     def _point_value(self, point: Any) -> float:
-        return point.applied_defocus_um
+        return point.defocus_um
 
     def _y_axis_label_text(self) -> str:
-        return "Applied defocus (µm)"
+        return "Defocus (µm)"
 
     def _format_y_tick(self, value: float) -> str:
         return f"{value:+.1f}"
 
     def _empty_title(self) -> str:
-        return "No applied-defocus metadata available"
+        return "No Defocus metadata available"
 
     def _empty_detail(self) -> str:
-        return "MDOC defocus values were not found for this selection."
+        return "Per-image MRC or MDOC Defocus values were not found for this selection."
 
     def _point_tooltip(self, point: Any) -> str:
-        return applied_defocus_point_tooltip(point)
+        return defocus_point_tooltip(point)
 
     def _axis_label_font(self) -> QFont:
         """Font shared by the horizontal and vertical axis titles."""
@@ -152,7 +149,7 @@ class AppliedDefocusScatterPlot(QWidget):
         self,
         painter: QPainter,
         plot: QRectF,
-        model: AppliedDefocusPlotModel,
+        model: DefocusPlotModel,
         x_min: float,
         x_max: float,
         y_min: float,
@@ -238,7 +235,7 @@ class AppliedDefocusScatterPlot(QWidget):
         self,
         painter: QPainter,
         plot: QRectF,
-        model: AppliedDefocusPlotModel,
+        model: DefocusPlotModel,
         x_min: float,
         x_max: float,
         y_min: float,
@@ -290,7 +287,7 @@ class AppliedDefocusScatterPlot(QWidget):
         self,
         painter: QPainter,
         legend_rect: QRectF,
-        model: AppliedDefocusPlotModel,
+        model: DefocusPlotModel,
         colors: dict[str, QColor],
     ) -> None:
         self._last_legend_rect = QRectF(legend_rect)
@@ -404,7 +401,7 @@ class AppliedDefocusScatterPlot(QWidget):
 
     # --------------------------------------------------------------- geometry
 
-    def _plot_rect(self, painter: QPainter, model: AppliedDefocusPlotModel) -> QRectF:
+    def _plot_rect(self, painter: QPainter, model: DefocusPlotModel) -> QRectF:
         metrics = painter.fontMetrics()
         left = max(TIME_CHART_LEFT_GUTTER, metrics.horizontalAdvance("-99.9") + 38)
         legend_height = self._legend_height(painter, model)
@@ -420,14 +417,14 @@ class AppliedDefocusScatterPlot(QWidget):
         self,
         painter: QPainter,
         plot: QRectF,
-        model: AppliedDefocusPlotModel,
+        model: DefocusPlotModel,
     ) -> QRectF:
         height = self._legend_height(painter, model)
         if height <= 0:
             return QRectF()
         return QRectF(plot.left(), TIME_CHART_TOP, plot.width(), height - 4)
 
-    def _legend_height(self, painter: QPainter, model: AppliedDefocusPlotModel) -> int:
+    def _legend_height(self, painter: QPainter, model: DefocusPlotModel) -> int:
         labels = self._legend_labels(model)
         if not labels:
             return 0
@@ -436,13 +433,13 @@ class AppliedDefocusScatterPlot(QWidget):
         return rows * (metrics.height() + 3) + 5
 
     @staticmethod
-    def _legend_labels(model: AppliedDefocusPlotModel) -> list[str]:
+    def _legend_labels(model: DefocusPlotModel) -> list[str]:
         labels = sorted({point.sample_name for point in model.points})
         if len(labels) < 2 or len(labels) > 12:
             return []
         return labels
 
-    def _x_range(self, model: AppliedDefocusPlotModel) -> tuple[float, float]:
+    def _x_range(self, model: DefocusPlotModel) -> tuple[float, float]:
         values = [self._point_x(point, model) for point in model.points]
         if not values:
             return 0.0, 1.0
@@ -464,12 +461,12 @@ class AppliedDefocusScatterPlot(QWidget):
         hi += pad
         return floor(lo * 10) / 10, ceil(hi * 10) / 10
 
-    def _point_x(self, point: Any, model: AppliedDefocusPlotModel) -> float:
+    def _point_x(self, point: Any, model: DefocusPlotModel) -> float:
         if model.x_mode == "absolute_time" and point.acquisition_time is not None:
             return point.acquisition_time.timestamp()
         return float(point.frame_order)
 
-    def _x_tick_label(self, model: AppliedDefocusPlotModel, value: float, start: float, end: float) -> str:
+    def _x_tick_label(self, model: DefocusPlotModel, value: float, start: float, end: float) -> str:
         if model.x_mode != "absolute_time":
             return str(int(round(value)))
         dt = datetime.fromtimestamp(value)
@@ -478,7 +475,7 @@ class AppliedDefocusScatterPlot(QWidget):
         return format_time_axis_tick(dt, start_dt, end_dt)
 
     @staticmethod
-    def _x_axis_label(model: AppliedDefocusPlotModel) -> str:
+    def _x_axis_label(model: DefocusPlotModel) -> str:
         if model.x_mode == "absolute_time":
             return TIME_CHART_ELAPSED_AXIS_LABEL
         return model.x_axis_label

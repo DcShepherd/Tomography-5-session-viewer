@@ -383,6 +383,7 @@ def _extract_spot_index_settings(
     source: str,
     acquisition_scope: bool,
 ) -> dict[str, AcquisitionSetting]:
+    search_xml_scope = _is_search_xml_source(source)
     candidates: dict[str, list[tuple[int, int, AcquisitionSetting]]] = {
         SEARCH_SPOT_LABEL: [],
         ACQUISITION_SPOT_LABEL: [],
@@ -396,6 +397,7 @@ def _extract_spot_index_settings(
             field,
             field_path,
             acquisition_scope=acquisition_scope,
+            search_xml_scope=search_xml_scope,
         )
         if context is None:
             continue
@@ -422,6 +424,7 @@ def _extract_spot_index_settings(
             field,
             field_path,
             acquisition_scope=acquisition_scope,
+            search_xml_scope=search_xml_scope,
         )
         if context is None:
             continue
@@ -453,11 +456,12 @@ def _extract_spot_index_settings(
 def _extract_probe_mode_setting(data: Mapping[str, Any], *, source: str) -> AcquisitionSetting | None:
     candidates: list[tuple[int, int, AcquisitionSetting]] = []
     order = 0
-    for field, value, _field_path in _iter_xml_key_values(data):
+    search_xml_scope = _is_search_xml_source(source)
+    for field, value, field_path in _iter_xml_key_values(data):
         text = _display_value(value)
         if text is None:
             continue
-        priority = _probe_mode_key_priority(field)
+        priority = _probe_mode_key_priority(field, field_path, search_xml_scope=search_xml_scope)
         if priority is None:
             continue
         candidates.append(
@@ -473,13 +477,13 @@ def _extract_probe_mode_setting(data: Mapping[str, Any], *, source: str) -> Acqu
             )
         )
         order += 1
-    for field, value, _field_path in _walk_key_values(data):
+    for field, value, field_path in _walk_key_values(data):
         if field in {"Key", "Value"}:
             continue
         text = _display_value(value)
         if text is None:
             continue
-        priority = _probe_mode_key_priority(field)
+        priority = _probe_mode_key_priority(field, field_path, search_xml_scope=search_xml_scope)
         if priority is None:
             continue
         candidates.append(
@@ -603,6 +607,7 @@ def _spot_index_context_priority(
     path: tuple[str, ...],
     *,
     acquisition_scope: bool,
+    search_xml_scope: bool,
 ) -> tuple[str, int] | None:
     normalised = _normalise_key(field)
     if "spotindex" not in normalised:
@@ -613,6 +618,16 @@ def _spot_index_context_priority(
     if any(token in normalised for token in ignored_tokens):
         return None
     if normalised == "searchspotindex" or "search" in normalised:
+        return SEARCH_SPOT_LABEL, 0
+    if (
+        search_xml_scope
+        and normalised == "spotindex"
+        and "microscopedata" in path_normalised
+        and "optics" in path_normalised
+    ):
+        # In a *_Search.xml, microscopeData/optics records the microscope
+        # state used for the Search image. It agrees with the Search MRC's FEI
+        # extended header and must not be relabelled as acquisition state.
         return SEARCH_SPOT_LABEL, 0
     if "backwardalignmenttransformation" in path_normalised and "optics" in path_normalised:
         return SEARCH_SPOT_LABEL, 1
@@ -629,19 +644,40 @@ def _spot_index_context_priority(
     return None
 
 
-def _probe_mode_key_priority(field: str) -> int | None:
+def _probe_mode_key_priority(
+    field: str,
+    path: tuple[str, ...],
+    *,
+    search_xml_scope: bool,
+) -> int | None:
     normalised = _normalise_key(field)
+    path_normalised = tuple(_normalise_key(part) for part in path)
+    if (
+        normalised.endswith("probemode")
+        and "illumination" not in normalised
+        and search_xml_scope
+        and "microscopedata" in path_normalised
+        and "optics" in path_normalised
+    ):
+        # The search-state snapshot for a Search image lives here. Give
+        # it precedence over CustomData alignment-transform optics.
+        return 0
     if normalised.endswith("acquisitionprobemode"):
         return 0
     if normalised.endswith("probemode") and "illumination" not in normalised:
-        return 0
-    if normalised.endswith("illuminationprobesubmode") or normalised.endswith("illuminationprobemode"):
         return 1
-    if normalised == "probe" or normalised.endswith("probe"):
+    if normalised.endswith("illuminationprobesubmode") or normalised.endswith("illuminationprobemode"):
         return 2
-    if normalised.endswith("illuminationmode"):
+    if normalised == "probe" or normalised.endswith("probe"):
         return 3
+    if normalised.endswith("illuminationmode"):
+        return 4
     return None
+
+
+def _is_search_xml_source(source: str) -> bool:
+    filename = source.replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    return filename == "search.xml" or filename.endswith("_search.xml")
 
 
 def _walk_key_values(value: Any, path: tuple[str, ...] = ()):

@@ -566,7 +566,7 @@ class TimelineStrip(QWidget):
         try:
             painter.setPen(color)
             painter.setFont(font)
-            # Match the Applied defocus card: keep the rotated axis title in
+            # Match the Defocus Readout card: keep the rotated axis title in
             # the left gutter, with numeric tick labels closer to the plot.
             x = max(axis_left + 8, axis_left + (strip_rect.left() - axis_left - metrics.height()) * 0.18)
             label_width = metrics.horizontalAdvance(label)

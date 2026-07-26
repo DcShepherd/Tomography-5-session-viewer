@@ -42,6 +42,28 @@ def explicit_stack_order_tilt_angles(
     return stack_order_tilt_angles(tilt_series, frame_count, allow_inferred=False)
 
 
+def stack_order_mdoc_section_indices(
+    tilt_series: TiltSeries,
+    frame_count: int | None = None,
+) -> list[int | None] | None:
+    """Map stack-frame indices to MDOC section indices when that mapping is explicit.
+
+    Tomography 5 writes MDOC sections in dose-symmetric acquisition order while
+    its MRC stack is conventionally stored in ascending tilt-angle order.
+    Callers that combine per-frame MRC and MDOC metadata must therefore use
+    this mapping instead of pairing the two sources by list index.
+    """
+
+    frame_count = frame_count or _frame_count_for(tilt_series)
+    if frame_count < 1:
+        return None
+    entries = _mdoc_stack_order_angle_entries(tilt_series, frame_count)
+    if entries is None:
+        return None
+    _angles, metadata_indices = entries
+    return metadata_indices
+
+
 def tilt_angle_metadata_warnings(
     tilt_series: TiltSeries,
     frame_count: int | None = None,

@@ -72,6 +72,7 @@ from tomography_session_browser.services.marker_service import (
     markers_for_object,
     project_marker_to_size,
 )
+from tomography_session_browser.services.timeline_service import parse_datetime
 from tomography_session_browser.services.acquisition_metadata import (
     ACQUISITION_SPOT_LABEL,
     LEGACY_SPOT_LABEL,
@@ -2077,14 +2078,7 @@ def _total_acquisition_duration(tilt_series: Sequence[TiltSeries]) -> str:
 
 
 def _parse_dt(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    for fmt in ("%d-%b-%Y  %H:%M:%S", "%d-%b-%y  %H:%M:%S"):
-        try:
-            return datetime.strptime(value, fmt)
-        except ValueError:
-            continue
-    return None
+    return parse_datetime(value)
 
 
 def _format_duration(seconds: float) -> str:

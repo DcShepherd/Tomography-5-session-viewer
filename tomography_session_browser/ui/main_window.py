@@ -66,6 +66,9 @@ from tomography_session_browser.services.navigation_service import (
     resolve_tilt_series_navigation_targets,
     tab_label_for_object,
 )
+from tomography_session_browser.services.tilt_series_validation import (
+    TiltSeriesValidation,
+)
 from tomography_session_browser.services.tilt_angle_service import stack_order_tilt_angles
 from tomography_session_browser.services.session_loader import SessionLoader
 from tomography_session_browser.services.settings_service import (
@@ -323,6 +326,7 @@ class _PreparedSessionUi:
     timeline: SessionTimeline | None
     warnings: list[str]
     viewer_tabs: dict[str, _PreparedViewerTab]
+    tilt_validations: dict[str, TiltSeriesValidation]
 
 
 @dataclass(slots=True)
@@ -425,6 +429,7 @@ def _prepare_session_ui_payload(
         timeline=timeline,
         warnings=warnings,
         viewer_tabs=prepared_tabs,
+        tilt_validations=status_context.validations,
     )
 
 
@@ -744,6 +749,7 @@ class MainWindow(QMainWindow):
         self._settings = settings if settings is not None else Settings()
         self._theme_actions: list[QAction] = []  # actions whose icon needs refreshing on theme change
         self._failed_tilt_ids_cache: frozenset[str] | None = None
+        self._viewer_tilt_validations: dict[str, TiltSeriesValidation] = {}
         # Perf-report bookkeeping: surface dashboard rebuild count and the
         # latest widget-build time through the LoadingProfiler at session
         # load completion. Reset on each load via :meth:`_begin_loading`.
@@ -1655,6 +1661,7 @@ class MainWindow(QMainWindow):
         else:
             self._sessions.append(session)
         self._failed_tilt_ids_cache = None
+        self._viewer_tilt_validations.clear()
         self._dashboard_model_cache.clear()
         self._session = self._sessions[0]
         self._current_path = str(session.path)
@@ -3124,6 +3131,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_project_state_after_edit(self, *, select_group_key: str | None = None) -> None:
         self._failed_tilt_ids_cache = None
+        self._viewer_tilt_validations.clear()
         self._dashboard_model_cache.clear()
         self._session = self._sessions[0] if self._sessions else None
         self._active_context = None
@@ -3241,6 +3249,7 @@ class MainWindow(QMainWindow):
                 batch_positions=context_batch_positions,
                 tilt_series=context_tilt_series,
             )
+            self._viewer_tilt_validations = item_status_context.validations
 
             tab_payloads = {
                 "Atlas": _PreparedViewerTab("Atlas", context_atlases, {}, _prepared_preview_sources("Atlas", context_atlases)),
@@ -3274,6 +3283,7 @@ class MainWindow(QMainWindow):
             )
         else:
             tab_payloads = prepared.viewer_tabs
+            self._viewer_tilt_validations = prepared.tilt_validations
 
         # The "fallback" context contains every overlayable item across every
         # loaded session. ``_marker_context_for`` narrows this to the active
@@ -4530,7 +4540,11 @@ class MainWindow(QMainWindow):
             return 0
         match = re.fullmatch(r"exposure\s*(\d+)", area_name.strip(), flags=re.IGNORECASE)
         if match:
-            return int(match.group(1))
+            # Tomography 5 names the main exposure ``Exposure`` (or exposure
+            # number 1) and uses stack suffix ``_2`` for the first additional
+            # exposure. Convert that one-based label to the zero-based index
+            # used by marker metadata and batch-order fallback.
+            return max(0, int(match.group(1)) - 1)
         batch_key = _normalise_exposure_key(batch.name or batch.id)
         marker_key = self._marker_exposure_match_key(marker)
         if marker_key and batch_key:
@@ -4729,7 +4743,10 @@ class MainWindow(QMainWindow):
             return
         self.context_panel.set_title(self._label_for(value))
         lines = [
-            describe_object(value),
+            describe_object(
+                value,
+                tilt_validation=self._viewer_tilt_validations.get(value.id),
+            ),
             "",
             "Current frame:",
             f"  Frame: {frame_index + 1} of {frame_count}",
@@ -4772,7 +4789,14 @@ class MainWindow(QMainWindow):
             LOGGER.debug("Could not record context panel timing", exc_info=True)
 
     def _context_description(self, value: Any) -> str:
-        text = describe_object(value)
+        text = describe_object(
+            value,
+            tilt_validation=(
+                self._viewer_tilt_validations.get(value.id)
+                if isinstance(value, TiltSeries)
+                else None
+            ),
+        )
         atlas_lines = self._atlas_linkage_context_lines(value)
         if not atlas_lines:
             return self._normalise_missing_atlas_text(text, value)

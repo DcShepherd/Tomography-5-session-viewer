@@ -62,7 +62,7 @@ def _matching_atlas_sample(sample: Sample, atlas_lookup: list[tuple[str, Sample]
         return None
     normalized_atlas_id = _normalize_path(atlas_id)
     for atlas_path, atlas_sample in atlas_lookup:
-        if normalized_atlas_id.endswith(atlas_path):
+        if _path_ends_with(normalized_atlas_id, atlas_path):
             return atlas_sample
     return None
 
@@ -89,6 +89,17 @@ def _path_suffixes(path: Path, base: Path) -> list[str]:
 def _normalize_path(value: str | Path) -> str:
     text = str(value).replace("\\", "/")
     return str(PureWindowsPath(text)).replace("\\", "/").lower()
+
+
+def _path_ends_with(path: str, suffix: str) -> bool:
+    """Match a normalized path suffix only at a component boundary."""
+
+    normalized_path = path.rstrip("/")
+    normalized_suffix = suffix.strip("/")
+    return (
+        normalized_path == normalized_suffix
+        or normalized_path.endswith(f"/{normalized_suffix}")
+    )
 
 
 def _sample_key(sample: Sample) -> str:

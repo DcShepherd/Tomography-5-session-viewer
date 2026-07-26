@@ -3,10 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from tomography_session_browser.domain.enums import SessionKind
-from tomography_session_browser.domain.models import SearchMap
+from tomography_session_browser.domain.models import MrcMetadata, SearchMap
 from tomography_session_browser.parsers.mdoc_parser import parse_mdoc
 from tomography_session_browser.parsers.session_scanner import SessionScanner
-from tomography_session_browser.parsers.tiltseries_parser import parse_tilt_series_in_folder
+from tomography_session_browser.parsers.tiltseries_parser import (
+    find_unpaired_mrcs,
+    parse_tilt_series,
+    parse_tilt_series_in_folder,
+)
 from tomography_session_browser.parsers.xml_parser import parse_xml_file
 from tomography_session_browser.reports.report_generator import _resolve_overlay_geometry
 from tomography_session_browser.reports.warning_summary import summarise_warnings
@@ -52,6 +56,78 @@ def test_collection_with_empty_mrc_keeps_loading_and_warns(tmp_path: Path) -> No
     tilt_warnings = session.samples[0].tilt_series[0].warnings
     assert any("MRC header is shorter" in warning for warning in tilt_warnings)
     assert any("Tilt-angle metadata unavailable" in warning for warning in tilt_warnings)
+
+
+def test_serialem_mrc_mdoc_name_pairs_with_stack(tmp_path: Path) -> None:
+    mrc_path = tmp_path / "stack.mrc"
+    mdoc_path = tmp_path / "stack.mrc.mdoc"
+    mrc_path.write_bytes(b"")
+    mdoc_path.write_text("[ZValue = 0]\nTiltAngle = 0\n", encoding="utf-8")
+
+    series = parse_tilt_series_in_folder(tmp_path)
+
+    assert len(series) == 1
+    assert series[0].mrc_path == mrc_path
+    assert series[0].mdoc_path == mdoc_path
+    assert find_unpaired_mrcs(tmp_path) == []
+
+
+def test_missing_mdoc_binning_uses_cross_checked_mrc_pixel_size(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    mrc_path = tmp_path / "stack.mrc"
+    mdoc_path = tmp_path / "stack.mdoc"
+    mrc_path.write_bytes(b"")
+    mdoc_path.write_text(
+        "PixelSpacing = 3.39\n[ZValue = 0]\nTiltAngle = 0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "tomography_session_browser.parsers.tiltseries_parser.read_mrc_metadata",
+        lambda path: MrcMetadata(
+            path=path,
+            size_bytes=0,
+            nz=1,
+            voxel_size=(6.774, 6.774, 6.774),
+            frame_metadata=[{"pixel_size": 6.774}],
+        ),
+    )
+
+    tilt = parse_tilt_series(mrc_path, mdoc_path)
+
+    assert tilt.original_pixel_size == 3.39
+    assert tilt.binning is None
+    assert tilt.pixel_size == 6.774
+    assert any("MDOC Binning is missing" in warning for warning in tilt.warnings)
+
+
+def test_mdoc_pixel_size_is_preserved_when_mrc_cross_check_agrees(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    mrc_path = tmp_path / "stack.mrc"
+    mdoc_path = tmp_path / "stack.mdoc"
+    mrc_path.write_bytes(b"")
+    mdoc_path.write_text(
+        "PixelSpacing = 3.39\nBinning = 2\n[ZValue = 0]\nTiltAngle = 0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "tomography_session_browser.parsers.tiltseries_parser.read_mrc_metadata",
+        lambda path: MrcMetadata(
+            path=path,
+            size_bytes=0,
+            nz=1,
+            voxel_size=(6.774, 6.774, 6.774),
+            frame_metadata=[{"pixel_size": 6.774}],
+        ),
+    )
+
+    tilt = parse_tilt_series(mrc_path, mdoc_path)
+
+    assert tilt.pixel_size == 6.78
+    assert not any("Pixel size conflict" in warning for warning in tilt.warnings)
 
 
 def test_malformed_batch_positions_xml_warns_even_without_rows(tmp_path: Path) -> None:

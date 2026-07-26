@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from tomography_session_browser.domain.enums import SessionKind
-from tomography_session_browser.domain.markers import MarkerType
+from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.domain.models import BatchPosition, MrcMetadata, Sample, Session, TiltSeries
 from tomography_session_browser.services.marker_service import markers_for_object
 from tomography_session_browser.ui.main_window import MainWindow
@@ -134,6 +134,22 @@ def test_batch_position_tilt_jump_uses_selected_additional_exposure(monkeypatch,
     app.processEvents()
 
     assert calls == [(tilts[1].id, "batch position exposure", False)]
+
+
+def test_generic_exposure_name_uses_same_zero_based_index_as_stack_suffix(tmp_path: Path) -> None:
+    window, batch, _tilts = _window_with_batch(tmp_path)
+    marker = ImageMarker(
+        id="generic-exposure-2",
+        marker_type=MarkerType.EXPOSURE_AREA,
+        linked_object_id=batch.id,
+        source_object_id=batch.id,
+        metadata={"area_name": "Exposure 2"},
+    )
+
+    exposure = window._selected_exposure_area(marker, batch)
+
+    assert exposure.exposure_index == 1
+    assert window._expected_tilt_keys_for_exposure(batch, exposure) == {"orali_3_2"}
 
 
 def test_batch_position_tilt_jump_stays_disabled_for_tracking_marker(tmp_path: Path) -> None:

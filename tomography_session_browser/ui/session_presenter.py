@@ -5,6 +5,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
+from math import isclose, isfinite
 from pathlib import Path
 import re
 from statistics import median
@@ -14,13 +15,14 @@ from typing import Any
 from tomography_session_browser.domain.models import (
     Atlas,
     BatchPosition,
+    MdocSection,
+    MrcMetadata,
     Overview,
     Sample,
     SearchMap,
     SearchTile,
     Session,
     TiltSeries,
-    MrcMetadata,
 )
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.parsers.path_utils import natural_key
@@ -40,7 +42,21 @@ from tomography_session_browser.services.acquisition_metadata import (
     format_target_defocus_values,
     summarise_acquisition_setting,
 )
-from tomography_session_browser.services.timeline_service import parse_section_datetime
+from tomography_session_browser.services.timeline_service import (
+    datetime_sort_key,
+    parse_datetime,
+    parse_section_datetime,
+)
+from tomography_session_browser.services.tilt_angle_service import (
+    stack_order_mdoc_section_indices,
+)
+from tomography_session_browser.services.tilt_series_validation import (
+    HARD_FAILURE_THRESHOLD,
+    SOURCE_MRC_EXTENDED,
+    SOURCE_SESSION_METADATA,
+    TiltSeriesValidation,
+    actual_tilt_count,
+)
 from tomography_session_browser.ui.session_linking import linked_sample_groups
 
 LOGGER = logging.getLogger(__name__)
@@ -514,7 +530,11 @@ def grouped_warnings(warnings: Iterable[str]) -> dict[str, list[str]]:
     return {label: items for label, items in groups.items() if items}
 
 
-def describe_object(value: Any) -> str:
+def describe_object(
+    value: Any,
+    *,
+    tilt_validation: TiltSeriesValidation | None = None,
+) -> str:
     if isinstance(value, EntityGroup):
         return _entity_group_description(value)
     if isinstance(value, LinkedSampleGroup):
@@ -532,7 +552,7 @@ def describe_object(value: Any) -> str:
     if isinstance(value, BatchPosition):
         return _batch_position_description(value)
     if isinstance(value, TiltSeries):
-        return _tilt_series_description(value)
+        return _tilt_series_description(value, validation=tilt_validation)
     if isinstance(value, Overview):
         return _overview_description(value)
     return str(value)
@@ -806,9 +826,14 @@ def _batch_position_description(batch_position: BatchPosition) -> str:
     return "\n".join(blocks)
 
 
-def _tilt_series_description(tilt_series: TiltSeries) -> str:
-    quality_lines = _tilt_series_quality_lines(tilt_series)
-    validation_lines = _tilt_series_validation_lines(tilt_series)
+def _tilt_series_description(
+    tilt_series: TiltSeries,
+    *,
+    validation: TiltSeriesValidation | None = None,
+) -> str:
+    validation = validation or _standalone_tilt_validation(tilt_series)
+    quality_lines = _tilt_series_quality_lines(tilt_series, validation=validation)
+    validation_lines = _tilt_series_validation_lines(tilt_series, validation=validation)
     blocks: list[str] = [f"Tilt series: {tilt_series.name}"]
     _emit_section(
         blocks,
@@ -840,7 +865,11 @@ def _tilt_series_description(tilt_series: TiltSeries) -> str:
     return "\n".join(blocks)
 
 
-def _tilt_series_validation_lines(tilt_series: TiltSeries) -> list[str]:
+def _tilt_series_validation_lines(
+    tilt_series: TiltSeries,
+    *,
+    validation: TiltSeriesValidation | None = None,
+) -> list[str]:
     """Validation summary used by the right-hand context panel.
 
     Surfaces the same data the dashboard tile tooltips show — status,
@@ -849,11 +878,8 @@ def _tilt_series_validation_lines(tilt_series: TiltSeries) -> list[str]:
     INCOMPLETE without leaving the Tilt-series tab.
     """
 
-    from tomography_session_browser.services.tilt_series_validation import validate_tilt_series
-
-    try:
-        validation = validate_tilt_series(tilt_series)
-    except Exception:  # pragma: no cover — defensive: validator must never crash UI
+    validation = validation or _standalone_tilt_validation(tilt_series)
+    if validation is None:
         return []
     expected_text = str(validation.expected_count) if validation.expected_count is not None else "unknown"
     lines = [
@@ -863,19 +889,30 @@ def _tilt_series_validation_lines(tilt_series: TiltSeries) -> list[str]:
     if validation.evidence_source and validation.evidence_source != "none":
         lines.append(f"Expected source: {validation.evidence_source.replace('_', ' ')}")
     if validation.min_tilt is not None and validation.max_tilt is not None:
+        range_label = (
+            "Planned range"
+            if validation.evidence_source in {SOURCE_SESSION_METADATA, SOURCE_MRC_EXTENDED}
+            else "Observed range"
+        )
         if validation.tilt_increment is not None:
             lines.append(
-                f"Observed range: {validation.min_tilt:g}° to {validation.max_tilt:g}° "
+                f"{range_label}: {validation.min_tilt:g}° to {validation.max_tilt:g}° "
                 f"at {validation.tilt_increment:g}°"
             )
         else:
-            lines.append(f"Observed range: {validation.min_tilt:g}° to {validation.max_tilt:g}°")
+            lines.append(
+                f"{range_label}: {validation.min_tilt:g}° to {validation.max_tilt:g}°"
+            )
     if validation.reason:
         lines.append(f"Reason: {validation.reason}")
     return lines
 
 
-def _tilt_series_quality_lines(tilt: TiltSeries) -> list[str]:
+def _tilt_series_quality_lines(
+    tilt: TiltSeries,
+    *,
+    validation: TiltSeriesValidation | None = None,
+) -> list[str]:
     """Return human-readable quality / completeness lines for a tilt series.
 
     Per the disk audit, mdoc files do not record explicit ``FocusError`` or
@@ -892,8 +929,9 @@ def _tilt_series_quality_lines(tilt: TiltSeries) -> list[str]:
         return lines  # everything else needs the stack
 
     # Sections vs. expected
-    expected = _tilt_expected_sections(tilt)
-    actual = len(tilt.sections)
+    validation = validation or _standalone_tilt_validation(tilt)
+    expected = validation.expected_count if validation is not None else None
+    actual = validation.actual_count if validation is not None else actual_tilt_count(tilt)
     if expected:
         if actual + 1 < expected:
             lines.append(f"Sections: {actual} of {expected} expected (partial)")
@@ -926,14 +964,25 @@ def _tilt_series_quality_lines(tilt: TiltSeries) -> list[str]:
     return lines
 
 
-def _tilt_expected_sections(tilt: TiltSeries) -> int | None:
-    if tilt.tilt_count and tilt.tilt_count > 0:
-        return tilt.tilt_count
-    if tilt.tilt_range and len(tilt.tilt_range) == 2:
-        a, b = tilt.tilt_range
-        if a is not None and b is not None and abs(b - a) > 0:
-            return max(int(abs(b - a) / 2), 1)
-    return None
+def _standalone_tilt_validation(tilt: TiltSeries) -> TiltSeriesValidation | None:
+    """Best-effort fallback for callers that have no shared session context."""
+
+    from tomography_session_browser.services.tilt_series_validation import validate_tilt_series
+
+    try:
+        return validate_tilt_series(tilt)
+    except Exception:  # pragma: no cover - context-panel rendering must remain recoverable
+        return None
+
+
+def _tilt_expected_sections(
+    tilt: TiltSeries,
+    validation: TiltSeriesValidation | None = None,
+) -> int | None:
+    """Return the validator's planned count, never the parser's actual count."""
+
+    resolved = validation or _standalone_tilt_validation(tilt)
+    return resolved.expected_count if resolved is not None else None
 
 
 def _safe_number(value: Any) -> float | None:
@@ -1351,21 +1400,36 @@ def _common_text(values: list[str]) -> str:
     useful = [value for value in values if value != "unknown"]
     if not useful:
         return "unknown"
-    unique = sorted(set(useful))
-    if len(unique) == 1:
-        return unique[0]
-    return f"{unique[0]} to {unique[-1]}"
+    unique = set(useful)
+    numeric_values = [
+        (number, value)
+        for value in unique
+        if (number := _leading_number(value)) is not None
+    ]
+    if len(numeric_values) == len(unique):
+        ordered = [value for _, value in sorted(numeric_values, key=lambda item: (item[0], item[1]))]
+    else:
+        ordered = sorted(unique, key=str.casefold)
+    if len(ordered) == 1:
+        return ordered[0]
+    return f"{ordered[0]} to {ordered[-1]}"
+
+
+def _leading_number(value: str) -> float | None:
+    match = re.match(
+        r"^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)",
+        value.replace(",", ""),
+    )
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    for fmt in ("%d-%b-%Y  %H:%M:%S", "%d-%b-%y  %H:%M:%S"):
-        try:
-            return datetime.strptime(value, fmt)
-        except ValueError:
-            continue
-    return None
+    return parse_datetime(value)
 
 
 def _series_duration_seconds(tilt_series: TiltSeries) -> float | None:
@@ -1391,7 +1455,7 @@ def _duration_text(seconds: float | None) -> str:
 def _is_successful_tilt_series(tilt_series: TiltSeries) -> bool:
     if tilt_series.mrc_metadata is not None and tilt_series.mrc_metadata.size_bytes == 0:
         return False
-    return bool(tilt_series.tilt_count and tilt_series.tilt_count > 1)
+    return actual_tilt_count(tilt_series) >= HARD_FAILURE_THRESHOLD
 
 
 def _sample_collection_start_date(sample: Sample) -> str:
@@ -1696,8 +1760,8 @@ class TimelineItemModel:
 
 
 @dataclass(slots=True)
-class AppliedDefocusPointModel:
-    """One microscope-applied defocus value parsed from an MDOC section."""
+class DefocusPointModel:
+    """One per-image Defocus value and its MRC/MDOC source context."""
 
     sample_name: str
     data_collection_name: str
@@ -1709,18 +1773,23 @@ class AppliedDefocusPointModel:
     tilt_angle: float | None
     acquisition_time: datetime | None
     frame_order: int
-    applied_defocus_um: float
+    defocus_um: float
     metadata_source: str
     has_absolute_time: bool
     has_relative_time: bool
+    mrc_defocus_um: float | None = None
+    mdoc_defocus_um: float | None = None
+    target_defocus_um: float | None = None
+    application_applied_defocus_um: float | None = None
+    sources_agree: bool | None = None
     tooltip: str | None = None
 
 
 @dataclass(slots=True)
-class AppliedDefocusPlotModel:
-    """Chart-ready applied-defocus data for the dashboard scatter plot."""
+class DefocusPlotModel:
+    """Chart-ready per-image Defocus data for the dashboard scatter plot."""
 
-    points: list[AppliedDefocusPointModel]
+    points: list[DefocusPointModel]
     total_tilt_series: int
     defocus_tilt_series: int
     timestamp_tilt_series: int
@@ -1852,7 +1921,7 @@ class DashboardModel:
     completeness_label: str
     counts: list[StatCardModel]
     outcomes: TiltSeriesOutcomeModel
-    applied_defocus: AppliedDefocusPlotModel
+    defocus_readout: DefocusPlotModel
     dose_information: DoseInformationPlotModel
     search_map_completion: list[SearchMapCompletionModel]
     search_map_overview: SearchMapOverviewModel
@@ -2006,10 +2075,10 @@ def session_dashboard_model(value: Any) -> DashboardModel:
             )
         )
 
-    # ------------- tilt series outcomes / applied-defocus audit
+    # ------------- tilt series outcomes / per-image defocus audit
     outcomes = _outcomes_for(scope.tilt_series, validations)
     defocus_start = perf_counter()
-    applied_defocus = _applied_defocus_plot_model(scope)
+    defocus_readout = _defocus_plot_model(scope)
     dose_start = perf_counter()
     dose_information = _dose_information_plot_model(scope)
     dose_end = perf_counter()
@@ -2169,7 +2238,7 @@ def session_dashboard_model(value: Any) -> DashboardModel:
         completeness_label=completeness_label,
         counts=cards,
         outcomes=outcomes,
-        applied_defocus=applied_defocus,
+        defocus_readout=defocus_readout,
         dose_information=dose_information,
         search_map_completion=sm_completion,
         search_map_overview=sm_overview,
@@ -2198,7 +2267,7 @@ def session_dashboard_model(value: Any) -> DashboardModel:
             (dose_start - defocus_start) * 1000.0,
             (dose_end - dose_start) * 1000.0,
             (perf_counter() - profile_start) * 1000.0,
-            len(applied_defocus.points),
+            len(defocus_readout.points),
             len(dose_information.points),
         )
     return model
@@ -2702,10 +2771,12 @@ def _tilt_series_for_batch(
         if tilt.id in linked_ids or tilt.linked_batch_position_id == batch.id:
             linked.append(tilt)
             seen.add(tilt.id)
-    linked.sort(key=lambda tilt: (
-        tilt.acquisition_time_start or "",
-        natural_key(tilt.name or tilt.id),
-    ))
+    linked.sort(
+        key=lambda tilt: (
+            *datetime_sort_key(tilt.acquisition_time_start),
+            natural_key(tilt.name or tilt.id),
+        )
+    )
     return linked
 
 
@@ -2727,7 +2798,13 @@ def _inferred_failed_batch_groups(
 
     explicitly_linked = _explicitly_linked_tilt_ids(batch_positions, tilt_series)
     grouped: dict[str, _InferredBatchGroup] = {}
-    for tilt in sorted(tilt_series, key=lambda item: (item.acquisition_time_start or "", natural_key(item.name or item.id))):
+    for tilt in sorted(
+        tilt_series,
+        key=lambda item: (
+            *datetime_sort_key(item.acquisition_time_start),
+            natural_key(item.name or item.id),
+        ),
+    ):
         if tilt.id in explicitly_linked or tilt.linked_batch_position_id:
             continue
         validation = validation_by_id.get(tilt.id)
@@ -3554,55 +3631,93 @@ def _outcomes_for(
     )
 
 
-def _applied_defocus_plot_model(scope: _DashboardScope) -> AppliedDefocusPlotModel:
-    """Build chart-ready MDOC applied-defocus points for a dashboard scope.
+def _defocus_plot_model(scope: _DashboardScope) -> DefocusPlotModel:
+    """Build chart-ready per-image ``Defocus`` points for a dashboard scope.
 
-    SerialEM/Tomo5 MDOC ``Defocus`` and ``TargetDefocus`` values are already
-    treated as micrometres elsewhere in this app's reports, so the dashboard
-    keeps the parsed numeric value unchanged and labels it as applied/target
-    defocus, not measured CTF defocus.
+    The FEI MRC extended-header ``Defocus`` value is tied directly to a stack
+    frame and is therefore preferred. The MDOC section ``Defocus`` value is
+    angle-aligned to stack order and used as a fallback. ``TargetDefocus`` and
+    MRC ``AppliedDefocus`` remain tooltip context and are never substituted for
+    the plotted value.
     """
 
     contexts = _tilt_series_label_contexts(scope)
-    raw_points: list[AppliedDefocusPointModel] = []
+    raw_points: list[DefocusPointModel] = []
     defocus_tilt_ids: set[str] = set()
     timestamp_tilt_ids: set[str] = set()
     frame_order = 0
 
     for tilt in scope.tilt_series:
         sample_name, linked_group = contexts.get(id(tilt), (scope.title or "Selection", None))
-        frame_count = _frame_count_for_applied_defocus(tilt)
-        for section_index, section in enumerate(tilt.sections, start=1):
-            value, source_field = _section_applied_defocus_um(section.metadata)
-            if value is None:
+        frame_count = _frame_count_for_per_image_metadata(tilt)
+        frame_metadata = tilt.mrc_metadata.frame_metadata if tilt.mrc_metadata is not None else []
+        section_indices = stack_order_mdoc_section_indices(tilt, frame_count)
+        for zero_based_index in range(frame_count):
+            metadata = frame_metadata[zero_based_index] if zero_based_index < len(frame_metadata) else {}
+            section = _stack_order_mdoc_section(tilt, section_indices, zero_based_index)
+            mrc_defocus_um = _mrc_defocus_um(metadata)
+            mdoc_defocus_um = (
+                _finite_number(section.metadata.get("Defocus")) if section is not None else None
+            )
+            if mrc_defocus_um is not None:
+                value = mrc_defocus_um
+                metadata_source = "MRC FEI extended header Defocus"
+            elif mdoc_defocus_um is not None:
+                value = mdoc_defocus_um
+                metadata_source = "MDOC Defocus fallback"
+            else:
                 continue
+
             frame_order += 1
-            timestamp = parse_section_datetime(section.metadata)
-            tilt_angle = _safe_number(section.metadata.get("TiltAngle"))
+            frame_index = zero_based_index + 1
+            timestamp = _frame_metadata_datetime(metadata)
+            if timestamp is None and section is not None:
+                timestamp = parse_section_datetime(section.metadata)
+            tilt_angle = _finite_number(metadata.get("tilt_angle"))
+            if tilt_angle is None and section is not None:
+                tilt_angle = _finite_number(section.metadata.get("TiltAngle"))
+            target_defocus_um = (
+                _finite_number(section.metadata.get("TargetDefocus")) if section is not None else None
+            )
+            application_applied_defocus_um = _mrc_applied_defocus_um(metadata)
+            sources_agree = None
+            if mrc_defocus_um is not None and mdoc_defocus_um is not None:
+                sources_agree = isclose(
+                    mrc_defocus_um,
+                    mdoc_defocus_um,
+                    rel_tol=1e-3,
+                    abs_tol=0.01,
+                )
+
             defocus_tilt_ids.add(tilt.id)
             if timestamp is not None:
                 timestamp_tilt_ids.add(tilt.id)
-            source_label = f"MDOC {source_field}"
-            point = AppliedDefocusPointModel(
-                sample_name=sample_name,
-                data_collection_name=sample_name,
-                linked_group_label=linked_group,
-                tilt_series_id=tilt.id,
-                tilt_series_name=tilt.name or tilt.id,
-                frame_index=section_index,
-                frame_count=frame_count,
-                tilt_angle=tilt_angle,
-                acquisition_time=timestamp,
-                frame_order=frame_order,
-                applied_defocus_um=value,
-                metadata_source=source_label,
-                has_absolute_time=timestamp is not None,
-                has_relative_time=False,
+            raw_points.append(
+                DefocusPointModel(
+                    sample_name=sample_name,
+                    data_collection_name=sample_name,
+                    linked_group_label=linked_group,
+                    tilt_series_id=tilt.id,
+                    tilt_series_name=tilt.name or tilt.id,
+                    frame_index=frame_index,
+                    frame_count=frame_count,
+                    tilt_angle=tilt_angle,
+                    acquisition_time=timestamp,
+                    frame_order=frame_order,
+                    defocus_um=value,
+                    metadata_source=metadata_source,
+                    has_absolute_time=timestamp is not None,
+                    has_relative_time=False,
+                    mrc_defocus_um=mrc_defocus_um,
+                    mdoc_defocus_um=mdoc_defocus_um,
+                    target_defocus_um=target_defocus_um,
+                    application_applied_defocus_um=application_applied_defocus_um,
+                    sources_agree=sources_agree,
+                )
             )
-            raw_points.append(point)
 
     if not raw_points:
-        return AppliedDefocusPlotModel(
+        return DefocusPlotModel(
             points=[],
             total_tilt_series=len(scope.tilt_series),
             defocus_tilt_series=0,
@@ -3620,7 +3735,7 @@ def _applied_defocus_plot_model(scope: _DashboardScope) -> AppliedDefocusPlotMod
         if len(timestamp_tilt_ids) < len(defocus_tilt_ids):
             note = (
                 f"Timestamps available for {len(timestamp_tilt_ids):,} / "
-                f"{len(defocus_tilt_ids):,} tilt series with applied defocus."
+                f"{len(defocus_tilt_ids):,} tilt series with Defocus metadata."
             )
     else:
         points = raw_points
@@ -3628,7 +3743,7 @@ def _applied_defocus_plot_model(scope: _DashboardScope) -> AppliedDefocusPlotMod
         x_axis_label = "Frame order"
         note = "Acquisition timestamps unavailable; points are shown in frame order."
 
-    return AppliedDefocusPlotModel(
+    return DefocusPlotModel(
         points=points,
         total_tilt_series=len(scope.tilt_series),
         defocus_tilt_series=len(defocus_tilt_ids),
@@ -3659,7 +3774,7 @@ def _dose_information_plot_model(scope: _DashboardScope) -> DoseInformationPlotM
         if not frame_metadata:
             continue
         sample_name, linked_group = contexts.get(id(tilt), (scope.title or "Selection", None))
-        frame_count = _frame_count_for_applied_defocus(tilt)
+        frame_count = _frame_count_for_per_image_metadata(tilt)
         for frame_index, metadata in enumerate(frame_metadata, start=1):
             dose, source = _camera_dose_from_frame_metadata(metadata)
             if dose is None:
@@ -3759,17 +3874,24 @@ def _tilt_series_label_contexts(scope: _DashboardScope) -> dict[int, tuple[str, 
     return contexts
 
 
-def _section_applied_defocus_um(metadata: dict[str, Any]) -> tuple[float | None, str]:
-    value = _safe_number(metadata.get("Defocus"))
-    if value is not None:
-        return value, "Defocus"
-    value = _safe_number(metadata.get("TargetDefocus"))
-    if value is not None:
-        return value, "TargetDefocus"
-    return None, ""
+def _mrc_defocus_um(metadata: dict[str, Any]) -> float | None:
+    raw_fields = metadata.get("raw_fields")
+    raw = raw_fields if isinstance(raw_fields, dict) else {}
+    value_m = _finite_number(raw.get("defocus"))
+    if value_m is None:
+        value_m = _finite_number(metadata.get("defocus"))
+    return value_m * 1_000_000.0 if value_m is not None else None
 
 
-def _frame_count_for_applied_defocus(tilt: TiltSeries) -> int:
+def _mrc_applied_defocus_um(metadata: dict[str, Any]) -> float | None:
+    raw_fields = metadata.get("raw_fields")
+    if not isinstance(raw_fields, dict):
+        return None
+    value_m = _finite_number(raw_fields.get("applied_defocus"))
+    return value_m * 1_000_000.0 if value_m is not None else None
+
+
+def _frame_count_for_per_image_metadata(tilt: TiltSeries) -> int:
     if tilt.number_of_frames and tilt.number_of_frames > 0:
         return int(tilt.number_of_frames)
     if tilt.tilt_count and tilt.tilt_count > 0:
@@ -3778,7 +3900,27 @@ def _frame_count_for_applied_defocus(tilt: TiltSeries) -> int:
         return len(tilt.sections)
     if tilt.mrc_metadata is not None and tilt.mrc_metadata.nz:
         return int(tilt.mrc_metadata.nz)
+    if tilt.mrc_metadata is not None and tilt.mrc_metadata.frame_metadata:
+        return len(tilt.mrc_metadata.frame_metadata)
     return 0
+
+
+def _stack_order_mdoc_section(
+    tilt: TiltSeries,
+    section_indices: list[int | None] | None,
+    frame_index: int,
+) -> MdocSection | None:
+    if section_indices is None or frame_index >= len(section_indices):
+        return None
+    section_index = section_indices[frame_index]
+    if section_index is None or not 0 <= section_index < len(tilt.sections):
+        return None
+    return tilt.sections[section_index]
+
+
+def _finite_number(value: Any) -> float | None:
+    number = _safe_number(value)
+    return number if number is not None and isfinite(number) else None
 
 
 def _per_frame_metric_tooltip_lines(
@@ -3793,7 +3935,7 @@ def _per_frame_metric_tooltip_lines(
 ) -> list[str]:
     """Build the 5 shared identification lines for a per-frame metric tooltip.
 
-    Both the applied-defocus and the camera-dose tooltips lead with the
+    Both the defocus-readout and the camera-dose tooltips lead with the
     same Sample / Tilt series / Frame / Tilt angle / Acquisition time
     block; only the metric line and the caveat differ. Centralising the
     shared portion keeps the two callers honest if e.g. the frame
@@ -3814,7 +3956,7 @@ def _per_frame_metric_tooltip_lines(
     ]
 
 
-def _applied_defocus_tooltip(
+def _defocus_tooltip(
     *,
     sample_name: str,
     tilt_series_name: str,
@@ -3823,8 +3965,13 @@ def _applied_defocus_tooltip(
     tilt_angle: float | None,
     acquisition_time: datetime | None,
     frame_order: int,
-    applied_defocus_um: float,
-    source_field: str,
+    defocus_um: float,
+    metadata_source: str,
+    mrc_defocus_um: float | None,
+    mdoc_defocus_um: float | None,
+    target_defocus_um: float | None,
+    application_applied_defocus_um: float | None,
+    sources_agree: bool | None,
 ) -> str:
     lines = _per_frame_metric_tooltip_lines(
         sample_name=sample_name,
@@ -3835,25 +3982,40 @@ def _applied_defocus_tooltip(
         acquisition_time=acquisition_time,
         frame_order=frame_order,
     )
-    lines.extend(
-        [
-            f"Applied defocus: {applied_defocus_um:g} \N{MICRO SIGN}m",
-            f"Source: MDOC {source_field}",
-            "Values are microscope-applied defocus from MDOC metadata, not measured CTF defocus.",
-        ]
+    lines.extend([f"Defocus readout: {defocus_um:g} \N{MICRO SIGN}m", f"Source: {metadata_source}"])
+    if mrc_defocus_um is not None:
+        lines.append(f"MRC Defocus: {mrc_defocus_um:g} \N{MICRO SIGN}m")
+    if mdoc_defocus_um is not None:
+        lines.append(f"MDOC Defocus: {mdoc_defocus_um:g} \N{MICRO SIGN}m")
+    if sources_agree is True:
+        lines.append("MRC and MDOC Defocus agree within 0.01 µm.")
+    elif sources_agree is False and mrc_defocus_um is not None and mdoc_defocus_um is not None:
+        lines.append(
+            "MRC and MDOC Defocus differ by "
+            f"{abs(mrc_defocus_um - mdoc_defocus_um):g} \N{MICRO SIGN}m; "
+            "the MRC value is plotted."
+        )
+    if target_defocus_um is not None:
+        lines.append(f"TargetDefocus: {target_defocus_um:g} \N{MICRO SIGN}m")
+    if application_applied_defocus_um is not None:
+        lines.append(
+            "Application AppliedDefocus: "
+            f"{application_applied_defocus_um:g} \N{MICRO SIGN}m"
+        )
+    lines.append(
+        "The plotted value is the per-image Defocus metadata readout. "
+        "TargetDefocus, application AppliedDefocus, and measured CTF defocus "
+        "are shown only as distinct context when available."
     )
     return "\n".join(lines)
 
 
-def applied_defocus_point_tooltip(point: AppliedDefocusPointModel) -> str:
-    """Build the hover tooltip for one applied-defocus point on demand."""
+def defocus_point_tooltip(point: DefocusPointModel) -> str:
+    """Build the hover tooltip for one per-image Defocus point on demand."""
 
     if point.tooltip:
         return point.tooltip
-    source_field = point.metadata_source
-    if source_field.startswith("MDOC "):
-        source_field = source_field.removeprefix("MDOC ")
-    return _applied_defocus_tooltip(
+    return _defocus_tooltip(
         sample_name=point.sample_name,
         tilt_series_name=point.tilt_series_name,
         frame_index=point.frame_index,
@@ -3861,8 +4023,13 @@ def applied_defocus_point_tooltip(point: AppliedDefocusPointModel) -> str:
         tilt_angle=point.tilt_angle,
         acquisition_time=point.acquisition_time,
         frame_order=point.frame_order,
-        applied_defocus_um=point.applied_defocus_um,
-        source_field=source_field,
+        defocus_um=point.defocus_um,
+        metadata_source=point.metadata_source,
+        mrc_defocus_um=point.mrc_defocus_um,
+        mdoc_defocus_um=point.mdoc_defocus_um,
+        target_defocus_um=point.target_defocus_um,
+        application_applied_defocus_um=point.application_applied_defocus_um,
+        sources_agree=point.sources_agree,
     )
 
 
@@ -4027,13 +4194,20 @@ def _validation_tooltip(validation) -> str:
         f"{validation.actual_count} / {validation.expected_count or '?'} images",
     ]
     if validation.min_tilt is not None and validation.max_tilt is not None:
+        range_label = (
+            "Planned tilt range"
+            if validation.evidence_source in {SOURCE_SESSION_METADATA, SOURCE_MRC_EXTENDED}
+            else "Observed tilt range"
+        )
         if validation.tilt_increment:
             lines.append(
-                f"Expected from tilt range {validation.min_tilt:g}° to {validation.max_tilt:g}° "
+                f"{range_label} {validation.min_tilt:g}° to {validation.max_tilt:g}° "
                 f"at {validation.tilt_increment:g}°"
             )
         else:
-            lines.append(f"Tilt range {validation.min_tilt:g}° to {validation.max_tilt:g}°")
+            lines.append(
+                f"{range_label} {validation.min_tilt:g}° to {validation.max_tilt:g}°"
+            )
     if validation.evidence_source and validation.evidence_source != "none":
         lines.append(f"Evidence: {validation.evidence_source.replace('_', ' ')}")
     if validation.reason:
@@ -4763,18 +4937,4 @@ def _session_acquisition_window(session: Session) -> tuple[str | None, str | Non
 
 
 def _parse_loose_datetime(text: str) -> datetime | None:
-    text = text.strip()
-    for fmt in (
-        "%d-%b-%Y  %H:%M:%S",
-        "%d-%b-%Y %H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-    ):
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    return parse_datetime(text)

@@ -2227,14 +2227,12 @@ def _image_frame(source: Atlas | Overview | SearchMap | SearchTile) -> ImageFram
         )
         return None
 
-    # Per-image debug logging requested for the atlas-scaling investigation.
-    # This intentionally runs unconditionally — sessions are loaded once and
-    # the volume is small (one log line per image), but it is invaluable for
-    # spotting unit-conversion drift between metres / micrometres / pixels.
+    # Detailed frame diagnostics are useful when investigating projection
+    # units, but are too noisy for normal session-level INFO logging.
     pixel_um = pixel_size * 1e6
     fov_x_um = image_size[0] * pixel_um
     fov_y_um = image_size[1] * pixel_um
-    LOGGER.info(
+    LOGGER.debug(
         "image frame: type=%s id=%s image_size=%dx%d px metadata_pixel_size=%.6e m/px "
         "(=%.4f µm/px) stage_position=(%.6e, %.6e) m fov=%.1fx%.1f µm",
         type(source).__name__,
@@ -2251,7 +2249,7 @@ def _image_frame(source: Atlas | Overview | SearchMap | SearchTile) -> ImageFram
 
     stage_basis, stage_basis_source = _stage_basis(source, pixel_size)
     if stage_basis is not None:
-        LOGGER.info(
+        LOGGER.debug(
             "image frame stage basis: type=%s id=%s source=%s "
             "x_axis=(%.6e, %.6e) m/px y_axis=(%.6e, %.6e) m/px",
             type(source).__name__,
@@ -2587,11 +2585,13 @@ def _mrc_pixel_size(metadata: MrcMetadata | None) -> float | None:
                     return value
         value = _as_float(frame.get("pixel_size"))
         if value is not None and value > 0:
-            # FEI2 frame metadata stores the display field in Angstroms but raw_fields in metres.
-            return value * 1e-10 if value > 1e-6 else value
+            # Parsed frame display fields are always Angstroms; raw FEI fields
+            # above are always metres.
+            return value * 1e-10
     x = metadata.voxel_size[0]
     if isinstance(x, int | float) and x > 0:
-        return float(x) * 1e-10 if x > 1e-6 else float(x)
+        # MRC voxel sizes are canonical Angstroms.
+        return float(x) * 1e-10
     return None
 
 

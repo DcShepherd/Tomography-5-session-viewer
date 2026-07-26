@@ -50,7 +50,7 @@ from tomography_session_browser.ui.session_presenter import (
     WarningRowModel,
     dose_information_point_tooltip,
 )
-from tomography_session_browser.ui.widgets.applied_defocus_plot import AppliedDefocusScatterPlot
+from tomography_session_browser.ui.widgets.defocus_plot import DefocusScatterPlot
 from tomography_session_browser.ui.widgets.completion_bar import CompletionBar
 from tomography_session_browser.ui.widgets.dashboard_card import (
     DASHBOARD_CARD_MARGINS,
@@ -191,7 +191,7 @@ class _DoseSummaryPanel(QWidget):
     """Responsive metric block for the Dose Information card.
 
     The card itself supplies the heading via the standard
-    :func:`_card_header` (matching the Applied Defocus card); this panel
+    :func:`_card_header` (matching the Defocus Readout card); this panel
     only renders the median / range metric pair and an optional warning
     chip. The "(e⁻/Å²)" unit is shown next to each metric label so the
     information is preserved even without a verbose card heading.
@@ -558,7 +558,7 @@ class SessionDashboard(QWidget):
         self._model: DashboardModel | None = None
         self._highlighted_tilt_series_id: str | None = None
         self._timeline_strip: TimelineStrip | None = None
-        self._defocus_plot: AppliedDefocusScatterPlot | None = None
+        self._defocus_plot: DefocusScatterPlot | None = None
         self._dose_plot: DoseInformationScatterPlot | None = None
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -611,13 +611,13 @@ class SessionDashboard(QWidget):
             self._content_layout.addWidget(self._build_counts_row(model))
             self._content_layout.addWidget(self._build_timeline_card(model, timeline))
             if not defer_heavy_cards:
-                self._content_layout.addWidget(self._build_applied_defocus_card(model))
+                self._content_layout.addWidget(self._build_defocus_readout_card(model))
                 if model.dose_information.has_points:
                     self._content_layout.addWidget(self._build_dose_information_card(model))
             else:
                 LOGGER.debug(
                     "dashboard heavy cards deferred defocus_points=%d dose_points=%d",
-                    len(model.applied_defocus.points),
+                    len(model.defocus_readout.points),
                     len(model.dose_information.points),
                 )
 
@@ -886,7 +886,7 @@ class SessionDashboard(QWidget):
         if destination == "Search map":
             self.search_map_clicked.emit(item_id)
 
-    def _build_applied_defocus_card(self, model: DashboardModel) -> QWidget:
+    def _build_defocus_readout_card(self, model: DashboardModel) -> QWidget:
         timer = QElapsedTimer()
         timer.start()
         card = _CardBox()
@@ -894,51 +894,56 @@ class SessionDashboard(QWidget):
         layout = _card_layout(card)
 
         header, coverage = _card_header(
-            "APPLIED DEFOCUS",
-            f"{model.applied_defocus.defocus_tilt_series:,} / "
-            f"{model.applied_defocus.total_tilt_series:,} tilt series",
-            "Tilt series with MDOC applied-defocus values / tilt series in this selection",
+            "DEFOCUS READOUT",
+            f"{model.defocus_readout.defocus_tilt_series:,} / "
+            f"{model.defocus_readout.total_tilt_series:,} tilt series",
+            "Tilt series with per-image MRC or MDOC Defocus values / tilt series in this selection",
         )
         layout.addLayout(header)
 
-        subtitle = QLabel("MDOC target defocus, not measured CTF")
+        subtitle = QLabel("Per-image MRC Defocus, with angle-aligned MDOC fallback")
         subtitle.setObjectName("metaKey")
         subtitle.setWordWrap(True)
         subtitle.setToolTip(
-            "Values are microscope-applied defocus from MDOC metadata, not measured CTF defocus."
+            "The plot uses the Defocus value recorded for each image. The FEI MRC "
+            "extended header is preferred because it is tied to the stack frame; "
+            "angle-aligned MDOC Defocus is cross-checked and used as a fallback. "
+            "TargetDefocus, application AppliedDefocus, and measured CTF defocus "
+            "are different quantities and are not plotted."
         )
         layout.addWidget(subtitle)
 
-        plot = AppliedDefocusScatterPlot()
+        plot = DefocusScatterPlot()
         plot.setMinimumHeight(TIME_CHART_DEFOCUS_MIN_HEIGHT)
-        plot.set_model(model.applied_defocus)
+        plot.set_model(model.defocus_readout)
         plot.set_highlighted_tilt_series_id(self._highlighted_tilt_series_id)
         plot.pointClicked.connect(self.point_clicked.emit)
         plot.pointDoubleClicked.connect(self.point_double_clicked.emit)
         self._defocus_plot = plot
         layout.addWidget(plot, stretch=1)
 
-        if model.applied_defocus.note:
-            note = QLabel(model.applied_defocus.note)
+        if model.defocus_readout.note:
+            note = QLabel(model.defocus_readout.note)
             note.setObjectName("metaKey")
             note.setWordWrap(True)
             layout.addWidget(note)
         elif (
-            model.applied_defocus.has_points
-            and model.applied_defocus.timestamp_tilt_series < model.applied_defocus.defocus_tilt_series
+            model.defocus_readout.has_points
+            and model.defocus_readout.timestamp_tilt_series
+            < model.defocus_readout.defocus_tilt_series
         ):
             note = QLabel(
                 f"Timestamps available for "
-                f"{model.applied_defocus.timestamp_tilt_series:,} / "
-                f"{model.applied_defocus.defocus_tilt_series:,} plotted tilt series"
+                f"{model.defocus_readout.timestamp_tilt_series:,} / "
+                f"{model.defocus_readout.defocus_tilt_series:,} plotted tilt series"
             )
             note.setObjectName("metaKey")
             note.setWordWrap(True)
             layout.addWidget(note)
 
         LOGGER.debug(
-            "applied defocus card built points=%d widget_ms=%d",
-            len(model.applied_defocus.points),
+            "defocus readout card built points=%d widget_ms=%d",
+            len(model.defocus_readout.points),
             timer.elapsed(),
         )
         return card
@@ -957,11 +962,10 @@ class SessionDashboard(QWidget):
             f"{_format_dose(dose_model.min_dose_e_per_angstrom2)}–"
             f"{_format_dose(dose_model.max_dose_e_per_angstrom2)}"
         )
-        # Match the Applied Defocus card heading shape (cardTitle + badge)
+        # Match the Defocus Readout card heading shape (cardTitle + badge)
         # instead of the previous redundant "CAMERA DOSE PER IMAGE (e⁻/Å²)"
         # heading. A single subtitle carries the unit and metadata source,
-        # mirroring the "MDOC target defocus, not measured CTF" subtitle
-        # on the Applied Defocus card — one place, no repetition.
+        # mirroring the source subtitle on the Defocus Readout card.
         header, _badge = _card_header(
             "CAMERA DOSE",
             f"{dose_model.dose_tilt_series:,} / {dose_model.total_tilt_series:,} tilt series",
@@ -1473,7 +1477,7 @@ class SessionDashboard(QWidget):
             return None
         if tilt_series_id in model.timeline_items:
             return tilt_series_id
-        if any(point.tilt_series_id == tilt_series_id for point in model.applied_defocus.points):
+        if any(point.tilt_series_id == tilt_series_id for point in model.defocus_readout.points):
             return tilt_series_id
         if any(point.tilt_series_id == tilt_series_id for point in model.dose_information.points):
             return tilt_series_id
