@@ -4,7 +4,7 @@ import logging
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 LOGGER = logging.getLogger(__name__)
@@ -12,7 +12,7 @@ LOGGER = logging.getLogger(__name__)
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QEventLoop, QObject, QElapsedTimer, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QFont
+from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from tomography_session_browser.domain.enums import SessionKind
-from tomography_session_browser.domain.display_names import format_overview_display_name
+from tomography_session_browser.domain.display_names import count_phrase, format_overview_display_name
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType, SelectionState
 from tomography_session_browser.domain.models import (
     Atlas,
@@ -59,10 +59,12 @@ from tomography_session_browser.domain.models import (
 )
 from tomography_session_browser.parsers.path_utils import natural_key
 from tomography_session_browser.reports import ProjectReportGroup, build_session_report
-from tomography_session_browser.services.marker_service import MarkerContext, markers_for_object
+from tomography_session_browser.services.marker_service import MarkerContext, atlas_lod_markers, markers_for_object
 from tomography_session_browser.services.item_status import ItemListStatus, build_item_status_context, item_list_status
 from tomography_session_browser.services.loading_profiler import LoadingProfiler
 from tomography_session_browser.services.navigation_service import (
+    resolve_batch_position_overview,
+    resolve_batch_position_search_map,
     resolve_tilt_series_navigation_targets,
     tab_label_for_object,
 )
@@ -77,6 +79,7 @@ from tomography_session_browser.services.settings_service import (
     save_settings,
 )
 from tomography_session_browser.ui.image_viewer import (
+    AtlasCollectionOverlayOption,
     PreviewSources,
     ViewerNavigationAction,
     ViewerTab,
@@ -97,6 +100,7 @@ from tomography_session_browser.services.timeline_service import (
 from tomography_session_browser.ui.animations import fade_in
 from tomography_session_browser.ui.branding import TitleBarLockup, brand_window_icon
 from tomography_session_browser.ui.icons import themed_icon
+from tomography_session_browser.ui.list_decorations import paint_selection_marker
 from tomography_session_browser.ui.project_model import (
     ProjectTreeGroup,
     build_project_tree_groups,
@@ -108,6 +112,7 @@ from tomography_session_browser.ui.session_linking import linked_sample_groups, 
 from tomography_session_browser.ui.theme import apply_theme, current_palette, palette_for
 from tomography_session_browser.ui.widgets.metadata_panel import MetadataPanel
 from tomography_session_browser.ui.widgets.loading_overlay import LoadingOverlay
+from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 from tomography_session_browser.ui.widgets.session_dashboard import SessionDashboard
 from tomography_session_browser.ui.session_presenter import (
     DashboardEntityScope,
@@ -128,6 +133,10 @@ from tomography_session_browser.ui.session_presenter import (
 
 
 TAB_LABELS = ["Session", "Atlas", "Overview", "Search map", "Search", "Batch position", "Tilt series"]
+_TAB_DISPLAY_LABELS = {
+    "Search map": "Search maps",
+    "Search": "Search tiles",
+}
 OBJECT_ROLE = int(Qt.ItemDataRole.UserRole)
 EXPANSION_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 HIGHLIGHT_ROLE = int(Qt.ItemDataRole.UserRole) + 2
@@ -386,6 +395,44 @@ class _SessionUiPrepareTask(QRunnable):
             self._signals.failed.emit(str(exc))
 
 
+class _ReportSignals(QObject):
+    finished = Signal(object, object)
+    failed = Signal(object, str)
+
+
+class _ReportTask(QRunnable):
+    def __init__(
+        self,
+        sessions: list[Session],
+        output_path: Path,
+        *,
+        project_title: str | None,
+        project_groups: list[ProjectReportGroup],
+        signals: _ReportSignals,
+    ) -> None:
+        super().__init__()
+        self._sessions = list(sessions)
+        self._output_path = output_path
+        self._project_title = project_title
+        self._project_groups = list(project_groups)
+        self._signals = signals
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = build_session_report(
+                self._sessions,
+                self._output_path,
+                project_title=self._project_title,
+                project_groups=self._project_groups,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced on the UI thread
+            LOGGER.exception("Failed to generate PDF report")
+            self._signals.failed.emit(self._output_path, str(exc))
+            return
+        self._signals.finished.emit(self._output_path, result)
+
+
 def _prepare_session_ui_payload(
     sessions: list[Session],
     active_context: Any,
@@ -439,18 +486,20 @@ class _ProjectTreeDelegate(QStyledItemDelegate):
     def paint(self, painter, option: QStyleOptionViewItem, index) -> None:  # noqa: N802 - Qt API
         paint_option = QStyleOptionViewItem(option)
         paint_option.state &= ~QStyle.StateFlag.State_HasFocus
+        selected = bool(paint_option.state & QStyle.StateFlag.State_Selected)
         highlighted = bool(index.sibling(index.row(), 0).data(HIGHLIGHT_ROLE))
-        if highlighted and not (paint_option.state & QStyle.StateFlag.State_Selected):
+        if highlighted and not selected:
             palette = current_palette()
             fill = QColor(palette.accent)
             fill.setAlpha(34)
             painter.fillRect(paint_option.rect, fill)
         super().paint(painter, paint_option, index)
-        if highlighted and index.column() == 0:
-            palette = current_palette()
-            bar = paint_option.rect.adjusted(0, 3, 0, -3)
-            bar.setWidth(3)
-            painter.fillRect(bar, QColor(palette.accent_strong))
+        # Column 0 only: the marker belongs to the row, and ``paint`` runs
+        # once per column.
+        if index.column() == 0 and (highlighted or selected):
+            paint_selection_marker(
+                painter, paint_option.rect, current_palette(), strong=highlighted
+            )
 
 
 def _dashboard_scope_value_for_sessions(sessions: list[Session], active_context: Any) -> Any:
@@ -740,6 +789,10 @@ class MainWindow(QMainWindow):
         self._dashboard_scope_prefers_tree = False
         self._project_tree_tilt_items_by_id: dict[str, list[QTreeWidgetItem]] = {}
         self._project_display_names: dict[str, str] = {}
+        self._atlas_collection_visibility: dict[
+            tuple[str, str],
+            bool,
+        ] = {}
         self._dashboard_model_cache: dict[str, tuple[Any, SessionTimeline | None]] = {}
         self._deferred_loading_dashboard: tuple[Any, SessionTimeline | None, bool] | None = None
         self._deferred_loading_dashboard_refresh = False
@@ -748,7 +801,25 @@ class MainWindow(QMainWindow):
         self._selection_state = SelectionState()
         self._settings = settings if settings is not None else Settings()
         self._theme_actions: list[QAction] = []  # actions whose icon needs refreshing on theme change
+        self._theme_refresh_generation = 0
         self._failed_tilt_ids_cache: frozenset[str] | None = None
+        # Status-bar project totals, keyed by a cheap fingerprint of the
+        # loaded session list. Computing them means six full traversals plus
+        # a dedupe that builds a Path per entity, which is far too expensive
+        # to repeat on every status-bar refresh.
+        self._project_totals_cache: tuple[tuple[tuple[int, int], ...], dict[str, int]] | None = None
+        # What the context panel is currently describing, so returning to the
+        # Session tab does not rebuild an identical description.
+        self._context_panel_scope_key: str | None = None
+        # Invalidates a queued Session-context refresh when another tab is
+        # selected before its repaint-delayed callback runs.
+        self._session_context_sync_generation = 0
+        # Coalesces settings writes so rapid tab switching does not issue one
+        # synchronous JSON write per switch.
+        self._settings_save_timer = QTimer(self)
+        self._settings_save_timer.setSingleShot(True)
+        self._settings_save_timer.setInterval(400)
+        self._settings_save_timer.timeout.connect(self._flush_settings_save)
         self._viewer_tilt_validations: dict[str, TiltSeriesValidation] = {}
         # Perf-report bookkeeping: surface dashboard rebuild count and the
         # latest widget-build time through the LoadingProfiler at session
@@ -766,6 +837,10 @@ class MainWindow(QMainWindow):
         self._load_queue: list[tuple[str, bool, bool, bool]] = []
         self._loading_task_active = False
         self._load_thread_pool = QThreadPool.globalInstance()
+        self._report_task_active = False
+        self._report_signals = _ReportSignals(self)
+        self._report_signals.finished.connect(self._on_report_generated)
+        self._report_signals.failed.connect(self._on_report_failed)
         self._session_load_signals = _SessionLoadSignals(self)
         self._session_load_signals.status.connect(self._set_loading_status)
         self._session_load_signals.loaded.connect(self._on_session_loaded)
@@ -826,7 +901,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "loading_overlay"):
             self.loading_overlay.setGeometry(self.rect())
-        self._refresh_branding()
+        self._update_responsive_chrome()
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main")
@@ -835,6 +910,8 @@ class MainWindow(QMainWindow):
         toolbar.setIconSize(QSize(18, 18))
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         toolbar.setFixedHeight(50)
+        self.main_toolbar = toolbar
+        self._toolbar_compact: bool | None = None
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
         self.brand_label = TitleBarLockup(self)
@@ -848,13 +925,23 @@ class MainWindow(QMainWindow):
         toolbar.setFixedHeight(max(50, self.brand_label.height() + 8))
         toolbar.addWidget(self.brand_label)
 
-        self.session_pill = QLabel("No session loaded")
+        self.session_pill = ElidedLabel(
+            "No session loaded",
+            mode=Qt.TextElideMode.ElideMiddle,
+        )
         self.session_pill.setObjectName("sessionPill")
+        self.session_pill.setMinimumWidth(90)
+        self.session_pill.setMaximumWidth(300)
         toolbar.addWidget(self.session_pill)
         toolbar.addSeparator()
 
         # Primary file actions ------------------------------------------------
-        self.open_action = self._action("folder-open", "Open folder", "Open one or more Tomography 5 session folders.")
+        self.open_action = self._action(
+            "folder-open",
+            "Open folder",
+            "Open one or more Tomography 5 session folders.",
+            QKeySequence.StandardKey.Open,
+        )
         self.open_action.triggered.connect(self.open_session)
         toolbar.addAction(self.open_action)
 
@@ -862,12 +949,13 @@ class MainWindow(QMainWindow):
             "folder-plus",
             "Import folder",
             "Add a related read-only atlas or data collection session folder to the current project view.",
+            "Ctrl+Shift+O",
         )
         self.import_action.triggered.connect(self.import_session)
         toolbar.addAction(self.import_action)
 
         self.refresh_action = self._action(
-            "refresh", "Refresh", "Reload the currently opened session folders."
+            "refresh", "Refresh", "Reload the currently opened session folders.", QKeySequence.StandardKey.Refresh
         )
         self.refresh_action.triggered.connect(self.refresh_session)
         self.refresh_action.setEnabled(False)
@@ -877,7 +965,7 @@ class MainWindow(QMainWindow):
 
         # Report action -------------------------------------------------------
         self.report_action = self._action(
-            "file-text", "Report", "Export a PDF report for the loaded session(s)."
+            "file-text", "Report", "Export a PDF report for the loaded session(s).", QKeySequence.StandardKey.Print
         )
         self.report_action.setEnabled(False)
         self.report_action.triggered.connect(self._on_generate_report)
@@ -899,7 +987,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.compact_action)
 
         self.project_panel_action = self._action(
-            "panel-left", "Project", "Show or hide the project / session tree."
+            "panel-left", "Project", "Show or hide the project / session tree.", "Ctrl+1"
         )
         self.project_panel_action.setCheckable(True)
         self.project_panel_action.setChecked(True)
@@ -907,7 +995,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.project_panel_action)
 
         self.context_panel_action = self._action(
-            "panel-right", "Context", "Show or hide the context / metadata panel."
+            "panel-right", "Context", "Show or hide the context / metadata panel.", "Ctrl+2"
         )
         self.context_panel_action.setCheckable(True)
         self.context_panel_action.setChecked(True)
@@ -915,7 +1003,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.context_panel_action)
 
         self.theme_action = self._action(
-            "moon", "Theme", "Switch between dark and light themes."
+            "moon", "Theme", "Switch between dark and light themes.", "Ctrl+Shift+T"
         )
         self.theme_action.setCheckable(True)
         self.theme_action.toggled.connect(self._on_theme_toggled)
@@ -927,16 +1015,19 @@ class MainWindow(QMainWindow):
         self.loading_progress.setRange(0, 0)
         self.loading_progress.setMaximumWidth(180)
         self.loading_progress.setTextVisible(False)
-        self.loading_progress.setVisible(False)
+        self.loading_progress.setVisible(self._report_task_active)
         self.status_scope = QLabel("scope: none")
         self.status_scope.setObjectName("statusSegment")
         self.status_scope.setToolTip("Current project, session, sample, or group scope.")
         self.status_counts = QLabel("Overview: 0 · Search map: 0 · Search: 0 · Batch position: 0 · Tilt series: 0")
         self.status_counts.setObjectName("statusSegment")
         self.status_counts.setToolTip("Loaded entities: overviews, search maps, search tiles, batch positions, tilt series.")
-        self.status_runtime = QLabel(f"v0.1.0 · py {sys.version_info.major}.{sys.version_info.minor}")
+        self.status_runtime = QLabel("v0.1.0")
         self.status_runtime.setObjectName("statusSegment")
-        self.status_runtime.setToolTip("Application version and Python runtime.")
+        self.status_runtime.setToolTip(
+            f"Tomography Session Browser v0.1.0 · Python "
+            f"{sys.version_info.major}.{sys.version_info.minor}"
+        )
         self.statusBar().addWidget(self.status_scope)
         self.statusBar().addPermanentWidget(self.status_counts)
         self.statusBar().addPermanentWidget(self.loading_progress)
@@ -954,14 +1045,27 @@ class MainWindow(QMainWindow):
         self.compact_button = self.compact_action
         self.project_panel_button = self.project_panel_action
         self.context_panel_button = self.context_panel_action
-        self._refresh_branding()
+        self._update_responsive_chrome()
 
     # ------------------------------------------------------------------ helpers
 
-    def _action(self, icon_name: str, label: str, tooltip: str) -> QAction:
+    def _action(
+        self,
+        icon_name: str,
+        label: str,
+        tooltip: str,
+        shortcut: QKeySequence | QKeySequence.StandardKey | str | None = None,
+    ) -> QAction:
         """Create a QAction with a themed icon and remember it for theme changes."""
 
         action = QAction(themed_icon(icon_name), label, self)
+        if shortcut is not None:
+            action.setShortcut(shortcut)
+            # Qt only appends the shortcut to menu text, never to a toolbar
+            # tooltip, so spell it out — otherwise the bindings are
+            # undiscoverable.
+            hint = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+            tooltip = f"{tooltip}  ({hint})" if hint else tooltip
         action.setToolTip(tooltip)
         action.setData(icon_name)  # remember the icon source for refresh
         self._theme_actions.append(action)
@@ -981,9 +1085,27 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "brand_label"):
             return
         palette = current_palette()
-        compact = self.width() < 1080
+        compact = self.width() < 1420
         self.brand_label.set_theme(palette.name)
         self.brand_label.set_compact(compact)
+
+    def _update_responsive_chrome(self) -> None:
+        """Keep the toolbar and status strip useful at supported window widths."""
+
+        self._refresh_branding()
+        width = self.width()
+        compact = width < 1420
+        if hasattr(self, "main_toolbar") and compact != self._toolbar_compact:
+            self.main_toolbar.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonIconOnly
+                if compact
+                else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+            )
+            self._toolbar_compact = compact
+        if hasattr(self, "session_pill"):
+            self.session_pill.setMaximumWidth(300 if width >= 1500 else 220 if width >= 1120 else 150)
+        if hasattr(self, "status_counts"):
+            self._update_status_summary()
 
     def _update_session_pill(self) -> None:
         if not hasattr(self, "session_pill"):
@@ -995,11 +1117,14 @@ class MainWindow(QMainWindow):
         if len(self._sessions) == 1:
             session = self._sessions[0]
             sample_count = len(self._display_samples(session))
-            self.session_pill.setText(f"● {session.name} · {sample_count} samples")
+            self.session_pill.setText(f"● {session.name} · {count_phrase(sample_count, 'sample')}")
             self.session_pill.setToolTip(f"{session.name}\n{session.path}")
             return
         groups = self._project_groups()
-        self.session_pill.setText(f"● Project · {len(groups)} groups · {len(self._sessions)} sessions")
+        self.session_pill.setText(
+            f"● Project · {count_phrase(len(groups), 'group')} · "
+            f"{count_phrase(len(self._sessions), 'session')}"
+        )
         linked = "\n".join(
             f"{group.display_name}: {', '.join(session.name for session in group.sessions)}"
             for group in groups
@@ -1022,7 +1147,8 @@ class MainWindow(QMainWindow):
             if label == "Session":
                 self.tabs.setTabText(index, "Session")
             else:
-                self.tabs.setTabText(index, f"{label}  {counts.get(label, 0)}")
+                display_label = _TAB_DISPLAY_LABELS.get(label, label)
+                self.tabs.setTabText(index, f"{display_label}  {counts.get(label, 0)}")
 
     def _tab_count_context(self) -> Any:
         """Return the broad scope that should drive top-tab counts.
@@ -1065,26 +1191,87 @@ class MainWindow(QMainWindow):
                 return context
         return self._active_context
 
+    def _schedule_settings_save(self) -> None:
+        """Queue a settings write, coalescing bursts into one disk round-trip."""
+
+        self._settings_save_timer.start()
+
+    def _flush_settings_save(self) -> None:
+        self._settings_save_timer.stop()
+        save_settings(self._settings)
+
+    def _project_entity_totals(self) -> dict[str, int]:
+        """Return project-wide entity counts for the status bar.
+
+        Each ``_all_*`` call is a full traversal of every session and sample
+        followed by ``dedupe_entities``, which constructs a ``Path`` per
+        entity to build its identity key. Six of those per status-bar refresh
+        is far too expensive to repeat on every scope change — it made
+        switching to the Session tab visibly slow on large projects.
+
+        The totals only change when the loaded session set changes, so they
+        are cached against a fingerprint that is cheap to recompute (one
+        entry per session, not per entity).
+        """
+
+        fingerprint = tuple((id(session), len(session.samples)) for session in self._sessions)
+        cached = self._project_totals_cache
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+
+        if not self._sessions:
+            totals = dict.fromkeys(
+                ("Atlas", "Overview", "Search map", "Search tile", "Batch position", "Tilt series"), 0
+            )
+        else:
+            totals = {
+                "Atlas": len(self._all_atlases()),
+                "Overview": len(self._all_overviews()),
+                "Search map": len(self._all_search_maps()),
+                "Search tile": len(self._all_search_tiles()),
+                "Batch position": len(self._all_batch_positions()),
+                "Tilt series": len(self._all_tilt_series()),
+            }
+        self._project_totals_cache = (fingerprint, totals)
+        return totals
+
     def _update_status_summary(self, scope: str | None = None) -> None:
         if not hasattr(self, "status_counts"):
             return
         label = scope or self._current_scope_label()
         self.status_scope.setText(f"scope: {label}")
         self.status_scope.setToolTip(f"Current review scope: {label}")
-        self.status_counts.setText(
-            f"Overview: {len(self._all_overviews()) if self._sessions else 0} · "
-            f"Search map: {len(self._all_search_maps()) if self._sessions else 0} · "
-            f"Search: {len(self._all_search_tiles()) if self._sessions else 0} · "
-            f"Batch position: {len(self._all_batch_positions()) if self._sessions else 0} · "
-            f"Tilt series: {len(self._all_tilt_series()) if self._sessions else 0}"
+        totals = self._project_entity_totals()
+        # Atlas was the only tab missing from this strip and from its tooltip,
+        # even though the tab bar counts it.
+        counts = (
+            ("Atlas", "atlas", "atlases", totals["Atlas"]),
+            ("Overview", "overview", None, totals["Overview"]),
+            ("Search map", "search map", None, totals["Search map"]),
+            ("Search tile", "search tile", None, totals["Search tile"]),
+            ("Batch position", "batch position", None, totals["Batch position"]),
+            ("Tilt series", "tilt series", "tilt series", totals["Tilt series"]),
         )
+        width = self.width()
+        if width >= 1500:
+            text = "Project totals · " + " · ".join(
+                f"{count_label} {value}" for count_label, _, _, value in counts
+            )
+        elif width >= 1120:
+            abbreviations = ("AT", "OV", "SM", "ST", "BP", "TS")
+            text = "Project totals · " + " · ".join(
+                f"{abbreviation} {entry[3]}"
+                for abbreviation, entry in zip(abbreviations, counts, strict=True)
+            )
+        else:
+            text = ""
+        self.status_counts.setText(text)
+        self.status_counts.setVisible(bool(text))
+        self.status_runtime.setVisible(width >= 1040)
         self.status_counts.setToolTip(
-            "Loaded entities in the current project: "
-            f"{len(self._all_overviews()) if self._sessions else 0} overviews, "
-            f"{len(self._all_search_maps()) if self._sessions else 0} search maps, "
-            f"{len(self._all_search_tiles()) if self._sessions else 0} search tiles, "
-            f"{len(self._all_batch_positions()) if self._sessions else 0} batch positions, "
-            f"{len(self._all_tilt_series()) if self._sessions else 0} tilt series."
+            "Project totals: "
+            + ", ".join(count_phrase(value, singular, plural) for _, singular, plural, value in counts)
+            + "."
         )
 
     def _current_scope_label(self) -> str:
@@ -1107,8 +1294,6 @@ class MainWindow(QMainWindow):
             apply_theme(app, palette_for(new_theme))
         self._refresh_action_icons()
         self._refresh_theme_dependent_widgets()
-        if hasattr(self, "tree"):
-            self._populate_tree()
         save_settings(self._settings)
 
     def _refresh_theme_dependent_widgets(self) -> None:
@@ -1119,9 +1304,25 @@ class MainWindow(QMainWindow):
         self._refresh_branding()
         if hasattr(self, "context_panel"):
             self.context_panel.refresh_theme()
+        if hasattr(self, "tree"):
+            for index in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(index)
+                value = item.data(0, OBJECT_ROLE)
+                if isinstance(value, ProjectTreeGroup):
+                    self._style_project_group_item(item, value)
+            self.tree.viewport().update()
         if hasattr(self, "session_dashboard"):
             if self._sessions:
-                self._render_dashboard_for_scope(animate=False)
+                self._theme_refresh_generation += 1
+                generation = self._theme_refresh_generation
+
+                def refresh_dashboard() -> None:
+                    if generation == self._theme_refresh_generation:
+                        self._render_dashboard_for_scope(animate=False)
+
+                # Let the stylesheet and shell repaint before rebuilding the
+                # custom-painted dashboard cards for the new palette.
+                QTimer.singleShot(0, refresh_dashboard)
             else:
                 self.session_dashboard.update()
         if hasattr(self, "loading_overlay"):
@@ -1163,13 +1364,99 @@ class MainWindow(QMainWindow):
     def _on_tab_changed(self, index: int) -> None:
         if 0 <= index < len(TAB_LABELS):
             label = TAB_LABELS[index]
+            self._session_context_sync_generation += 1
             self._settings.last_tab = label
-            save_settings(self._settings)
+            # Deferred: this writes a JSON file, and doing it synchronously
+            # inside the tab-change handler put a disk round-trip in front of
+            # every single tab switch.
+            self._schedule_settings_save()
             viewer_tab = self._viewer_tabs.get(label)
             if viewer_tab is not None:
                 viewer_tab.ensure_initial_preview_loaded(
                     notify_selection=not self._tab_activation_preserves_broad_scope()
                 )
+            elif label == "Session":
+                # Commit ad273c5 put the context/status rebuild directly in
+                # this signal handler. QTabWidget cannot display its new page
+                # until the handler returns, so keep the panel correct but
+                # allow one repaint turn before doing that secondary work.
+                generation = self._session_context_sync_generation
+                QTimer.singleShot(
+                    0,
+                    lambda: self._defer_session_context_sync_until_repaint(
+                        generation,
+                        first_turn=True,
+                    ),
+                )
+
+    def _defer_session_context_sync_until_repaint(
+        self,
+        generation: int,
+        *,
+        first_turn: bool,
+    ) -> None:
+        """Refresh Session context after its page has had a repaint turn."""
+
+        if (
+            generation != self._session_context_sync_generation
+            or self.tabs.currentIndex() != TAB_LABELS.index("Session")
+        ):
+            return
+        if first_turn:
+            QTimer.singleShot(
+                0,
+                lambda: self._defer_session_context_sync_until_repaint(
+                    generation,
+                    first_turn=False,
+                ),
+            )
+            return
+        self._sync_context_panel_to_active_scope()
+
+    def _sync_context_panel_to_active_scope(self) -> None:
+        """Point the context panel and status bar at the dashboard's scope.
+
+        Building a scope description walks the whole group, so the work is
+        skipped when the panel is already showing this scope — returning to
+        the Session tab repeatedly must not re-derive identical text.
+        """
+
+        if not self._sessions:
+            return
+        context = self._active_context
+
+        # Resolve the cheap parts first (title and which description to
+        # build); the description itself is what costs, so it is only built
+        # once we know the panel is not already showing this scope.
+        if isinstance(context, ProjectTreeGroup):
+            title = context.display_name
+            describe = lambda: self._describe_project_group(context)  # noqa: E731
+        elif context is None:
+            groups = self._project_groups()
+            if len(groups) == 1:
+                title = groups[0].display_name
+                describe = lambda: self._describe_project_group(groups[0])  # noqa: E731
+            else:
+                title = "Project"
+                describe = lambda: "\n".join(  # noqa: E731
+                    [f"Loaded sessions ({len(self._sessions)}):"]
+                    + [f"  - {session.name}" for session in self._sessions]
+                )
+        else:
+            title = self._label_for(context)
+            describe = lambda: self._context_description(context)  # noqa: E731
+
+        scope_key = f"{type(context).__name__}:{id(context)}"
+        # The title check makes this self-correcting: if a viewer selection
+        # overwrote the panel in the meantime the titles differ, so the
+        # description is rebuilt even though the scope object is unchanged.
+        if self._context_panel_scope_key == scope_key and self.context_panel.text() == title:
+            return
+
+        self.context_panel.set_title(title)
+        self.context_panel.set_text(describe())
+        self._update_status_summary(title)
+        self._context_panel_scope_key = scope_key
 
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt signature
         self._settings.project_panel_visible = self.project_panel_action.isChecked()
@@ -1177,7 +1464,9 @@ class MainWindow(QMainWindow):
         self._settings.compact = self.compact_action.isChecked()
         if 0 <= self.tabs.currentIndex() < len(TAB_LABELS):
             self._settings.last_tab = TAB_LABELS[self.tabs.currentIndex()]
-        save_settings(self._settings)
+        # Write synchronously here so a debounced tab-change save cannot be
+        # lost when the window closes before the timer fires.
+        self._flush_settings_save()
         super().closeEvent(event)
 
     def _build_left_tree(self) -> None:
@@ -1209,6 +1498,15 @@ class MainWindow(QMainWindow):
         self.project_filter = QLineEdit()
         self.project_filter.setObjectName("treeSearch")
         self.project_filter.setPlaceholderText("Filter project...")
+        self.project_filter.setAccessibleName("Filter project")
+        self.project_filter.setClearButtonEnabled(True)
+        self.project_filter.setToolTip("Filter project groups, sessions, samples, and acquisition items")
+        self._clear_project_filter_shortcut = QShortcut(
+            QKeySequence(Qt.Key.Key_Escape),
+            self.project_filter,
+        )
+        self._clear_project_filter_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self._clear_project_filter_shortcut.activated.connect(self.project_filter.clear)
         self.project_filter.textChanged.connect(self._filter_project_tree)
         filter_wrap = QWidget(panel)
         filter_layout = QVBoxLayout(filter_wrap)
@@ -1298,8 +1596,9 @@ class MainWindow(QMainWindow):
                 self.warning_tree.setHeaderHidden(True)
                 self.warning_tree.setVisible(False)
             else:
+                display_label = _TAB_DISPLAY_LABELS.get(label, label)
                 viewer_tab = ViewerTab(
-                    f"Open a session to browse {label.lower()} previews.",
+                    f"Open a session to browse {display_label.lower()} previews.",
                     show_list=True,
                     show_tilt_controls=label == "Tilt series",
                     on_item_selected=self._viewer_item_selected,
@@ -1307,7 +1606,12 @@ class MainWindow(QMainWindow):
                     tilt_angle_for=self._tilt_angle_for,
                     on_marker_selected=self._viewer_marker_selected,
                     on_marker_opened=self._viewer_marker_opened,
+                    on_cluster_member_activated=self._atlas_cluster_member_activated
+                    if label == "Atlas"
+                    else None,
+                    on_marker_selection_cleared=self._viewer_marker_selection_cleared,
                     show_marker_controls=label != "Tilt series",
+                    atlas_lod=label == "Atlas",
                     navigation_actions_for=self._viewer_navigation_actions
                     if label in {"Overview", "Search", "Search map", "Batch position", "Tilt series"}
                     else None,
@@ -1317,7 +1621,7 @@ class MainWindow(QMainWindow):
                 )
                 self._viewer_tabs[label] = viewer_tab
                 layout.addWidget(viewer_tab, stretch=1)
-            self.tabs.addTab(tab, label)
+            self.tabs.addTab(tab, _TAB_DISPLAY_LABELS.get(label, label))
         container = QWidget(self)
         container.setObjectName("centralShell")
         outer = QHBoxLayout(container)
@@ -1854,14 +2158,14 @@ class MainWindow(QMainWindow):
     def _finish_loading(self, message: str, *, fade: bool = True) -> None:
         self._pending_loading_status = None
         self._loading_status_timer.stop()
-        self.loading_progress.setVisible(False)
+        self.loading_progress.setVisible(self._report_task_active)
         self._set_loading_status(message, force=True)
         if hasattr(self, "loading_overlay"):
             self.loading_overlay.hide_loading(fade=fade)
         self.open_button.setEnabled(True)
         self.import_button.setEnabled(True)
         self.refresh_button.setEnabled(bool(self._sessions))
-        self.report_action.setEnabled(bool(self._sessions))
+        self.report_action.setEnabled(bool(self._sessions) and not self._report_task_active)
 
     def _loading_overlay_active(self) -> bool:
         return bool(
@@ -1952,45 +2256,66 @@ class MainWindow(QMainWindow):
             target += ".pdf"
 
         output_path = Path(target)
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            self._set_loading_status("Generating PDF report...")
-            result = build_session_report(
-                scope.sessions,
-                output_path,
-                project_title=scope.project_title,
-                project_groups=scope.project_groups,
-            )
-        except Exception as exc:  # noqa: BLE001 — surface any reportlab error to the user
-            LOGGER.exception("Failed to generate PDF report")
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(
-                self,
-                "Report failed",
-                f"Could not generate the PDF report:\n\n{exc}",
-            )
-            self.statusBar().showMessage("Report generation failed", 5000)
-            return
-        else:
-            QApplication.restoreOverrideCursor()
+        self._report_task_active = True
+        self.report_action.setEnabled(False)
+        self.loading_progress.setVisible(True)
+        self.statusBar().showMessage(f"Generating {output_path.name}…")
+        task = _ReportTask(
+            scope.sessions,
+            output_path,
+            project_title=scope.project_title,
+            project_groups=scope.project_groups,
+            signals=self._report_signals,
+        )
+        self._load_thread_pool.start(task)
 
+    @Slot(object, object)
+    def _on_report_generated(self, output_value: object, result: object) -> None:
+        output_path = Path(output_value)
+        self._finish_report_task()
         self._settings.last_report_directory = str(output_path.parent)
         save_settings(self._settings)
+        page_count = int(getattr(result, "page_count", 0))
+        warnings = list(getattr(result, "warnings", ()))
         self.statusBar().showMessage(
-            f"Saved {output_path.name} ({result.page_count} pages)", 5000
+            f"Saved {output_path.name} ({page_count} pages)", 5000
         )
 
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle("Report saved")
         box.setText(f"Saved to {output_path}")
-        if result.warnings:
-            box.setDetailedText("\n".join(result.warnings))
-        open_button = box.addButton("Open folder", QMessageBox.ButtonRole.AcceptRole)
+        if warnings:
+            box.setInformativeText(
+                f"Saved with {len(warnings)} warning{'s' if len(warnings) != 1 else ''}. "
+                "Open details to review them."
+            )
+            box.setDetailedText("\n".join(warnings))
+        open_report_button = box.addButton("Open report", QMessageBox.ButtonRole.AcceptRole)
+        open_folder_button = box.addButton("Open folder", QMessageBox.ButtonRole.ActionRole)
         box.addButton(QMessageBox.StandardButton.Close)
         box.exec()
-        if box.clickedButton() is open_button:
+        if box.clickedButton() is open_report_button:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(output_path)))
+        elif box.clickedButton() is open_folder_button:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(output_path.parent)))
+
+    @Slot(object, str)
+    def _on_report_failed(self, output_value: object, message: str) -> None:
+        output_path = Path(output_value)
+        self._finish_report_task()
+        QMessageBox.critical(
+            self,
+            "Report failed",
+            f"Could not generate {output_path.name}:\n\n{message}",
+        )
+        self.statusBar().showMessage("Report generation failed", 5000)
+
+    def _finish_report_task(self) -> None:
+        self._report_task_active = False
+        if not self._loading_task_active:
+            self.loading_progress.setVisible(False)
+        self.report_action.setEnabled(bool(self._sessions) and not self._report_task_active)
 
     def _report_default_scope_value(self) -> Any | None:
         if not hasattr(self, "tree"):
@@ -2059,8 +2384,8 @@ class MainWindow(QMainWindow):
             self.tree.clear()
             groups = self._project_groups()
             if self._sessions:
-                group_label = f"{len(groups)} group{'s' if len(groups) != 1 else ''}"
-                session_label = f"{len(self._sessions)} session{'s' if len(self._sessions) != 1 else ''}"
+                group_label = count_phrase(len(groups), "group")
+                session_label = count_phrase(len(self._sessions), "session")
                 self.project_count.setText(f"{group_label} / {session_label}")
             else:
                 self.project_count.setText("0 sessions")
@@ -2348,6 +2673,14 @@ class MainWindow(QMainWindow):
             section.addChild(child)
 
     def _label_for(self, value: Any) -> str:
+        if isinstance(value, ProjectTreeGroup):
+            return value.display_name
+        if isinstance(value, LinkedSampleGroup):
+            return value.label
+        if isinstance(value, Session | Sample):
+            return value.name
+        if isinstance(value, EntityGroup):
+            return value.label
         if isinstance(value, Overview):
             return format_overview_display_name(value.name)
         if isinstance(value, SearchMap | TiltSeries):
@@ -2533,8 +2866,9 @@ class MainWindow(QMainWindow):
                 self._deferred_loading_dashboard_refresh = False
             render_timer = QElapsedTimer()
             render_timer.start()
+            display_model = self._dashboard_display_model(model, scope_value)
             self.session_dashboard.set_model(
-                model,
+                display_model,
                 timeline,
                 animate=animate and not defer_heavy_cards,
                 defer_heavy_cards=defer_heavy_cards,
@@ -2556,6 +2890,23 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # pragma: no cover — defensive fallback
             LOGGER.warning("Dashboard model build failed: %s", exc, exc_info=True)
             self.session_dashboard.set_model(None)
+
+    def _dashboard_display_model(self, model: Any, scope_value: Any) -> Any:
+        """Apply display-only project naming without altering source models."""
+
+        title: str | None = None
+        if isinstance(self._active_context, ProjectTreeGroup):
+            title = self._active_context.display_name
+        elif isinstance(scope_value, list):
+            groups = self._project_groups()
+            if len(groups) == 1:
+                title = groups[0].display_name
+        if title and getattr(model, "title", None) != title:
+            try:
+                return replace(model, title=title)
+            except TypeError:
+                return model
+        return model
 
     def _dashboard_scope_cache_key(self, scope_value: Any) -> str:
         def key_for(value: Any) -> str:
@@ -3147,7 +3498,7 @@ class MainWindow(QMainWindow):
         self._update_tab_counts()
         self._update_status_summary()
         self.refresh_button.setEnabled(bool(self._sessions))
-        self.report_action.setEnabled(bool(self._sessions))
+        self.report_action.setEnabled(bool(self._sessions) and not self._report_task_active)
 
     def _select_project_group_by_key(self, key: str) -> None:
         for index in range(self.tree.topLevelItemCount()):
@@ -3235,8 +3586,9 @@ class MainWindow(QMainWindow):
         # red (template / exposure / tracking / focus / batch dot).
         all_tilt_series = self._all_tilt_series()
         failed_tilt_ids = self._failed_tilt_ids()
+        scope_context = self._viewer_tab_context()
         if prepared is None:
-            context = self._viewer_tab_context()
+            context = scope_context
             context_atlases = self._context_atlases(context)
             context_overviews = self._context_overviews(context)
             context_search_maps = self._context_search_maps(context)
@@ -3304,6 +3656,43 @@ class MainWindow(QMainWindow):
                 context=self._marker_context_for(value, fallback_context),
             )
 
+        def atlas_scoped(value: Any) -> list[ImageMarker]:
+            if not isinstance(value, Atlas):
+                return scoped(value)
+            base_context = self._marker_context_for(
+                value,
+                fallback_context,
+            )
+            return atlas_lod_markers(
+                value,
+                self._atlas_marker_context_for_collection_scope(
+                    value,
+                    base_context,
+                    scope_context,
+                ),
+            )
+
+        def atlas_collection_options(
+            value: Any,
+        ) -> list[AtlasCollectionOverlayOption]:
+            if not isinstance(value, Atlas):
+                return []
+            return self._atlas_collection_overlay_options(
+                value,
+                scope_context,
+            )
+
+        def atlas_collection_visibility_changed(
+            collection_key: str,
+            visible: bool,
+        ) -> None:
+            self._atlas_collection_visibility[
+                (
+                    self._atlas_collection_scope_key(scope_context),
+                    collection_key,
+                )
+            ] = visible
+
         def status_from_payload(payload: _PreparedViewerTab) -> Callable[[Any], ItemListStatus]:
             def list_status(value: Any) -> ItemListStatus:
                 return payload.statuses.get(getattr(value, "id", ""), ItemListStatus(status="unknown", summary=""))
@@ -3317,11 +3706,17 @@ class MainWindow(QMainWindow):
                 payload = tab_payloads[label]
                 auto_load_preview = label == current_tab_label
                 if label == "Atlas":
+                    self._viewer_tabs[
+                        label
+                    ].set_atlas_collection_overlay_provider(
+                        atlas_collection_options,
+                        atlas_collection_visibility_changed,
+                    )
                     self._viewer_tabs[label].set_items(
                         payload.items,
                         atlas_preview_path,
                         self._label_for,
-                        markers_for=scoped,
+                        markers_for=atlas_scoped,
                         prepared_sources=payload.sources,
                         auto_load_preview=auto_load_preview,
                     )
@@ -3410,10 +3805,15 @@ class MainWindow(QMainWindow):
             self._set_dashboard_highlighted_tilt_series_id(None)
             self._active_context = value
             self._preserve_tree_root_context = True
+            # Activate the destination before rebuilding the viewer tabs.
+            # Otherwise the previously visible Overview/Tilt series tab
+            # auto-loads the first item in the new scope, including its
+            # synchronous marker/navigation derivation, even though the user
+            # is being sent to Session.
+            self.tabs.setCurrentIndex(TAB_LABELS.index("Session"))
             self._render_viewer_tabs()
             self._render_dashboard_for_scope()
             self._update_tab_counts()
-            self.tabs.setCurrentIndex(TAB_LABELS.index("Session"))
             self.context_panel.set_title(value.display_name)
             self.context_panel.set_text(self._describe_project_group(value))
             self._update_status_summary(value.display_name)
@@ -3427,10 +3827,10 @@ class MainWindow(QMainWindow):
             self._set_dashboard_highlighted_tilt_series_id(None)
             self._active_context = None  # signals "use the project root scope"
             self._preserve_tree_root_context = True
+            self.tabs.setCurrentIndex(TAB_LABELS.index("Session"))
             self._render_viewer_tabs()
             self._render_dashboard_for_scope()
             self._update_tab_counts()
-            self.tabs.setCurrentIndex(TAB_LABELS.index("Session"))
             # Show a short context-panel summary listing the loaded sessions.
             summary = "\n".join(
                 [f"Linked sessions ({len(value)}):"] + [f"  - {s.name}" for s in value]
@@ -3444,15 +3844,12 @@ class MainWindow(QMainWindow):
             self._set_dashboard_highlighted_tilt_series_id(None)
             self._active_context = value
             self._preserve_tree_root_context = True
+            self.tabs.setCurrentIndex(TAB_LABELS.index("Session"))
             self._render_viewer_tabs()
-            # Rebuild the Session-tab dashboard for the new scope and bring
-            # the Session tab forward so the user lands on the summary view.
-            # This is what the spec calls "the user is jumped to the summary
-            # tab which displays summary information for that specific data
-            # collection".
+            # Rebuild the Session-tab dashboard for the new scope. The tab is
+            # already active so hidden viewer previews remain lazy.
             self._render_dashboard_for_scope()
             self._update_tab_counts()
-            self.tabs.setCurrentIndex(TAB_LABELS.index("Session"))
             self._set_context(label, value)
             return
         if isinstance(value, EntityGroup):
@@ -3600,6 +3997,73 @@ class MainWindow(QMainWindow):
     def _viewer_marker_opened(self, marker: ImageMarker) -> None:
         self._select_marker(marker, navigate=True)
 
+    def _viewer_marker_selection_cleared(self) -> None:
+        current_label = TAB_LABELS[self.tabs.currentIndex()]
+        viewer = self._viewer_tabs.get(current_label)
+        current = getattr(viewer, "_current_value", None) if viewer is not None else None
+        self._selection_state = SelectionState(
+            selected_object_type=type(current).__name__ if current is not None else None,
+            selected_object_id=getattr(current, "id", None),
+            selected_marker_id=None,
+            source="viewer-clear",
+        )
+        if current is not None:
+            self._set_context(self._label_for(current), current)
+        self.statusBar().showMessage("Cleared marker selection and highlights.")
+
+    def _atlas_cluster_member_activated(self, marker: ImageMarker) -> None:
+        batch = self._find_object_by_id(
+            str(
+                marker.metadata.get("batch_position_id")
+                or marker.linked_object_id
+                or ""
+            )
+        )
+        if not isinstance(batch, BatchPosition):
+            self.statusBar().showMessage(
+                "The selected cluster member could not be resolved to a batch position."
+            )
+            return
+        marker_context = self._marker_context_for_batch_position(batch)
+        target = resolve_batch_position_search_map(
+            batch,
+            search_maps=marker_context.search_maps,
+        )
+        if not target.navigable or target.search_map is None:
+            self.context_panel.set_title(marker.label or "Batch position")
+            self.context_panel.set_text(
+                f"{marker.tooltip or ''}\n\n{target.explanation}".strip()
+            )
+            self.statusBar().showMessage(target.explanation)
+            return
+
+        search_map = target.search_map
+        self._selection_state = SelectionState(
+            selected_object_type=type(batch).__name__,
+            selected_object_id=batch.id,
+            selected_marker_id=marker.id,
+            source="atlas-cluster-member",
+        )
+        self._preserve_tree_root_context = False
+        self._dashboard_scope_prefers_tree = True
+        context = self._context_for_object(search_map)
+        if context is not None:
+            self._active_context = context
+            self._render_viewer_tabs()
+        self._select_viewer_object(search_map)
+        destination_marker_id = self._marker_id_for_batch_position_navigation(
+            search_map,
+            batch,
+            context=marker_context,
+        )
+        if destination_marker_id:
+            self._viewer_tabs["Search map"].select_marker(
+                destination_marker_id
+            )
+        self.statusBar().showMessage(
+            f"Opened {self._label_for(search_map)} for {self._label_for(batch)}."
+        )
+
     def _viewer_navigation_actions(self, value: Any) -> list[ViewerNavigationAction]:
         if isinstance(value, TiltSeries):
             return self._tilt_navigation_actions(value)
@@ -3613,6 +4077,17 @@ class MainWindow(QMainWindow):
             return self._search_map_navigation_actions(value)
         return []
 
+    def _linked_target_tooltip(self, kind: str, target: Any, missing: str) -> str:
+        if target is None:
+            return missing
+        return f"Open linked {kind}: {self._label_for(target)}"
+
+    def _resolved_target_tooltip(self, explanation: str, target: Any) -> str:
+        if target is None:
+            return explanation
+        separator = " " if explanation.endswith(".") else ". "
+        return f"{explanation}{separator}Target: {self._label_for(target)}."
+
     def _tilt_navigation_actions(self, value: TiltSeries) -> list[ViewerNavigationAction]:
         if not isinstance(value, TiltSeries):
             return []
@@ -3624,7 +4099,11 @@ class MainWindow(QMainWindow):
                 "\u2197 Batch",
                 enabled=targets.batch_position is not None,
                 tooltip=(
-                    "Open linked batch position"
+                    self._linked_target_tooltip(
+                        "batch position",
+                        targets.batch_position,
+                        f"No linked batch position found.{inferred}",
+                    )
                     if targets.batch_position is not None
                     else f"No linked batch position found.{inferred}"
                 ),
@@ -3634,7 +4113,11 @@ class MainWindow(QMainWindow):
                 "\u2197 Search",
                 enabled=targets.search_tile is not None,
                 tooltip=(
-                    "Open linked search tile"
+                    self._linked_target_tooltip(
+                        "search tile",
+                        targets.search_tile,
+                        f"No linked search tile found.{inferred}",
+                    )
                     if targets.search_tile is not None
                     else f"No linked search tile found.{inferred}"
                 ),
@@ -3644,7 +4127,11 @@ class MainWindow(QMainWindow):
                 "\u2197 Search map",
                 enabled=targets.search_map is not None,
                 tooltip=(
-                    "Open linked search map"
+                    self._linked_target_tooltip(
+                        "search map",
+                        targets.search_map,
+                        f"No linked search map found.{inferred}",
+                    )
                     if targets.search_map is not None
                     else f"No linked search map found.{inferred}"
                 ),
@@ -3654,7 +4141,11 @@ class MainWindow(QMainWindow):
                 "\u2197 Overview",
                 enabled=targets.overview is not None,
                 tooltip=(
-                    "Open linked overview"
+                    self._linked_target_tooltip(
+                        "overview",
+                        targets.overview,
+                        f"No linked overview found.{inferred}",
+                    )
                     if targets.overview is not None
                     else f"No linked overview found.{inferred}"
                 ),
@@ -3672,25 +4163,33 @@ class MainWindow(QMainWindow):
                 "batch",
                 "\u2197 Batch",
                 enabled=batch is not None,
-                tooltip="Open linked batch position" if batch is not None else "No linked batch position found.",
+                tooltip=self._linked_target_tooltip(
+                    "batch position", batch, "No linked batch position found."
+                ),
             ),
             ViewerNavigationAction(
                 "search_map",
                 "\u2197 Search map",
                 enabled=search_map is not None,
-                tooltip="Open linked search map" if search_map is not None else "No linked search map found.",
+                tooltip=self._linked_target_tooltip(
+                    "search map", search_map, "No linked search map found."
+                ),
             ),
             ViewerNavigationAction(
                 "overview",
                 "\u2197 Overview",
                 enabled=overview is not None,
-                tooltip="Open linked overview" if overview is not None else "No linked overview found.",
+                tooltip=self._linked_target_tooltip(
+                    "overview", overview, "No linked overview found."
+                ),
             ),
             ViewerNavigationAction(
                 "tilt_series",
                 "\u2197 Tilt series",
                 enabled=tilt is not None,
-                tooltip="Open linked tilt series" if tilt is not None else "No linked tilt series found.",
+                tooltip=self._linked_target_tooltip(
+                    "tilt series", tilt, "No linked tilt series found."
+                ),
             ),
         ]
 
@@ -3704,19 +4203,26 @@ class MainWindow(QMainWindow):
                 "search_map",
                 "\u2197 Search map",
                 enabled=search_map is not None,
-                tooltip="Open linked search map" if search_map is not None else "No linked search map found.",
+                tooltip=self._linked_target_tooltip(
+                    "search map", search_map, "No linked search map found."
+                ),
             ),
             ViewerNavigationAction(
                 "overview",
                 "\u2197 Overview",
                 enabled=overview is not None,
-                tooltip="Open linked overview" if overview is not None else "No linked overview found.",
+                tooltip=self._linked_target_tooltip(
+                    "overview", overview, "No linked overview found."
+                ),
             ),
             ViewerNavigationAction(
                 "tilt_series",
                 "\u2197 Tilt series",
                 enabled=tilt_resolution.tilt_series is not None,
-                tooltip=tilt_resolution.tooltip,
+                tooltip=self._resolved_target_tooltip(
+                    tilt_resolution.tooltip,
+                    tilt_resolution.tilt_series,
+                ),
             ),
         ]
 
@@ -3731,7 +4237,10 @@ class MainWindow(QMainWindow):
                 "search",
                 "\u2197 Search",
                 enabled=search_resolution.search_tile is not None,
-                tooltip=search_resolution.tooltip,
+                tooltip=self._resolved_target_tooltip(
+                    search_resolution.tooltip,
+                    search_resolution.search_tile,
+                ),
             ),
         ]
 
@@ -3755,13 +4264,18 @@ class MainWindow(QMainWindow):
                 "search",
                 "\u2197 Search",
                 enabled=search_resolution.search_tile is not None,
-                tooltip=search_resolution.tooltip,
+                tooltip=self._resolved_target_tooltip(
+                    search_resolution.tooltip,
+                    search_resolution.search_tile,
+                ),
             ),
             ViewerNavigationAction(
                 "overview",
                 "\u2197 Overview",
                 enabled=overview is not None,
-                tooltip="Open linked overview" if overview is not None else "No linked overview found.",
+                tooltip=self._linked_target_tooltip(
+                    "overview", overview, "No linked overview found."
+                ),
             ),
         ]
 
@@ -4687,6 +5201,18 @@ class MainWindow(QMainWindow):
         return search_map_ids
 
     def _select_marker(self, marker: ImageMarker, *, navigate: bool) -> None:
+        if marker.metadata.get("atlas_lod_role") in {"batch_position", "unattributed"}:
+            if not bool(marker.metadata.get("navigation_enabled", False)):
+                message = str(
+                    marker.metadata.get("navigation_explanation")
+                    or "This Atlas marker has no unambiguous Overview link."
+                )
+                self.context_panel.set_title(marker.label or "Atlas marker")
+                self.context_panel.set_text(marker.tooltip or message)
+                self.statusBar().showMessage(message)
+                return
+            if navigate and self._open_atlas_batch_overview(marker):
+                return
         open_exposure_search_tile = navigate and self._should_open_search_tile_from_exposure_marker(marker)
         open_exposure_tilt = navigate and not open_exposure_search_tile and self._should_open_tilt_from_exposure_marker(marker)
         if open_exposure_search_tile:
@@ -4735,6 +5261,60 @@ class MainWindow(QMainWindow):
             self._render_viewer_tabs()
         self._select_viewer_object(linked)
         self.statusBar().showMessage(f"Opened {self._label_for(linked)} from marker.")
+
+    def _open_atlas_batch_overview(self, marker: ImageMarker) -> bool:
+        batch = self._find_object_by_id(
+            str(marker.metadata.get("batch_position_id") or marker.linked_object_id or "")
+        )
+        if not isinstance(batch, BatchPosition):
+            return False
+        marker_context = self._marker_context_for_batch_position(batch)
+        target = resolve_batch_position_overview(
+            batch,
+            search_maps=marker_context.search_maps,
+            overviews=marker_context.overviews,
+        )
+        if not target.navigable or target.overview is None:
+            self.context_panel.set_title(marker.label or "Batch position")
+            self.context_panel.set_text(f"{marker.tooltip or ''}\n\n{target.explanation}".strip())
+            self.statusBar().showMessage(target.explanation)
+            return True
+
+        overview = target.overview
+        self._selection_state = SelectionState(
+            selected_object_type=type(batch).__name__,
+            selected_object_id=batch.id,
+            selected_marker_id=marker.id,
+            source="atlas-batch-marker",
+        )
+        self._preserve_tree_root_context = False
+        self._dashboard_scope_prefers_tree = True
+        context = self._context_for_object(overview)
+        if context is not None:
+            self._active_context = context
+            self._render_viewer_tabs()
+        self.tabs.setCurrentIndex(TAB_LABELS.index("Overview"))
+        viewer = self._viewer_tabs["Overview"]
+        viewer.select_object(overview)
+        overview_markers = markers_for_object(
+            overview,
+            context=self._marker_context_for_overview(overview),
+        )
+        linked_marker = next(
+            (
+                candidate
+                for candidate in overview_markers
+                if candidate.marker_type == MarkerType.BATCH_POSITION
+                and candidate.linked_object_id == batch.id
+            ),
+            None,
+        )
+        viewer.select_marker(linked_marker.id if linked_marker is not None else None)
+        self._set_context(self._label_for(batch), batch)
+        self.statusBar().showMessage(
+            f"Opened {self._label_for(overview)} for batch position {self._label_for(batch)}."
+        )
+        return True
 
     def _viewer_frame_changed(self, value: Any, frame_index: int, frame_count: int) -> None:
         if self._suppress_viewer_context or self._preserve_tree_root_context:
@@ -5158,6 +5738,264 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ overlay scoping
 
+    def _atlas_collection_members(
+        self,
+        atlas: Atlas,
+    ) -> list[Sample]:
+        if not hasattr(self, "_sample_index"):
+            return []
+        return list(self._sample_index.get(atlas.id, ()))
+
+    def _session_for_sample_identity(
+        self,
+        sample: Sample,
+    ) -> Session | None:
+        return next(
+            (
+                session
+                for session in self._sessions
+                if any(candidate is sample for candidate in session.samples)
+            ),
+            None,
+        )
+
+    def _atlas_collection_samples_for_session(
+        self,
+        atlas: Atlas,
+        session: Session,
+    ) -> list[Sample]:
+        members = self._atlas_collection_members(atlas)
+        return [
+            sample
+            for sample in members
+            if any(candidate is sample for candidate in session.samples)
+        ]
+
+    def _atlas_collection_sessions(
+        self,
+        atlas: Atlas,
+    ) -> list[Session]:
+        sessions: list[Session] = []
+        for session in self._sessions:
+            if session.kind == SessionKind.ATLAS_SCREENING:
+                continue
+            samples = self._atlas_collection_samples_for_session(
+                atlas,
+                session,
+            )
+            if any(sample.batch_positions for sample in samples) or (
+                session.batch_positions
+                and self._session_level_collection_entities_belong_to_atlas(
+                    session,
+                    samples,
+                )
+            ):
+                sessions.append(session)
+        return sessions
+
+    @staticmethod
+    def _session_level_collection_entities_belong_to_atlas(
+        session: Session,
+        atlas_members: list[Sample],
+    ) -> bool:
+        collection_samples = [
+            sample
+            for sample in session.samples
+            if _sample_has_collection_data_static(sample)
+        ]
+        return bool(atlas_members) and all(
+            any(sample is member for member in atlas_members)
+            for sample in collection_samples
+        )
+
+    def _atlas_collection_sessions_for_scope(
+        self,
+        atlas: Atlas,
+        context: Any,
+    ) -> list[Session]:
+        available = self._atlas_collection_sessions(atlas)
+        if isinstance(context, Session):
+            return [context] if any(context is value for value in available) else available
+        if isinstance(context, Sample):
+            parent = self._session_for_sample_identity(context)
+            return (
+                [parent]
+                if parent is not None
+                and any(parent is value for value in available)
+                else available
+            )
+        if isinstance(context, LinkedSampleGroup):
+            return [
+                session
+                for session in available
+                if any(
+                    any(candidate is sample for candidate in session.samples)
+                    for sample in context.samples
+                )
+            ]
+        if isinstance(context, ProjectTreeGroup):
+            return [
+                session
+                for session in available
+                if any(
+                    session is candidate
+                    for candidate in context.collection_sessions
+                )
+            ]
+        return available
+
+    def _atlas_collection_scope_key(self, context: Any) -> str:
+        if isinstance(context, ProjectTreeGroup):
+            return f"project:{context.key}"
+        if isinstance(context, Session):
+            return f"session:{session_key(context)}"
+        if isinstance(context, Sample):
+            return f"sample:{_path_identity_key(context.path)}"
+        if isinstance(context, LinkedSampleGroup):
+            member_keys = sorted(
+                _path_identity_key(sample.path)
+                for sample in context.samples
+            )
+            return "linked-sample:" + "|".join(member_keys)
+        return "project:all"
+
+    def _atlas_collection_entities_for_session(
+        self,
+        atlas: Atlas,
+        session: Session,
+        context: Any,
+    ) -> tuple[list[BatchPosition], list[TiltSeries]]:
+        samples = self._atlas_collection_samples_for_session(
+            atlas,
+            session,
+        )
+        if isinstance(context, Sample) and any(
+            context is sample for sample in samples
+        ):
+            samples = [context]
+        elif isinstance(context, LinkedSampleGroup):
+            samples = [
+                sample
+                for sample in samples
+                if any(
+                    sample is candidate
+                    for candidate in context.samples
+                )
+            ]
+        batches = dedupe_entities(
+            batch
+            for sample in samples
+            for batch in sample.batch_positions
+        )
+        tilts = dedupe_entities(
+            tilt
+            for sample in samples
+            for tilt in sample.tilt_series
+        )
+        if self._session_level_collection_entities_belong_to_atlas(
+            session,
+            samples,
+        ):
+            batches = dedupe_entities(
+                [*batches, *session.batch_positions]
+            )
+            tilts = dedupe_entities(
+                [*tilts, *session.tilt_series]
+            )
+        return batches, tilts
+
+    def _atlas_collection_overlay_options(
+        self,
+        atlas: Atlas,
+        context: Any,
+    ) -> list[AtlasCollectionOverlayOption]:
+        sessions = self._atlas_collection_sessions_for_scope(
+            atlas,
+            context,
+        )
+        scope_key = self._atlas_collection_scope_key(context)
+        name_counts: dict[str, int] = {}
+        for session in sessions:
+            name_counts[session.name] = name_counts.get(session.name, 0) + 1
+        options: list[AtlasCollectionOverlayOption] = []
+        for session in sessions:
+            collection_key = session_key(session)
+            batches, _tilts = self._atlas_collection_entities_for_session(
+                atlas,
+                session,
+                context,
+            )
+            label = session.name
+            if name_counts.get(session.name, 0) > 1:
+                label = f"{label} — {session.path}"
+            options.append(
+                AtlasCollectionOverlayOption(
+                    key=collection_key,
+                    label=f"{label} ({len(batches)})",
+                    visible=self._atlas_collection_visibility.get(
+                        (scope_key, collection_key),
+                        True,
+                    ),
+                )
+            )
+        return options
+
+    def _atlas_marker_context_for_collection_scope(
+        self,
+        atlas: Atlas,
+        base: MarkerContext,
+        context: Any,
+    ) -> MarkerContext:
+        available = self._atlas_collection_sessions(atlas)
+        if not available:
+            return base
+        scope_sessions = self._atlas_collection_sessions_for_scope(
+            atlas,
+            context,
+        )
+        scope_key = self._atlas_collection_scope_key(context)
+        visible_sessions = [
+            session
+            for session in scope_sessions
+            if self._atlas_collection_visibility.get(
+                (scope_key, session_key(session)),
+                True,
+            )
+        ]
+        visible_batches: list[BatchPosition] = []
+        visible_tilts: list[TiltSeries] = []
+        for session in visible_sessions:
+            batches, tilts = self._atlas_collection_entities_for_session(
+                atlas,
+                session,
+                context,
+            )
+            visible_batches.extend(batches)
+            visible_tilts.extend(tilts)
+        batch_object_ids = {id(value) for value in visible_batches}
+        tilt_object_ids = {id(value) for value in visible_tilts}
+        scoped_tilts = tuple(
+            value
+            for value in base.tilt_series
+            if id(value) in tilt_object_ids
+        )
+        scoped_tilt_ids = {tilt.id for tilt in scoped_tilts}
+        return MarkerContext(
+            overviews=base.overviews,
+            search_maps=base.search_maps,
+            batch_positions=tuple(
+                value
+                for value in base.batch_positions
+                if id(value) in batch_object_ids
+            ),
+            tilt_series=scoped_tilts,
+            failed_tilt_ids=frozenset(
+                tilt_id
+                for tilt_id in base.failed_tilt_ids
+                if tilt_id in scoped_tilt_ids
+            ),
+        )
+
     def _rebuild_sample_index(self) -> None:
         """Build a reverse lookup ``entity.id → [Sample, …]`` keyed by
         *linked-sample group*.
@@ -5476,6 +6314,11 @@ class OpenSessionsDialog(QDialog):
         cancel_button = QPushButton("Cancel")
         cancel_button.clicked.connect(self.reject)
         self.import_button = QPushButton("Open folders")
+        # Give the confirming action primary weight so it does not read as a
+        # peer of Cancel. Set before the first polish, so no re-polish needed.
+        self.import_button.setObjectName("primaryButton")
+        self.import_button.setDefault(True)
+        self.import_button.setAutoDefault(True)
         self.import_button.clicked.connect(self.accept)
         buttons.addWidget(cancel_button)
         buttons.addWidget(self.import_button)

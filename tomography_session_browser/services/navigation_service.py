@@ -21,6 +21,28 @@ class TiltSeriesNavigationTargets:
     inferred_batch_label: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class BatchPositionOverviewTarget:
+    overview: Overview | None
+    explanation: str
+    ambiguous: bool = False
+
+    @property
+    def navigable(self) -> bool:
+        return self.overview is not None and not self.ambiguous
+
+
+@dataclass(frozen=True, slots=True)
+class BatchPositionSearchMapTarget:
+    search_map: SearchMap | None
+    explanation: str
+    ambiguous: bool = False
+
+    @property
+    def navigable(self) -> bool:
+        return self.search_map is not None and not self.ambiguous
+
+
 def tab_label_for_object(value: Any) -> str | None:
     if isinstance(value, Atlas):
         return "Atlas"
@@ -64,6 +86,143 @@ def resolve_tilt_series_navigation_targets(
         search_map=search_map,
         overview=overview,
         inferred_batch_label=inferred_label,
+    )
+
+
+def resolve_batch_position_overview(
+    batch: BatchPosition,
+    *,
+    search_maps: Iterable[SearchMap],
+    overviews: Iterable[Overview],
+) -> BatchPositionOverviewTarget:
+    """Resolve a batch-position Overview without choosing among candidates."""
+
+    maps = tuple(search_maps)
+    overview_items = tuple(overviews)
+    if batch.linked_overview_id:
+        explicit = [
+            overview
+            for overview in overview_items
+            if overview.id == batch.linked_overview_id
+        ]
+        if len(explicit) == 1:
+            return BatchPositionOverviewTarget(
+                explicit[0],
+                "Resolved from the batch position's explicit Overview ID.",
+            )
+        if len(explicit) > 1:
+            return BatchPositionOverviewTarget(
+                None,
+                "More than one Overview has the batch position's explicit Overview ID.",
+                ambiguous=True,
+            )
+        return BatchPositionOverviewTarget(
+            None,
+            "The batch position records an Overview ID that is not present in the current scope.",
+        )
+
+    candidates: dict[str, Overview] = {
+        overview.id: overview
+        for overview in overview_items
+        if batch.id in (overview.linked_batch_position_ids or [])
+    }
+    if batch.linked_search_map_id:
+        linked_maps = [
+            search_map
+            for search_map in maps
+            if search_map.id == batch.linked_search_map_id
+        ]
+        if len(linked_maps) > 1:
+            return BatchPositionOverviewTarget(
+                None,
+                "The linked Search map ID resolves to more than one Search map in the current scope.",
+                ambiguous=True,
+            )
+        if len(linked_maps) == 1:
+            search_map = linked_maps[0]
+            if search_map.overview is not None:
+                candidates[search_map.overview.id] = search_map.overview
+            for overview in overview_items:
+                if search_map.id in (overview.linked_search_map_ids or []):
+                    candidates[overview.id] = overview
+
+    resolved = tuple(candidates.values())
+    if len(resolved) == 1:
+        return BatchPositionOverviewTarget(
+            resolved[0],
+            "Resolved from the batch position's explicit linked metadata.",
+        )
+    if len(resolved) > 1:
+        names = ", ".join(sorted(overview.name for overview in resolved))
+        return BatchPositionOverviewTarget(
+            None,
+            f"Overview link is ambiguous between: {names}.",
+            ambiguous=True,
+        )
+    return BatchPositionOverviewTarget(
+        None,
+        "No unambiguous Overview link is recorded for this batch position.",
+    )
+
+
+def resolve_batch_position_search_map(
+    batch: BatchPosition,
+    *,
+    search_maps: Iterable[SearchMap],
+) -> BatchPositionSearchMapTarget:
+    """Resolve a batch-position Search map without guessing among candidates."""
+
+    maps = tuple(search_maps)
+    if batch.linked_search_map_id:
+        explicit = [
+            search_map
+            for search_map in maps
+            if search_map.id == batch.linked_search_map_id
+        ]
+        if len(explicit) == 1:
+            return BatchPositionSearchMapTarget(
+                explicit[0],
+                "Resolved from the batch position's explicit Search map ID.",
+            )
+        if len(explicit) > 1:
+            return BatchPositionSearchMapTarget(
+                None,
+                "The explicit Search map ID resolves to more than one Search map in the current scope.",
+                ambiguous=True,
+            )
+        return BatchPositionSearchMapTarget(
+            None,
+            "The batch position records a Search map ID that is not present in the current scope.",
+        )
+
+    tilt_ids = set(batch.linked_tilt_series_ids or [])
+    candidates = {
+        search_map.id: search_map
+        for search_map in maps
+        if (
+            batch.id in (search_map.linked_batch_position_ids or [])
+            or (
+                tilt_ids
+                and tilt_ids.intersection(search_map.linked_tilt_series_ids or [])
+            )
+        )
+    }
+    resolved = tuple(candidates.values())
+    if len(resolved) == 1:
+        return BatchPositionSearchMapTarget(
+            resolved[0],
+            "Resolved from explicit batch-position or tilt-series links on the Search map.",
+        )
+    if len(resolved) > 1:
+        names = ", ".join(sorted(search_map.name for search_map in resolved))
+        return BatchPositionSearchMapTarget(
+            None,
+            f"Search map link is ambiguous between: {names}.",
+            ambiguous=True,
+        )
+    return BatchPositionSearchMapTarget(
+        None,
+        "No unambiguous Search map link is recorded for this batch position.",
     )
 
 

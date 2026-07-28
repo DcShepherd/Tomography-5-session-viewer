@@ -7,6 +7,35 @@ from PySide6.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRect, QRe
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QGraphicsOpacityEffect, QWidget
 
+from tomography_session_browser.ui.animations import animations_enabled
+
+
+#: Radians advanced per second. This preserves the original ~2.2 s cycle while
+#: making the wave independent of timer hitches and display refresh rate.
+_PHASE_RADIANS_PER_SECOND = 0.046 / 0.016
+
+#: Footer text per loading phase. The footer used to be the fixed string
+#: "Parsing files and metadata from disk", which stayed on screen through the
+#: interface-building phases when nothing was being parsed.
+_PHASE_FOOTERS = (
+    ("preparing interface", "Building dashboard and tab models"),
+    ("finalising", "Finishing interface construction"),
+    ("rendering", "Finishing interface construction"),
+    ("loading complete", "Finishing interface construction"),
+    ("importing", "Reading session folders from disk"),
+    ("scanning", "Reading session folders from disk"),
+    ("loading", "Parsing files and metadata from disk"),
+)
+_DEFAULT_FOOTER = "Parsing files and metadata from disk"
+
+
+def _footer_for(message: str) -> str:
+    lowered = (message or "").lower()
+    for token, footer in _PHASE_FOOTERS:
+        if token in lowered:
+            return footer
+    return _DEFAULT_FOOTER
+
 
 class LoadingOverlay(QWidget):
     """Prominent theme-aware loading overlay with a five-dot wave animation."""
@@ -17,14 +46,20 @@ class LoadingOverlay(QWidget):
         super().__init__(parent)
         self._message = "Loading session..."
         self._detail = "Please wait while the session is prepared."
+        self._dot_band: QRect | None = None
         self._phase = 0.0
         self._shown_at = 0.0
         self._minimum_visible_ms = 350
         self._fade_duration_ms = 220
         self._fade_animation: QPropertyAnimation | None = None
         self._opacity_effect: QGraphicsOpacityEffect | None = None
+        # 42 ms was ~24 fps nominal, and the measured median tick was 47 ms
+        # (~21 fps) with hitches to 78 ms while the loader competed for the
+        # UI thread — visibly steppy on a sine-driven bounce. 16 ms targets
+        # 60 fps; the phase step below is scaled to keep the same cycle time.
         self._timer = QTimer(self)
-        self._timer.setInterval(42)
+        self._timer.setInterval(16)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self._advance)
         self._last_tick_at = 0.0
         self._tick_intervals_ms: list[float] = []
@@ -32,9 +67,7 @@ class LoadingOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName("Loading overlay")
-        self.setAccessibleDescription(
-            "Shows session loading progress while metadata and interface models are prepared."
-        )
+        self._sync_accessible_description()
         self.hide()
 
     def show_loading(self, message: str, detail: str | None = None) -> None:
@@ -46,10 +79,11 @@ class LoadingOverlay(QWidget):
             self.setGeometry(self.parentWidget().rect())
         self._shown_at = time.monotonic()
         self._reset_timing()
+        self._sync_accessible_description()
         self.show()
         self.raise_()
         self.setFocus(Qt.FocusReason.OtherFocusReason)
-        if not self._timer.isActive():
+        if animations_enabled(self) and not self._timer.isActive():
             self._timer.start()
         self.update()
 
@@ -57,6 +91,7 @@ class LoadingOverlay(QWidget):
         self._message = message
         if detail is not None:
             self._detail = detail
+        self._sync_accessible_description()
         if self.isVisible():
             self.raise_()
             self.update()
@@ -65,7 +100,7 @@ class LoadingOverlay(QWidget):
         if not self.isVisible():
             self._timer.stop()
             return
-        if not fade:
+        if not fade or not animations_enabled(self):
             self._cancel_fade()
             self._timer.stop()
             self.hide()
@@ -127,15 +162,26 @@ class LoadingOverlay(QWidget):
 
     def _advance(self) -> None:
         now = time.monotonic()
+        elapsed_s = self._timer.interval() / 1000.0
         if self._last_tick_at:
-            interval_ms = (now - self._last_tick_at) * 1000
+            elapsed_s = now - self._last_tick_at
+            interval_ms = elapsed_s * 1000
             self._tick_intervals_ms.append(interval_ms)
             expected_ms = max(1, self._timer.interval())
             if interval_ms > expected_ms * 2.5:
                 self._dropped_frames += max(1, int(interval_ms // expected_ms) - 1)
         self._last_tick_at = now
-        self._phase = (self._phase + 0.12) % (math.pi * 2.0)
-        self.update()
+        self._phase = (
+            self._phase + _PHASE_RADIANS_PER_SECOND * max(0.0, elapsed_s)
+        ) % (math.pi * 2.0)
+        # Repaint only the animated band. The previous full-widget update
+        # refilled the whole-window scrim every tick, which is the most
+        # expensive thing on screen at exactly the moment the UI thread is
+        # busiest.
+        if self._dot_band is None:
+            self.update()
+        else:
+            self.update(self._dot_band)
 
     def performance_snapshot(self) -> dict[str, float | int]:
         intervals = list(self._tick_intervals_ms)
@@ -155,6 +201,12 @@ class LoadingOverlay(QWidget):
         self._last_tick_at = 0.0
         self._tick_intervals_ms = []
         self._dropped_frames = 0
+
+    def _sync_accessible_description(self) -> None:
+        footer = _footer_for(self._message)
+        self.setAccessibleDescription(
+            " ".join(part.strip() for part in (self._message, self._detail, footer) if part.strip())
+        )
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt signature
         from tomography_session_browser.ui.branding import draw_stack_mark
@@ -177,7 +229,7 @@ class LoadingOverlay(QWidget):
 
             title_height = _text_height(title_font, content_width, self._message)
             detail_height = _text_height(detail_font, content_width, self._detail, word_wrap=True)
-            footer_height = _text_height(footer_font, content_width, "Parsing files and metadata from disk")
+            footer_height = _text_height(footer_font, content_width, _footer_for(self._message))
             dot_wave_height = 72
             brand_size = 30.0
             brand_gap = 14.0
@@ -254,6 +306,15 @@ class LoadingOverlay(QWidget):
             spacing = 31.0
             base_x = panel.center().x() - spacing * 2
             base_y = detail_rect.bottom() + 48
+            # Remember the band the dots sweep so ``_advance`` can repaint
+            # just this strip instead of the whole window.
+            travel = 23.0
+            self._dot_band = QRect(
+                int(base_x - spacing - dot_radius * 2),
+                int(base_y - travel - dot_radius * 2),
+                int(spacing * 6 + dot_radius * 4),
+                int(travel * 2 + dot_radius * 4),
+            )
             for index in range(5):
                 phase = self._phase - index * 0.62
                 y = base_y + math.sin(phase) * 23.0
@@ -263,7 +324,7 @@ class LoadingOverlay(QWidget):
             painter.setFont(footer_font)
             painter.setPen(QColor(palette.text_muted))
             footer = QRectF(panel.left() + 32, panel.bottom() - 26 - footer_height, content_width, footer_height)
-            painter.drawText(footer, Qt.AlignmentFlag.AlignCenter, "Parsing files and metadata from disk")
+            painter.drawText(footer, Qt.AlignmentFlag.AlignCenter, _footer_for(self._message))
         finally:
             painter.end()
 

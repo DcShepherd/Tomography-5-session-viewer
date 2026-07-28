@@ -40,6 +40,16 @@ from reportlab.platypus import Flowable, KeepTogether, Paragraph, Spacer, Table
 
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.reports import styles
+from tomography_session_browser.services.atlas_marker_style import (
+    IMAGE_STATUS_COLOURS,
+    LEAF_FAILED_GLYPH_WIDTH_DP,
+    LEAF_FILL_RADIUS_DP,
+    LEAF_HALO_WIDTH_DP,
+    LEAF_RING_RADIUS_DP,
+    LEAF_STATUS_WIDTH_DP,
+    MARKER_INK,
+    PRINT_STATUS_COLOURS,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -742,6 +752,12 @@ class OverlayedImage(Flowable):
             if marker.marker_type == MarkerType.BATCH_LABEL:
                 self._draw_batch_label(marker, scale_x, scale_y)
                 continue
+            if marker.metadata.get("atlas_lod_role") in {
+                "batch_position",
+                "unattributed",
+            }:
+                self._draw_atlas_leaf_marker(marker, scale_x, scale_y)
+                continue
             # Failed tilt series propagate their status onto every
             # marker spawned from the same batch (template, exposure,
             # tracking, focus, batch dot). Honouring the status here
@@ -794,6 +810,29 @@ class OverlayedImage(Flowable):
                 cy = self._draw_h - marker.y * scale_y
                 radius = (marker.radius or 8) * scale_x
                 c.circle(cx, cy, max(radius, 1.0), stroke=1, fill=0)
+
+    def _draw_atlas_leaf_marker(
+        self,
+        marker: ImageMarker,
+        scale_x: float,
+        scale_y: float,
+    ) -> None:
+        if marker.x is None or marker.y is None:
+            return
+        cx = marker.x * scale_x
+        cy = self._draw_h - marker.y * scale_y
+        status = (marker.status or "queued").lower()
+        navigable = bool(marker.metadata.get("navigation_enabled", True))
+        _draw_pdf_atlas_leaf(
+            self.canv,
+            cx,
+            cy,
+            status=status,
+            navigable=navigable,
+            colours_by_status=IMAGE_STATUS_COLOURS,
+            halo=True,
+            diameter=14.0,
+        )
 
     def _draw_batch_label(self, marker: ImageMarker, scale_x: float, scale_y: float) -> None:
         if not marker.label:
@@ -862,6 +901,130 @@ def _batch_label_pdf_origin(
     )
 
 
+class AtlasMarkerPrintLegend(Flowable):
+    """White two-column legend for status-aware Atlas marker figures."""
+
+    LEGEND_WIDTH = 340.0
+    LEGEND_HEIGHT = 132.0
+    _ROWS = (
+        ("collected", "Collected"),
+        ("partial", "Partial"),
+        ("queued", "Queued"),
+        ("failed", "Failed"),
+        ("unattributed", "Unattributed"),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.width = self.LEGEND_WIDTH
+        self.height = self.LEGEND_HEIGHT
+        self.hAlign = "LEFT"
+
+    def wrap(self, _avail_w, _avail_h):  # noqa: N802
+        return self.width, self.height
+
+    def draw(self) -> None:
+        c = self.canv
+        c.saveState()
+        try:
+            c.setFillColor(colors.white)
+            c.setStrokeColor(colors.HexColor("#C7CDD4"))
+            c.setLineWidth(1.0)
+            c.roundRect(0.5, 0.5, self.width - 1.0, self.height - 1.0, 4.0, stroke=1, fill=1)
+            c.setFillColor(colors.HexColor("#5F6B76"))
+            c.setFont("Courier-Bold", 9)
+            c.drawString(16.0, self.height - 24.0, "BATCH POSITION STATUS")
+            for index, (status, label) in enumerate(self._ROWS):
+                column = 0 if index < 3 else 1
+                row = index if index < 3 else index - 3
+                x = 16.0 + column * 162.0
+                y = self.height - 49.0 - row * 22.0
+                _draw_pdf_atlas_leaf(
+                    c,
+                    x + 9.0,
+                    y + 6.0,
+                    status=status,
+                    navigable=True,
+                    colours_by_status=PRINT_STATUS_COLOURS,
+                    halo=False,
+                    diameter=13.0,
+                    failed_glyph_color="#FFFFFF",
+                )
+                c.setFillColor(colors.HexColor("#2A323D"))
+                c.setFont("Helvetica", 11)
+                c.drawString(x + 27.0, y + 2.0, label)
+        finally:
+            c.restoreState()
+
+
+def _draw_pdf_atlas_leaf(
+    canvas,
+    cx: float,
+    cy: float,
+    *,
+    status: str,
+    navigable: bool,
+    colours_by_status: dict[str, str],
+    halo: bool,
+    diameter: float,
+    failed_glyph_color: str = MARKER_INK,
+) -> None:
+    """ReportLab counterpart of the QPainter leaf-marker geometry."""
+
+    scale = diameter / 14.0
+    ring_radius = LEAF_RING_RADIUS_DP * scale
+    fill_radius = LEAF_FILL_RADIUS_DP * scale
+    colour_key = status if status in colours_by_status else "queued"
+    if not navigable and status != "unattributed":
+        colour_key = "unattributed"
+    colour = colors.HexColor(colours_by_status[colour_key])
+    canvas.saveState()
+    try:
+        if navigable and status in {"collected", "failed"}:
+            canvas.setFillColor(colour)
+            canvas.circle(cx, cy, fill_radius, stroke=0, fill=1)
+        elif navigable and status == "partial":
+            path = canvas.beginPath()
+            path.moveTo(cx, cy)
+            path.arc(
+                cx - fill_radius,
+                cy - fill_radius,
+                cx + fill_radius,
+                cy + fill_radius,
+                90.0,
+                180.0,
+            )
+            path.close()
+            canvas.setFillColor(colour)
+            canvas.drawPath(path, stroke=0, fill=1)
+
+        canvas.setLineCap(0)
+        canvas.setLineJoin(0)
+        if halo:
+            canvas.setDash()
+            canvas.setStrokeColor(colors.HexColor(MARKER_INK))
+            canvas.setLineWidth(LEAF_HALO_WIDTH_DP * scale)
+            canvas.circle(cx, cy, ring_radius, stroke=1, fill=0)
+        canvas.setStrokeColor(colour)
+        canvas.setLineWidth(LEAF_STATUS_WIDTH_DP * scale)
+        if status == "unattributed":
+            canvas.setDash([3.9 * scale, 2.4 * scale], 0)
+        else:
+            canvas.setDash()
+        canvas.circle(cx, cy, ring_radius, stroke=1, fill=0)
+
+        if navigable and status == "failed":
+            glyph = fill_radius * 0.62
+            canvas.setDash()
+            canvas.setStrokeColor(colors.HexColor(failed_glyph_color))
+            canvas.setLineWidth(LEAF_FAILED_GLYPH_WIDTH_DP * scale)
+            canvas.setLineCap(1)
+            canvas.line(cx - glyph, cy - glyph, cx + glyph, cy + glyph)
+            canvas.line(cx + glyph, cy - glyph, cx - glyph, cy + glyph)
+    finally:
+        canvas.restoreState()
+
+
 # =============================================================================
 # Convenience helpers
 # =============================================================================
@@ -915,6 +1078,7 @@ def keep_with_caption(
 
 
 __all__ = [
+    "AtlasMarkerPrintLegend",
     "CompletionStrip",
     "CountCard",
     "CountCardData",

@@ -8,6 +8,22 @@ _SEARCH_MAP_OVERVIEW_RE = re.compile(
 )
 
 
+def count_phrase(count: int, singular: str, plural: str | None = None) -> str:
+    """Return ``"<count> <noun>"`` with the noun agreeing with ``count``.
+
+    Lives in ``domain`` because the same phrasing is needed by services
+    (viewer row statuses), presenters, and widgets, and services must not
+    import from ``ui``.
+
+    ``plural`` is for nouns that are not formed by appending "s" — including
+    invariant ones such as "tilt series", which must be passed explicitly so
+    a single series does not read as "1 tilt serie".
+    """
+
+    noun = singular if count == 1 else (plural if plural is not None else f"{singular}s")
+    return f"{count:,} {noun}"
+
+
 def format_overview_display_name(name: str | None) -> str:
     """Return a compact, display-only label for overview names.
 

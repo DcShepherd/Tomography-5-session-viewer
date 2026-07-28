@@ -141,8 +141,13 @@ def validate_tilt_series(
         evidence_source=source,
     )
 
-    log_func = LOGGER.warning if status == STATUS_FAILED else LOGGER.debug
-    log_func(
+    # A failed tilt series is normal, expected input for this app — it is
+    # exactly what the reviewer opened the tool to find. Logging each one at
+    # WARNING put a wall of text on the console of anyone launching from a
+    # terminal, and the same series is validated many times per load, so the
+    # same line repeated 8+ times. The outcome is surfaced in the UI; keep
+    # the console record at debug level.
+    LOGGER.debug(
         "tilt-series validation: name=%s path=%s actual=%d expected=%s source=%s "
         "min_tilt=%s max_tilt=%s increment=%s status=%s reason=%s",
         name,

@@ -15,8 +15,10 @@ from PySide6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
+from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.models import Sample, Session
 from tomography_session_browser.reports import ProjectReportGroup
@@ -46,6 +48,34 @@ class ReportScope:
     project_title: str
     project_groups: tuple[ProjectReportGroup, ...]
     default_filename: str
+
+
+def _repolish(widget: QWidget) -> None:
+    """Re-run the style engine so a late ``setObjectName`` takes effect."""
+
+    style = widget.style()
+    if style is not None:
+        style.unpolish(widget)
+        style.polish(widget)
+    widget.update()
+
+
+def _selection_summary_text(request: ReportScopeRequest) -> str:
+    """Describe the current selection above the confirm button.
+
+    The dialog previously gave no feedback about what a click on "Generate
+    report" would actually include.
+    """
+
+    if not request.has_selection:
+        return "Nothing selected"
+    parts = [
+        count_phrase(len(request.group_keys), "project group"),
+        count_phrase(len(request.session_keys), "session"),
+        count_phrase(len(request.sample_keys), "sample"),
+    ]
+    chosen = [part for part in parts if not part.startswith("0 ")]
+    return "Selected: " + ", ".join(chosen)
 
 
 class ReportScopeDialog(QDialog):
@@ -87,8 +117,12 @@ class ReportScopeDialog(QDialog):
 
         self.tree = QTreeWidget(self)
         self.tree.setObjectName("projectTree")
+        self.tree.setAccessibleName("Report scope")
+        self.tree.setAccessibleDescription(
+            "Choose linked groups, sessions, or samples to include in the report."
+        )
         self.tree.setColumnCount(2)
-        self.tree.setHeaderLabels(["Scope", ""])
+        self.tree.setHeaderLabels(["Scope", "Type"])
         self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.tree.header().setStretchLastSection(False)
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -99,6 +133,12 @@ class ReportScopeDialog(QDialog):
         controls = QHBoxLayout()
         controls.setSpacing(8)
         self.select_current_button = QPushButton("Select current view", self)
+        self.select_current_button.setEnabled(current_scope is not None)
+        self.select_current_button.setToolTip(
+            "Select the scope currently shown in the application"
+            if current_scope is not None
+            else "No current reportable scope is available"
+        )
         self.select_all_button = QPushButton("Select all", self)
         self.clear_button = QPushButton("Clear selection", self)
         self.expand_button = QPushButton("Expand all", self)
@@ -115,9 +155,22 @@ class ReportScopeDialog(QDialog):
         controls.addStretch(1)
         layout.addLayout(controls)
 
+        self.selection_summary = QLabel("Nothing selected", self)
+        self.selection_summary.setObjectName("mutedLabel")
+        layout.addWidget(self.selection_summary)
+
         self.buttons = QDialogButtonBox(self)
         self.generate_button = self.buttons.addButton("Generate report", QDialogButtonBox.ButtonRole.AcceptRole)
         self.cancel_button = self.buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        # The confirming action sat at the same visual weight as Cancel and
+        # the five secondary selection buttons above it. Qt has already
+        # polished the button by the time ``addButton`` returns, so the new
+        # object name needs an explicit re-polish to pick up the #primaryButton
+        # rules.
+        self.generate_button.setObjectName("primaryButton")
+        _repolish(self.generate_button)
+        self.generate_button.setDefault(True)
+        self.generate_button.setAutoDefault(True)
         self.generate_button.setEnabled(False)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
@@ -287,7 +340,9 @@ class ReportScopeDialog(QDialog):
         self._update_generate_enabled()
 
     def _update_generate_enabled(self) -> None:
-        self.generate_button.setEnabled(self.selected_request().has_selection)
+        request = self.selected_request()
+        self.generate_button.setEnabled(request.has_selection)
+        self.selection_summary.setText(_selection_summary_text(request))
 
     def _set_checked(self, item: QTreeWidgetItem, checked: bool) -> None:
         item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)

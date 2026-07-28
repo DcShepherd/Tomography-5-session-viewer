@@ -181,7 +181,10 @@ def test_overview_exposure_selection_enables_search_jump(monkeypatch, tmp_path: 
     action = next(action for action in window._viewer_navigation_actions(overview) if action.key == "search")
 
     assert action.enabled is True
-    assert action.tooltip == "Jump to the search item associated with this exposure area."
+    assert action.tooltip.startswith(
+        "Jump to the search item associated with this exposure area."
+    )
+    assert search_tile.name in action.tooltip
     assert window._search_tile_for_exposure_marker(marker) is search_tile
 
 
@@ -200,7 +203,10 @@ def test_search_map_exposure_selection_enables_search_jump(monkeypatch, tmp_path
     action = next(action for action in window._viewer_navigation_actions(search_map) if action.key == "search")
 
     assert action.enabled is True
-    assert action.tooltip == "Jump to the search item associated with this exposure area."
+    assert action.tooltip.startswith(
+        "Jump to the search item associated with this exposure area."
+    )
+    assert "Position_1" in action.tooltip
 
 
 def test_overview_exposure_jump_request_opens_search_item(monkeypatch, tmp_path: Path) -> None:

@@ -23,8 +23,7 @@ class DoseInformationScatterPlot(DefocusScatterPlot):
         )
 
     def set_model(self, model: DoseInformationPlotModel | None) -> None:
-        self._model = model
-        self.update()
+        super().set_model(model)
 
     def _point_value(self, point: Any) -> float:
         return point.dose_e_per_angstrom2

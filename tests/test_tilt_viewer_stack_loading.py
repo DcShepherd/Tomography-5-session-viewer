@@ -6,7 +6,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPainter
+from PySide6.QtGui import QFontMetrics, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 from tomography_session_browser.domain.models import MrcMetadata, TiltSeries
@@ -133,6 +133,20 @@ def test_zoom_refresh_ignores_unreadable_mrc_path(tmp_path: Path) -> None:
     viewer._zoom_changed(1.0)
 
     assert viewer.zoom_label.text() == "100%"
+
+
+def test_zoom_strip_reserves_width_for_four_digit_percentages() -> None:
+    _app()
+    viewer = ViewerTab("empty", show_list=False)
+
+    viewer._zoom_changed(10.0)
+
+    assert viewer.zoom_label.text() == "1000%"
+    text_width = QFontMetrics(
+        viewer.zoom_label.font()
+    ).horizontalAdvance(viewer.zoom_label.text())
+    assert viewer.zoom_label.contentsRect().width() >= text_width
+    assert viewer.zoom_panel.width() >= viewer.zoom_label.width() + 6
 
 
 def test_image_preview_uses_smooth_pixmap_scaling() -> None:

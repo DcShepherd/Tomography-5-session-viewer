@@ -12,6 +12,7 @@ class MarkerType:
     SEARCH_MAP = "search_map"
     OVERVIEW = "overview"
     BATCH_POSITION = "batch_position"
+    BATCH_CLUSTER = "batch_cluster"
     TILT_SERIES = "tilt_series"
     TEMPLATE_AREA = "template_area"
     EXPOSURE_AREA = "exposure_area"

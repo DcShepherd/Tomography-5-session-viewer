@@ -17,6 +17,8 @@ from tomography_session_browser.services.batch_label_service import (
     batch_label_screen_font_size_px,
     compact_label_for_tilt,
     exposure_batch_label,
+    atlas_batch_label_placements,
+    visible_batch_position_label_ids,
 )
 from tomography_session_browser.services.marker_service import batch_position_markers
 from tomography_session_browser.ui.image_viewer import ImagePreviewView
@@ -51,6 +53,47 @@ def _batch(name: str = "Position_001") -> BatchPosition:
             },
         },
     )
+
+
+def test_atlas_leaf_label_collision_nudges_before_dropping() -> None:
+    markers = [
+        ImageMarker(
+            id="batch-1",
+            marker_type=MarkerType.BATCH_POSITION,
+            linked_object_id="batch-1",
+            source_object_id="atlas",
+            x=10.0,
+            y=10.0,
+            label="1",
+        ),
+        ImageMarker(
+            id="batch-2",
+            marker_type=MarkerType.BATCH_POSITION,
+            linked_object_id="batch-2",
+            source_object_id="atlas",
+            x=12.0,
+            y=10.0,
+            label="2",
+        ),
+        ImageMarker(
+            id="batch-3",
+            marker_type=MarkerType.BATCH_POSITION,
+            linked_object_id="batch-3",
+            source_object_id="atlas",
+            x=80.0,
+            y=10.0,
+            label="3",
+        ),
+    ]
+    assert visible_batch_position_label_ids(markers, view_scale=1.0) == {
+        "batch-1",
+        "batch-2",
+        "batch-3",
+    }
+    placements = atlas_batch_label_placements(markers, view_scale=1.0)
+    assert placements["batch-1"].leader is False
+    assert placements["batch-2"].leader is True
+    assert abs(placements["batch-2"].y_offset_px) <= 26.0
 
 
 def test_batch_position_markers_only_add_main_exposure_label() -> None:

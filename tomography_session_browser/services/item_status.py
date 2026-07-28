@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from tomography_session_browser.domain.display_names import count_phrase as _count_phrase
 from tomography_session_browser.domain.models import BatchPosition, SearchMap, SearchTile, TiltSeries
+from tomography_session_browser.domain.units import ANGSTROM_PER_PIXEL
 from tomography_session_browser.parsers.path_utils import natural_key
 from tomography_session_browser.parsers.xml_parser import find_first
 from tomography_session_browser.services.batch_inference import (
@@ -45,6 +47,29 @@ class ItemStatusContext:
     tilt_series: tuple[TiltSeries, ...]
     validations: dict[str, TiltSeriesValidation]
     inferred_batch_labels: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class BatchPositionStatusCounts:
+    """Validator-backed acquisition counts for one batch position.
+
+    The Atlas LOD overlay consumes this public, read-only summary instead of
+    duplicating the viewer-list classification rules. ``include_inferred`` is
+    deliberately configurable because orphaned failed tilt series remain
+    distinct markers on the Atlas rather than being promoted into a scientific
+    batch relationship.
+    """
+
+    planned: int
+    complete: int
+    incomplete: int
+    failed: int
+    missing: int
+    unknown: int
+
+    @property
+    def acquired(self) -> int:
+        return self.complete + self.incomplete + self.failed + self.unknown
 
 
 def build_item_status_context(
@@ -95,6 +120,32 @@ def item_list_status(value: Any, context: ItemStatusContext | None) -> ItemListS
     return ItemListStatus(status=STATUS_UNKNOWN_LABEL, summary="")
 
 
+def batch_position_status_counts(
+    batch: BatchPosition,
+    context: ItemStatusContext,
+    *,
+    include_inferred: bool = True,
+) -> BatchPositionStatusCounts:
+    """Return the shared planned/acquired outcome counts for ``batch``."""
+
+    linked_tilts = _tilt_series_for_batch(
+        batch,
+        context,
+        include_inferred=include_inferred,
+    )
+    planned = _planned_exposures_for_batch(batch, linked_tilts)
+    counts = _status_counts(linked_tilts, context)
+    counts.missing += max(planned - len(linked_tilts), 0)
+    return BatchPositionStatusCounts(
+        planned=planned,
+        complete=counts.complete,
+        incomplete=counts.incomplete,
+        failed=counts.failed,
+        missing=counts.missing,
+        unknown=counts.unknown,
+    )
+
+
 def _search_map_status(search_map: SearchMap, context: ItemStatusContext) -> ItemListStatus:
     linked_batches = [
         batch for batch in context.batch_positions if batch.linked_search_map_id == search_map.id
@@ -124,7 +175,7 @@ def _search_map_status(search_map: SearchMap, context: ItemStatusContext) -> Ite
     tile_text = (
         f"{tile_acquired}/{tile_planned} tiles"
         if tile_planned > 0
-        else f"{tile_count} tiles"
+        else _count_phrase(tile_count, "tile")
     )
     parts = [tile_text, _count_phrase(len(linked_batches), "batch position"), progress]
     if counts.failed:
@@ -193,13 +244,18 @@ def _search_tile_status(search_tile: SearchTile, context: ItemStatusContext) -> 
 
 
 def _batch_position_status(batch: BatchPosition, context: ItemStatusContext) -> ItemListStatus:
-    linked_tilts = _tilt_series_for_batch(batch, context)
-    planned = _planned_exposures_for_batch(batch, linked_tilts)
-    counts = _status_counts(linked_tilts, context)
-    counts.missing += max(planned - len(linked_tilts), 0)
+    details = batch_position_status_counts(batch, context)
+    planned = details.planned
+    counts = _StatusCounts(
+        complete=details.complete,
+        incomplete=details.incomplete,
+        failed=details.failed,
+        missing=details.missing,
+        unknown=details.unknown,
+    )
 
     explicit_status = _normalise_batch_status(batch.status)
-    if not linked_tilts and planned == 0:
+    if planned == 0:
         status = explicit_status or STATUS_UNKNOWN_LABEL
     elif explicit_status == STATUS_FAILED_LABEL and not counts.failed:
         counts.failed += 1
@@ -231,12 +287,12 @@ def _tilt_series_status(tilt: TiltSeries, context: ItemStatusContext) -> ItemLis
         if validation.expected_count:
             parts.append(f"{validation.actual_count}/{validation.expected_count} frames")
         else:
-            parts.append(f"{validation.actual_count} frames")
+            parts.append(_count_phrase(validation.actual_count, "frame"))
     else:
         actual = _actual_tilt_count(tilt)
-        parts.append(f"{actual or 'unknown'} frames")
+        parts.append(_count_phrase(actual, "frame") if actual else "unknown frames")
     if tilt.pixel_size:
-        parts.append(f"{tilt.pixel_size:g} A/px")
+        parts.append(f"{tilt.pixel_size:g} {ANGSTROM_PER_PIXEL}")
     inferred = context.inferred_batch_labels.get(tilt.id)
     if inferred:
         parts.append(f"inferred batch position {inferred}")
@@ -347,6 +403,8 @@ def _normalise_batch_status(status: str | None) -> str | None:
 def _tilt_series_for_batch(
     batch: BatchPosition,
     context: ItemStatusContext,
+    *,
+    include_inferred: bool = True,
 ) -> list[TiltSeries]:
     linked_ids = set(batch.linked_tilt_series_ids or [])
     batch_keys = _batch_inference_keys(batch)
@@ -355,7 +413,11 @@ def _tilt_series_for_batch(
     for tilt in context.tilt_series:
         if tilt.id in seen:
             continue
-        inferred_key = batch_inference_key(context.inferred_batch_labels.get(tilt.id))
+        inferred_key = (
+            batch_inference_key(context.inferred_batch_labels.get(tilt.id))
+            if include_inferred
+            else ""
+        )
         if (
             tilt.id in linked_ids
             or tilt.linked_batch_position_id == batch.id
@@ -518,11 +580,6 @@ def _join_tooltip(title: str, parts: list[str], *, status: str) -> str:
     return "\n".join(lines)
 
 
-def _count_phrase(count: int, singular: str, plural: str | None = None) -> str:
-    noun = singular if count == 1 else (plural or f"{singular}s")
-    return f"{count} {noun}"
-
-
 def _display_status(status: str) -> str:
     if status == STATUS_DONE:
         return "complete"
@@ -533,3 +590,26 @@ def _display_status(status: str) -> str:
     if status == STATUS_UNKNOWN_LABEL:
         return "unavailable"
     return status
+
+
+def display_status_label(status: str) -> str:
+    """Return the consistent user-facing label for an internal item status."""
+
+    normalized = (status or "").strip().lower()
+    labels = {
+        STATUS_DONE: "Complete",
+        "complete": "Complete",
+        "completed": "Complete",
+        "acquired": "Complete",
+        STATUS_PARTIAL: "Incomplete",
+        STATUS_INCOMPLETE_LABEL: "Incomplete",
+        STATUS_FAILED_LABEL: "Failed",
+        "error": "Failed",
+        STATUS_MISSING: "Unavailable",
+        STATUS_UNKNOWN_LABEL: "Unavailable",
+        "n/a": "Unavailable",
+        "queued": "Pending",
+        "pending": "Pending",
+        "warning": "Warning",
+    }
+    return labels.get(normalized, normalized.replace("_", " ").title())

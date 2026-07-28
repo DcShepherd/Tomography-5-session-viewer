@@ -16,7 +16,13 @@ from tomography_session_browser.services.batch_label_service import (
     compact_batch_label_for_batch,
     compact_label_for_tilt,
 )
+from tomography_session_browser.services.batch_position_status import (
+    STATUS_UNATTRIBUTED,
+    aggregate_batch_position_status,
+)
+from tomography_session_browser.services.item_status import build_item_status_context
 from tomography_session_browser.services.loading_profiler import record_aggregate_phase
+from tomography_session_browser.services.navigation_service import resolve_batch_position_overview
 
 LOGGER = logging.getLogger(__name__)
 
@@ -241,6 +247,188 @@ def atlas_markers(atlas: Atlas, context: MarkerContext) -> list[ImageMarker]:
         )
     _filter_off_image_markers(markers, image_size=frame.image_size, source_id=atlas.id)
     return markers
+
+
+def atlas_lod_markers(
+    atlas: Atlas,
+    context: MarkerContext,
+    *,
+    include_detail_markers: bool = True,
+) -> list[ImageMarker]:
+    """Build the status-aware Atlas marker source.
+
+    Screen-space clustering remains a viewer-only operation.  PDF export uses
+    the same status leaf markers with ``include_detail_markers=False`` so it
+    retains its established overview/search-map footprint density.
+    """
+
+    base = atlas_markers(atlas, context)
+    frame = _image_frame(atlas)
+    if frame is None:
+        return base
+
+    status_context = build_item_status_context(
+        search_maps=context.search_maps,
+        batch_positions=context.batch_positions,
+        tilt_series=context.tilt_series,
+    )
+    batch_by_id = {batch.id: batch for batch in context.batch_positions}
+    for marker in base:
+        if marker.marker_type == MarkerType.SEARCH_MAP:
+            marker.metadata["atlas_lod_role"] = (
+                "search_map_tile"
+                if marker.metadata.get("tile_index") is not None
+                else "search_map_footprint"
+            )
+            continue
+        if marker.marker_type != MarkerType.BATCH_POSITION:
+            continue
+        batch = batch_by_id.get(marker.linked_object_id or "")
+        if batch is None:
+            continue
+        status = aggregate_batch_position_status(batch, status_context)
+        navigation = resolve_batch_position_overview(
+            batch,
+            search_maps=context.search_maps,
+            overviews=context.overviews,
+        )
+        sample_name = (
+            _as_str(find_first(batch.metadata, "SampleName"))
+            or _as_str(find_first(batch.metadata, "Sample"))
+            or "current atlas scope"
+        )
+        marker.label = compact_batch_label_for_batch(batch)
+        marker.status = status.status
+        marker.tooltip = (
+            f"Batch position {marker.label}\n"
+            f"Status: {status.status.title()}\n"
+            f"Sample: {sample_name}\n"
+            f"Planned: {status.planned} · Acquired: {status.acquired} · "
+            f"Failed: {status.failed}\n"
+            f"{navigation.explanation}"
+        )
+        marker.metadata.update(
+            {
+                "atlas_lod_role": "batch_position",
+                "batch_position_id": batch.id,
+                "batch_position_label": marker.label,
+                "status_counts": {
+                    "collected": status.complete,
+                    "partial": status.incomplete + status.missing + status.unknown,
+                    "failed": status.failed,
+                    "queued": max(status.planned - status.acquired, 0),
+                },
+                "planned_count": status.planned,
+                "acquired_count": status.acquired,
+                "failed_count": status.failed,
+                "navigation_enabled": navigation.navigable,
+                "navigation_overview_id": (
+                    navigation.overview.id if navigation.overview is not None else None
+                ),
+                "navigation_explanation": navigation.explanation,
+            }
+        )
+
+    # The legacy Atlas source emits one rectangle per reconstructed tile. Add a
+    # separate union footprint for the LOD path while retaining the original
+    # tiles for high-zoom display.
+    tiles_by_search_map: dict[str, list[ImageMarker]] = {}
+    for marker in base:
+        if (
+            marker.marker_type == MarkerType.SEARCH_MAP
+            and marker.metadata.get("atlas_lod_role") == "search_map_tile"
+            and marker.linked_object_id
+        ):
+            tiles_by_search_map.setdefault(marker.linked_object_id, []).append(marker)
+    footprints: list[ImageMarker] = []
+    for search_map_id, tiles in tiles_by_search_map.items():
+        boxes = [marker.bbox for marker in tiles if marker.bbox is not None]
+        if not boxes:
+            continue
+        left = min(box[0] for box in boxes)
+        top = min(box[1] for box in boxes)
+        right = max(box[0] + box[2] for box in boxes)
+        bottom = max(box[1] + box[3] for box in boxes)
+        source = tiles[0]
+        footprints.append(
+            ImageMarker(
+                id=f"{atlas.id}:search-map:{search_map_id}:lod-footprint",
+                marker_type=MarkerType.SEARCH_MAP,
+                linked_object_id=search_map_id,
+                source_object_id=atlas.id,
+                bbox=(left, top, right - left, bottom - top),
+                tooltip=f"Search map footprint: {source.metadata.get('item_name') or search_map_id}",
+                metadata={
+                    "image_size": frame.image_size,
+                    "atlas_lod_role": "search_map_footprint",
+                    "item_name": source.metadata.get("item_name"),
+                },
+            )
+        )
+
+    # Highest-detail exposure geometry is generated through the existing
+    # projection helpers and stays hidden by default in the Atlas viewer.
+    detail_markers: list[ImageMarker] = []
+    for batch in context.batch_positions:
+        position = _position_on_tile_set(batch)
+        if position is None:
+            continue
+        generated = _template_markers_in_frame(atlas.id, frame, batch, position)
+        for marker in generated:
+            if marker.marker_type not in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}:
+                continue
+            marker.metadata["atlas_lod_role"] = "per_exposure"
+            detail_markers.append(marker)
+
+    explicitly_linked = {
+        tilt_id
+        for batch in context.batch_positions
+        for tilt_id in (batch.linked_tilt_series_ids or [])
+    }
+    explicitly_linked.update(
+        tilt.id
+        for tilt in context.tilt_series
+        if tilt.linked_batch_position_id in batch_by_id
+    )
+    orphan_failed_ids = frozenset(context.failed_tilt_ids.difference(explicitly_linked))
+    unattributed = _inferred_failed_tilt_markers(
+        source=atlas,
+        frame=frame,
+        tilt_series=context.tilt_series,
+        failed_tilt_ids=orphan_failed_ids,
+        batch_positions=context.batch_positions,
+    )
+    for marker in unattributed:
+        marker.status = STATUS_UNATTRIBUTED
+        marker.label = _as_str(marker.metadata.get("batch_label")) or "?"
+        marker.tooltip = (
+            f"Unattributed failed tilt series: {marker.label}\n"
+            "Approximate location from MRC stage metadata.\n"
+            "No confident batch-position link; navigation is unavailable."
+        )
+        marker.metadata.update(
+            {
+                "atlas_lod_role": "unattributed",
+                "navigation_enabled": False,
+                "navigation_explanation": "No confident batch-position link.",
+            }
+        )
+
+    newly_projected = detail_markers + unattributed
+    if frame.atlas_pixel_affine is None:
+        _rotate_atlas_overlay_markers_180(
+            newly_projected,
+            image_size=frame.image_size,
+            source_id=atlas.id,
+        )
+    _filter_off_image_markers(
+        newly_projected,
+        image_size=frame.image_size,
+        source_id=atlas.id,
+    )
+    if include_detail_markers:
+        return base + footprints + newly_projected
+    return base + unattributed
 
 
 def overview_markers(overview: Overview, context: MarkerContext) -> list[ImageMarker]:
@@ -745,7 +933,7 @@ def _mark_markers_failed(markers: Iterable[ImageMarker]) -> None:
 
 def _inferred_failed_tilt_markers(
     *,
-    source: SearchMap | Overview,
+    source: Atlas | SearchMap | Overview,
     frame: ImageFrame,
     tilt_series: Iterable[TiltSeries],
     failed_tilt_ids: frozenset[str],

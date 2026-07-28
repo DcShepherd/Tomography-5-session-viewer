@@ -18,6 +18,7 @@ from tomography_session_browser.reports.report_generator import (
     _linked_batch_positions_for_search_map,
     _search_map_caption,
     _search_map_completion_block,
+    _tilt_outcome_sub_label,
 )
 from tomography_session_browser.services.tilt_series_validation import (
     STATUS_COMPLETE,
@@ -67,6 +68,20 @@ def test_tilt_series_with_expected_image_count_is_complete(tmp_path: Path) -> No
     assert validation.status == STATUS_COMPLETE
     assert validation.actual_count == 35
     assert validation.expected_count == 35
+
+
+def test_report_outcome_card_omits_zero_states_and_unsupported_glyphs() -> None:
+    text = _tilt_outcome_sub_label(
+        {
+            STATUS_COMPLETE: 18,
+            STATUS_INCOMPLETE: 0,
+            STATUS_FAILED: 3,
+            STATUS_UNKNOWN: 0,
+        }
+    )
+
+    assert text == "18 complete, 3 failed"
+    assert all(glyph not in text for glyph in ("✓", "◐", "✕", "?"))
 
 
 def test_acquired_angle_extent_is_observational_not_an_expected_count(

@@ -13,23 +13,38 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QAbstractTableModel, QElapsedTimer, QModelIndex, QTimer, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QElapsedTimer,
+    QModelIndex,
+    QPoint,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QFrame,
     QGridLayout,
-    QHeaderView,
     QHBoxLayout,
-    QAbstractItemView,
+    QHeaderView,
     QLabel,
+    QLayout,
+    QLayoutItem,
     QScrollArea,
     QSizePolicy,
     QTableView,
     QToolButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
+from tomography_session_browser.domain.display_names import count_phrase as _count_phrase
 from tomography_session_browser.services.timeline_service import SessionTimeline
 from tomography_session_browser.ui.animations import fade_in_layout_children
 from tomography_session_browser.ui.icons import themed_icon
@@ -68,6 +83,10 @@ from tomography_session_browser.ui.widgets.timeline_strip import TimelineStrip
 
 LOGGER = logging.getLogger(__name__)
 
+# Retained as a public layout contract for downstream tests/extensions. Warning
+# rows now word-wrap instead of enforcing this width directly.
+_WARNING_LABEL_MIN_WIDTH = 88
+
 
 # Tab targets for the click-through navigation. These mirror the labels in
 # ``main_window.TAB_LABELS`` and are intentionally kept here rather than
@@ -97,6 +116,16 @@ def theme_safe_text_on(color: str) -> str:
     blue = int(value[4:6], 16) / 255.0
     luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
     return theme.safe_text_dark if luminance >= 0.52 else theme.safe_text_light
+
+
+def _translucent(color: str, alpha: int) -> str:
+    """Return ``color`` as an ``rgba(...)`` string for a soft chip fill."""
+
+    value = color.strip().lstrip("#")
+    if len(value) != 6:
+        return "transparent"
+    red, green, blue = (int(value[index : index + 2], 16) for index in (0, 2, 4))
+    return f"rgba({red}, {green}, {blue}, {alpha})"
 
 
 def _status_colors() -> dict[str, str]:
@@ -285,6 +314,9 @@ class _SampleRowWidget(QWidget):
     def __init__(self, sample_id: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._sample_id = sample_id
+        self.setObjectName("dashboardInteractiveRow")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Open dashboard item")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt signature
         if event.button() == Qt.MouseButton.LeftButton:
@@ -292,6 +324,60 @@ class _SampleRowWidget(QWidget):
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space}:
+            self.clicked.emit(self._sample_id)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class _ResponsiveCardGrid(QWidget):
+    """Reflow dashboard count cards without forcing horizontal scrolling."""
+
+    def __init__(self, cards: list[QWidget], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._cards = list(cards)
+        self._columns = 0
+        self._layout = QGridLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setHorizontalSpacing(12)
+        self._layout.setVerticalSpacing(12)
+        self._reflow(self._column_count_for_width(self.width()))
+
+    @staticmethod
+    def _column_count_for_width(width: int) -> int:
+        if width >= 1120:
+            return 5
+        if width >= 680:
+            return 3
+        if width >= 440:
+            return 2
+        return 1
+
+    def _reflow(self, columns: int) -> None:
+        columns = max(1, min(columns, max(1, len(self._cards))))
+        if columns == self._columns:
+            return
+        for card in self._cards:
+            self._layout.removeWidget(card)
+        for column in range(max(5, self._columns, columns)):
+            self._layout.setColumnStretch(column, 0)
+        for index, card in enumerate(self._cards):
+            row, column = divmod(index, columns)
+            self._layout.addWidget(card, row, column)
+            self._layout.setColumnStretch(column, 1)
+        self._columns = columns
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        super().resizeEvent(event)
+        self._reflow(self._column_count_for_width(event.size().width()))
+
+    def column_count(self) -> int:
+        """Return the active column count for regression tests."""
+
+        return self._columns
 
 
 class _SearchMapOverviewTableModel(QAbstractTableModel):
@@ -423,9 +509,40 @@ def _search_map_status_label(row: SearchMapOverviewRowModel) -> str:
     return _status_label(row.status)
 
 
-def _count_phrase(count: int, singular: str, plural: str | None = None) -> str:
-    noun = singular if count == 1 else (plural or f"{singular}s")
-    return f"{count} {noun}"
+# Floor widths for the identifying label in dashboard list rows. Without a
+# floor these labels sit next to a fixed-width status chip and collapse to a
+# single character plus an ellipsis ("o…", "R…"), which makes the sample and
+# batch-position cards unreadable. The chip is the part that can afford to
+# lose characters, not the name.
+#: "N/A" and "unknown" are opaque on their own — say what they mean.
+_SEARCH_MAP_STATUS_TOOLTIPS = {
+    "complete": "Every batch position on this search map produced a tilt series.",
+    "incomplete": "Some batch positions on this search map are still missing a tilt series.",
+    "failed": "At least one batch position on this search map failed.",
+    "unknown": "Not enough metadata to judge whether acquisition completed.",
+    "N/A": "No batch positions or tilt series are associated with this search map, "
+    "so there is nothing to complete.",
+}
+
+_ROW_LABEL_MIN_WIDTH = 132
+_ROW_LABEL_MIN_WIDTH_COMPACT = 86
+
+
+def _batch_outcome_chip_parts(row_model: BatchPositionProgressModel) -> list[str]:
+    """Return the non-zero outcome phrases for a batch-position row chip.
+
+    Always yields at least one phrase so a row with no recorded outcomes
+    still reads as "0 complete" rather than showing an empty chip.
+    """
+
+    parts: list[str] = []
+    if row_model.complete or not (row_model.failed or row_model.warning):
+        parts.append(f"{row_model.complete} complete")
+    if row_model.failed:
+        parts.append(f"{row_model.failed} failed")
+    if row_model.warning:
+        parts.append(f"{row_model.warning} partial")
+    return parts
 
 
 def _search_map_overview_tooltip(row: SearchMapOverviewRowModel) -> str:
@@ -489,6 +606,76 @@ def _card_layout(card: _CardBox) -> QVBoxLayout:
     return layout
 
 
+class _FlowLayout(QLayout):
+    """Left-to-right layout that wraps onto a new line when it runs out of width.
+
+    Qt ships no flow layout. A ``QHBoxLayout`` of fixed-size chips reports
+    the sum of their widths as its minimum, so one row of five status chips
+    was enough to push the whole dashboard wider than its scroll viewport.
+    """
+
+    def __init__(self, *, spacing: int = 8) -> None:
+        super().__init__()
+        self._items: list[QLayoutItem] = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self._gap = spacing
+
+    def addItem(self, item: QLayoutItem) -> None:  # noqa: N802 - Qt API
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> QLayoutItem | None:  # noqa: N802 - Qt API
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int) -> QLayoutItem | None:  # noqa: N802 - Qt API
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self) -> Qt.Orientations:  # noqa: N802 - Qt API
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt API
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt API
+        return self._layout(QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802 - Qt API
+        super().setGeometry(rect)
+        self._layout(rect, apply=True)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802 - Qt API
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        return size + QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+
+    def _layout(self, rect: QRect, *, apply: bool) -> int:
+        margins = self.contentsMargins()
+        x = rect.x() + margins.left()
+        y = rect.y() + margins.top()
+        right = rect.right() - margins.right()
+        line_height = 0
+        for item in self._items:
+            hint = item.sizeHint()
+            if line_height and x + hint.width() - 1 > right:
+                x = rect.x() + margins.left()
+                y += line_height + self._gap
+                line_height = 0
+            if apply:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self._gap
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + margins.bottom()
+
+
 def _card_header(title: str, badge: str | None = None, tooltip: str | None = None) -> tuple[QHBoxLayout, QLabel | None]:
     header = QHBoxLayout()
     header.setContentsMargins(0, 0, 0, 0)
@@ -537,12 +724,14 @@ class SessionDashboard(QWidget):
         self._scroll.viewport().setObjectName("dashboardViewport")
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         outer.addWidget(self._scroll)
 
         self._content = QWidget()
         self._content.setObjectName("dashboardContent")
         self._scroll.setWidget(self._content)
         self._content_layout = QVBoxLayout(self._content)
+        self._content_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         self._content_layout.setContentsMargins(16, 16, 16, 16)
         self._content_layout.setSpacing(14)
 
@@ -561,8 +750,21 @@ class SessionDashboard(QWidget):
         self._defocus_plot: DefocusScatterPlot | None = None
         self._dose_plot: DoseInformationScatterPlot | None = None
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Session dashboard")
+        self.setAccessibleDescription(
+            "Acquisition summary. Press Escape to clear a highlighted tilt series."
+        )
 
     # ------------------------------------------------------------------ API
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        super().resizeEvent(event)
+        if hasattr(self, "_scroll") and hasattr(self, "_content"):
+            # QScrollArea otherwise honours the aggregate minimum-size hint of
+            # wide dashboard rows and silently keeps an offscreen content
+            # width. Pinning the content to the viewport lets responsive card
+            # grids actually reflow at laptop widths.
+            self._content.setMaximumWidth(max(1, event.size().width()))
 
     def set_model(
         self,
@@ -611,7 +813,8 @@ class SessionDashboard(QWidget):
             self._content_layout.addWidget(self._build_counts_row(model))
             self._content_layout.addWidget(self._build_timeline_card(model, timeline))
             if not defer_heavy_cards:
-                self._content_layout.addWidget(self._build_defocus_readout_card(model))
+                if model.defocus_readout.points:
+                    self._content_layout.addWidget(self._build_defocus_readout_card(model))
                 if model.dose_information.has_points:
                     self._content_layout.addWidget(self._build_dose_information_card(model))
             else:
@@ -621,29 +824,17 @@ class SessionDashboard(QWidget):
                     len(model.dose_information.points),
                 )
 
-            lower = QHBoxLayout()
-            lower.setContentsMargins(0, 0, 0, 0)
-            lower.setSpacing(14)
+            lower_cards: list[QWidget] = []
             if model.search_map_overview.total:
-                lower.addWidget(
-                    self._build_search_maps_overview_card(model.search_map_overview),
-                    stretch=2,
-                    alignment=Qt.AlignmentFlag.AlignTop,
+                lower_cards.append(
+                    self._build_search_maps_overview_card(model.search_map_overview)
                 )
             if model.batch_positions:
-                lower.addWidget(
-                    self._build_batch_positions_card(model),
-                    stretch=2,
-                    alignment=Qt.AlignmentFlag.AlignTop,
+                lower_cards.append(
+                    self._build_batch_positions_card(model)
                 )
-            lower.addWidget(
-                self._build_warnings_card(model),
-                stretch=1,
-                alignment=Qt.AlignmentFlag.AlignTop,
-            )
-            lower_wrap = QWidget()
-            lower_wrap.setLayout(lower)
-            self._content_layout.addWidget(lower_wrap)
+            lower_cards.append(self._build_warnings_card(model))
+            self._content_layout.addWidget(_ResponsiveCardGrid(lower_cards))
         if not model.has_collection_data:
             self._content_layout.addWidget(self._build_warnings_card(model))
         self._content_layout.addStretch(1)
@@ -692,19 +883,9 @@ class SessionDashboard(QWidget):
         left.addWidget(eyebrow)
         title = ElidedLabel(model.title)
         title.setObjectName("screenTitle")
+        title.setToolTip(model.title)
         left.addWidget(title)
         title_row.addLayout(left, stretch=1)
-
-        pill = QLabel(model.completeness_label)
-        pill.setObjectName(f"statusPill_{model.completeness}")
-        pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pill_color = _status_color(model.completeness)
-        pill.setStyleSheet(
-            "padding: 0 10px; border-radius: 10px; min-height: 22px; "
-            f"background: {pill_color}; "
-            f"color: {theme_safe_text_on(pill_color)}; font-weight: 600; font-size: 9pt;"
-        )
-        title_row.addWidget(pill)
         layout.addLayout(title_row)
 
         meta_wrap = QWidget()
@@ -746,9 +927,10 @@ class SessionDashboard(QWidget):
         copy.setIcon(themed_icon("copy", size=14))
         copy.setIconSize(QSize(14, 14))
         copy.setToolTip("Copy session path")
-        copy.setFixedSize(22, 22)
+        copy.setAccessibleName("Copy session path")
+        copy.setFixedSize(28, 28)
         copy.setCursor(Qt.CursorShape.PointingHandCursor)
-        copy.clicked.connect(lambda: self._copy(model.path))
+        copy.clicked.connect(lambda: self._copy(model.path, source=copy))
         path_row.addWidget(copy)
         layout.addLayout(path_row)
         return wrap
@@ -849,24 +1031,19 @@ class SessionDashboard(QWidget):
         return wrap
 
     def _build_counts_row(self, model: DashboardModel) -> QWidget:
-        wrap = QWidget()
-        layout = QGridLayout(wrap)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setHorizontalSpacing(12)
-        layout.setVerticalSpacing(12)
         from tomography_session_browser.ui.theme import current_palette
 
         theme = current_palette()
         accents = (theme.accent, theme.chart_green, theme.chart_amber, theme.chart_blue)
+        cards: list[QWidget] = []
         for index, card_model in enumerate(model.counts):
             # Always populate the destination from the model when present;
             # fall back to a label-driven map so older models still navigate.
             if not card_model.destination:
                 card_model.destination = _TAB_BY_LABEL.get(card_model.label, card_model.label)
             card = self._build_stat_card(card_model, accents[index % len(accents)])
-            layout.addWidget(card, 0, index)
-            layout.setColumnStretch(index, 1)
-        return wrap
+            cards.append(card)
+        return _ResponsiveCardGrid(cards)
 
     def _build_stat_card(self, card_model: StatCardModel, accent: str) -> StatCard:
         card = StatCard(model=card_model, accent=accent)
@@ -1051,7 +1228,7 @@ class SessionDashboard(QWidget):
         card = _CardBox()
         layout = _card_layout(card)
 
-        header, _count = _card_header("SEARCH MAP COMPLETION", f"{len(model.search_map_completion)} maps")
+        header, _count = _card_header("SEARCH MAP COMPLETION", _count_phrase(len(model.search_map_completion), "map"))
         layout.addLayout(header)
 
         card.setMinimumHeight(260)
@@ -1089,11 +1266,26 @@ class SessionDashboard(QWidget):
         card = _CardBox()
         layout = _card_layout(card)
 
-        header, _count = _card_header("SEARCH MAPS OVERVIEW", f"{overview.total:,} maps")
+        header, _count = _card_header(
+            "SEARCH MAPS OVERVIEW",
+            _count_phrase(overview.total, "map"),
+            tooltip=(
+                "Search maps classified by whether their batch positions produced tilt series.\n"
+                "The Search maps count card at the top of the dashboard classifies the same maps "
+                "by whether the map's own tiles were acquired, so the two breakdowns differ."
+            ),
+        )
         layout.addLayout(header)
 
-        summary = QHBoxLayout()
-        summary.setSpacing(8)
+        subtitle = QLabel("Batch position completion per search map")
+        subtitle.setObjectName("cardSubvalue")
+        layout.addWidget(subtitle)
+
+        # Five fixed-width chips in one row set a ~465px floor on this card,
+        # which is most of why the lower dashboard row could not fit its
+        # viewport. A flow layout lets them wrap on narrow windows instead of
+        # forcing a horizontal scrollbar across the whole dashboard.
+        summary = _FlowLayout(spacing=8)
         for label, value, status in (
             ("complete", overview.complete, "complete"),
             ("incomplete", overview.incomplete, "warning"),
@@ -1103,18 +1295,29 @@ class SessionDashboard(QWidget):
         ):
             chip = QLabel(f"{value:,} {label}")
             chip.setObjectName("searchMapSummaryChip")
-            color = _status_color(status)
+            # A zero count is not a finding. Painting "0 incomplete" amber and
+            # "0 failed" red drew the eye to the absence of a problem.
+            color = _status_color(status if value else "neutral")
             chip.setStyleSheet(f"border-color: {color}; color: {color};")
+            chip.setToolTip(_SEARCH_MAP_STATUS_TOOLTIPS.get(label, label))
             summary.addWidget(chip)
-        summary.addStretch(1)
         layout.addLayout(summary)
 
         if overview.worst:
             worst_title = QLabel("MOST AFFECTED")
             worst_title.setObjectName("cardTitle")
+            worst_title.setToolTip(
+                "Search maps with a failed, incomplete, or unresolved batch position. "
+                "Fully acquired maps are not listed here."
+            )
             layout.addWidget(worst_title)
             for row in overview.worst:
                 layout.addWidget(self._search_map_overview_row(row))
+        elif overview.total:
+            empty = QLabel("No search map in this scope has an outstanding batch position.")
+            empty.setObjectName("metaPlain")
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
         else:
             empty = QLabel("No search map completion metadata is available for this scope.")
             empty.setObjectName("metaPlain")
@@ -1184,6 +1387,7 @@ class SessionDashboard(QWidget):
         wrap.clicked.connect(self.search_map_clicked.emit)
         wrap.setCursor(Qt.CursorShape.PointingHandCursor)
         wrap.setToolTip(_search_map_overview_tooltip(row))
+        wrap.setAccessibleName(f"Open search map {row.label}")
         layout = QHBoxLayout(wrap)
         layout.setContentsMargins(0, 2, 0, 2)
         layout.setSpacing(8)
@@ -1195,6 +1399,26 @@ class SessionDashboard(QWidget):
         label.setObjectName("metaValue")
         label.setToolTip(row.label)
         layout.addWidget(label, stretch=1)
+        status_text = {
+            "done": "Complete",
+            "complete": "Complete",
+            "partial": "Incomplete",
+            "incomplete": "Incomplete",
+            "failed": "Failed",
+            "missing": "Unavailable",
+            "unknown": "Unavailable",
+        }.get(row.status.strip().lower(), row.status.replace("_", " ").title())
+        if status_text:
+            from tomography_session_browser.ui.theme import current_palette
+
+            status = QLabel(status_text)
+            status.setObjectName("sampleCount")
+            status.setStyleSheet(
+                f"color: {current_palette().text_strong}; "
+                f"border-color: {_status_color(row.status)};"
+            )
+            status.setToolTip(_search_map_overview_tooltip(row))
+            layout.addWidget(status)
         summary = QLabel(row.summary)
         summary.setObjectName("metaPlain")
         summary.setToolTip(row.summary)
@@ -1231,9 +1455,13 @@ class SessionDashboard(QWidget):
         layout.addLayout(grid)
 
         if len(model.samples) > len(visible):
-            more = QLabel(f"+{len(model.samples) - len(visible)} more samples")
-            more.setObjectName("metaKey")
-            layout.addWidget(more)
+            layout.addWidget(
+                self._more_button(
+                    _count_phrase(len(model.samples) - len(visible), "more sample"),
+                    "Tilt series",
+                    "Open the Tilt series tab to see every sample in this scope",
+                )
+            )
         layout.addStretch(1)
         card.setMinimumHeight(330 if columns > 1 else 260)
         return card
@@ -1267,6 +1495,7 @@ class SessionDashboard(QWidget):
         name = ElidedLabel(row_model.label)
         name.setObjectName("metaValue")
         name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        name.setMinimumWidth(_ROW_LABEL_MIN_WIDTH_COMPACT if compact else _ROW_LABEL_MIN_WIDTH)
         name.setStyleSheet(f"font-weight: 600; font-size: {'9.2' if compact else '10'}pt;")
         top.addWidget(name, stretch=1)
 
@@ -1286,11 +1515,42 @@ class SessionDashboard(QWidget):
         layout.addWidget(_ProgressStrip(row_model))
         return row
 
+    def _more_button(self, label: str, destination: str, tooltip: str) -> QToolButton:
+        """Return a "+N more ..." control that opens the owning tab.
+
+        These counts used to be plain muted labels, so the only way to reach
+        the hidden rows was to guess which tab held them.
+        """
+
+        button = QToolButton()
+        button.setObjectName("dashboardFilterButton")
+        button.setText(f"+{label}")
+        button.setToolTip(tooltip)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.clicked.connect(lambda: self.navigate_requested.emit(destination))
+        return button
+
     def _build_batch_positions_card(self, model: DashboardModel) -> QWidget:
         card = _CardBox()
         layout = _card_layout(card)
 
-        header, _count = _card_header("BATCH POSITIONS", f"{len(model.batch_positions)} positions")
+        # The card lists parsed batch positions *plus* display-only groups
+        # inferred from orphaned failed tilt series, so its total can exceed
+        # the Batch position tab's count. Say so instead of leaving the two
+        # numbers to contradict each other.
+        inferred = sum(1 for row in model.batch_positions if row.inferred)
+        parsed = len(model.batch_positions) - inferred
+        count_text = _count_phrase(parsed, "position")
+        if inferred:
+            count_text = f"{count_text} · {inferred} inferred"
+        header, count_label = _card_header("BATCH POSITIONS", count_text)
+        if inferred and count_label is not None:
+            count_label.setToolTip(
+                f"{_count_phrase(parsed, 'batch position')} were parsed from BatchPositionsList.xml.\n"
+                f"{_count_phrase(inferred, 'further group')} shown here were inferred from failed tilt "
+                "series that have no parsed batch position, so they are not counted by the Batch "
+                "position tab."
+            )
         layout.addLayout(header)
 
         if not model.batch_positions:
@@ -1317,9 +1577,13 @@ class SessionDashboard(QWidget):
         layout.addLayout(grid)
 
         if len(model.batch_positions) > len(visible):
-            more = QLabel(f"+{len(model.batch_positions) - len(visible)} more batch positions")
-            more.setObjectName("metaKey")
-            layout.addWidget(more)
+            layout.addWidget(
+                self._more_button(
+                    _count_phrase(len(model.batch_positions) - len(visible), "more batch position"),
+                    "Batch position",
+                    "Open the Batch position tab to see every position in this scope",
+                )
+            )
         layout.addStretch(1)
         card.setMinimumHeight(330 if columns > 1 else 260)
         return card
@@ -1361,12 +1625,21 @@ class SessionDashboard(QWidget):
         name.setObjectName("metaValue")
         name.setToolTip(row_model.tooltip)
         name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        name.setMinimumWidth(_ROW_LABEL_MIN_WIDTH_COMPACT if compact else _ROW_LABEL_MIN_WIDTH)
         name.setStyleSheet(f"font-weight: 600; font-size: {'9.2' if compact else '10'}pt;")
         top.addWidget(name, stretch=1)
 
-        pieces = [f"{row_model.complete} complete", f"{row_model.failed} failed"]
-        if row_model.warning:
-            pieces.append(f"{row_model.warning} partial")
+        # Zero-valued outcomes are dropped so the chip stays narrow enough to
+        # leave the position name legible, matching how the sample rows above
+        # already build their chip. "0 failed" on eighteen healthy rows was
+        # both noise and the reason the names had no room.
+        pieces = _batch_outcome_chip_parts(row_model)
+        if row_model.inferred:
+            # Mark the row itself — the header count alone would not tell the
+            # reader *which* entries are not real batch positions. Folded
+            # into the existing chip rather than added as a second widget so
+            # it costs the card no extra minimum width.
+            pieces.insert(0, "inferred")
         chip = QLabel(" · ".join(pieces))
         chip.setObjectName("sampleBadge")
         chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1524,7 +1797,11 @@ class SessionDashboard(QWidget):
         )
         if atlas_summary.pixel_size_range_um is not None:
             lo, hi = atlas_summary.pixel_size_range_um
-            value = f"{lo:.2f} µm" if abs(lo - hi) < 1e-6 else f"{lo:.2f} – {hi:.2f} µm"
+            value = (
+                f"{lo:.2f} µm/px"
+                if abs(lo - hi) < 1e-6
+                else f"{lo:.2f} – {hi:.2f} µm/px"
+            )
             summary_row.addWidget(self._meta_pair_compact("Pixel size", value))
         if atlas_summary.image_size_range is not None:
             small, large = atlas_summary.image_size_range
@@ -1598,7 +1875,21 @@ class SessionDashboard(QWidget):
         card = _CardBox()
         layout = _card_layout(card)
 
-        header, _count = _card_header("WARNINGS", f"{len(model.warnings):,} total")
+        # "2,821 total" counted individual warning strings, 2,805 of which
+        # were the same NaN message repeated per file. Lead with the number
+        # of distinct issues so the headline reflects how much there is to
+        # actually look at, and keep the raw total as secondary detail.
+        distinct = len(model.warning_groups) if model.warning_groups else len(model.warnings)
+        # Keep the badge short: this card is the narrowest column in the
+        # lower dashboard row, and an unelided header label sets the card's
+        # minimum width. The raw message count lives in the tooltip.
+        header, badge_label = _card_header("WARNINGS", _count_phrase(distinct, "issue"))
+        if badge_label is not None:
+            badge_label.setToolTip(
+                f"{_count_phrase(distinct, 'distinct kind')} of warning across "
+                f"{_count_phrase(len(model.warnings), 'message')}. "
+                "A single malformed field repeated across many files counts once here."
+            )
         layout.addLayout(header)
 
         if not model.warnings:
@@ -1611,7 +1902,7 @@ class SessionDashboard(QWidget):
             for group in model.warning_groups[:6]:
                 layout.addWidget(self._warning_group_row(group))
             if len(model.warning_groups) > 6:
-                more = QLabel(f"+{len(model.warning_groups) - 6} more groups")
+                more = QLabel(f"+{_count_phrase(len(model.warning_groups) - 6, 'more group')}")
                 more.setObjectName("metaKey")
                 layout.addWidget(more)
             layout.addStretch(1)
@@ -1670,9 +1961,11 @@ class SessionDashboard(QWidget):
         count.setStyleSheet(f"color: {color}; border-color: {color};")
         layout.addWidget(count)
 
-        label = ElidedLabel(group.label)
+        label = QLabel(group.label)
         label.setObjectName("metaValue")
         label.setStyleSheet("font-weight: 600;")
+        label.setWordWrap(True)
+        label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         label.setToolTip("\n".join(group.items[:8]))
         layout.addWidget(label, stretch=1)
 
@@ -1683,9 +1976,21 @@ class SessionDashboard(QWidget):
 
     # ----- helpers
 
-    def _copy(self, text: str) -> None:
+    def _copy(self, text: str, *, source: QToolButton | None = None) -> None:
         from PySide6.QtGui import QGuiApplication
 
         clipboard = QGuiApplication.clipboard()
         if clipboard is not None:
             clipboard.setText(text)
+            if source is not None:
+                original_tooltip = source.toolTip()
+                source.setToolTip("Copied")
+                QToolTip.showText(
+                    source.mapToGlobal(source.rect().bottomLeft()),
+                    "Copied",
+                    source,
+                )
+                QTimer.singleShot(
+                    1200,
+                    lambda button=source, tooltip=original_tooltip: button.setToolTip(tooltip),
+                )

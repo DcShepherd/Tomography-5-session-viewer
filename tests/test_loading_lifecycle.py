@@ -76,6 +76,148 @@ def test_loader_tree_population_does_not_render_tabs_synchronously(monkeypatch, 
     assert render_calls == []
 
 
+def test_session_tab_context_refresh_runs_after_activation_returns(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    app = _app()
+    window = MainWindow()
+    window._sessions = [
+        Session(
+            id="session",
+            name="Session",
+            path=tmp_path,
+            kind=SessionKind.COLLECTION,
+        )
+    ]
+    monkeypatch.setattr(main_window, "save_settings", lambda _settings: None)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        window,
+        "_sync_context_panel_to_active_scope",
+        lambda: calls.append("sync"),
+    )
+
+    tilt_index = main_window.TAB_LABELS.index("Tilt series")
+    session_index = main_window.TAB_LABELS.index("Session")
+    window.tabs.setCurrentIndex(tilt_index)
+    app.processEvents()
+
+    window.tabs.setCurrentIndex(session_index)
+
+    # QTabWidget must be free to show the page before secondary context/status
+    # work runs.
+    assert calls == []
+
+    deadline = time.monotonic() + 1.0
+    while not calls and time.monotonic() < deadline:
+        app.processEvents()
+    assert calls == ["sync"]
+
+    # A queued Session refresh must not run after the user has already moved
+    # to another tab.
+    calls.clear()
+    window.tabs.setCurrentIndex(tilt_index)
+    window.tabs.setCurrentIndex(session_index)
+    window.tabs.setCurrentIndex(tilt_index)
+    for _ in range(3):
+        app.processEvents()
+    assert calls == []
+
+
+def test_session_scope_context_title_uses_name_not_dataclass_repr(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _app()
+    session = Session(
+        id="session-with-large-repr",
+        name="Data collection",
+        path=tmp_path,
+        kind=SessionKind.COLLECTION,
+        metadata_summary={"large": {"nested": ["metadata"]}},
+    )
+    window = MainWindow()
+    window._sessions = [session]
+    window._active_context = session
+    monkeypatch.setattr(main_window, "save_settings", lambda _settings: None)
+
+    window._sync_context_panel_to_active_scope()
+
+    assert window.context_panel.text() == "Data collection"
+    assert not window.context_panel.text().startswith("Session(")
+    window.close()
+
+
+def test_collection_switch_from_viewer_keeps_target_preview_lazy(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    app = _app()
+    source_overview = Overview(
+        id="source-overview",
+        name="Overview_source",
+        image_path=tmp_path / "source.mrc",
+    )
+    target_overview = Overview(
+        id="target-overview",
+        name="Overview_target",
+        image_path=tmp_path / "target.mrc",
+    )
+    source_sample = Sample(
+        id="source-sample",
+        name="Source sample",
+        path=tmp_path / "source",
+        overviews=[source_overview],
+    )
+    target_sample = Sample(
+        id="target-sample",
+        name="Target sample",
+        path=tmp_path / "target",
+        overviews=[target_overview],
+    )
+    source_session = Session(
+        id="source-session",
+        name="Source collection",
+        path=source_sample.path,
+        kind=SessionKind.COLLECTION,
+        samples=[source_sample],
+    )
+    target_session = Session(
+        id="target-session",
+        name="Target collection",
+        path=target_sample.path,
+        kind=SessionKind.COLLECTION,
+        samples=[target_sample],
+    )
+    window = MainWindow()
+    window._sessions = [source_session, target_session]
+    window._session = source_session
+    window._active_context = source_session
+    window._rebuild_sample_index()
+    monkeypatch.setattr(main_window, "save_settings", lambda _settings: None)
+    loaded: list[Overview] = []
+
+    def record_load(self, value, slice_index):  # noqa: ANN001
+        del self, slice_index
+        loaded.append(value)
+
+    monkeypatch.setattr(main_window.ViewerTab, "_load_value", record_load)
+    window.tabs.setCurrentIndex(main_window.TAB_LABELS.index("Overview"))
+    app.processEvents()
+
+    window._select_from_left_tree(target_session, target_session.name)
+
+    assert window.tabs.currentIndex() == main_window.TAB_LABELS.index("Session")
+    assert loaded == []
+
+    window.tabs.setCurrentIndex(main_window.TAB_LABELS.index("Overview"))
+    app.processEvents()
+
+    assert loaded == [target_overview]
+    window.close()
+
+
 def test_loaded_session_integration_finishes_after_prepared_ui_repaint(monkeypatch, tmp_path: Path) -> None:
     app = _app()
     session = _large_session(tmp_path, search_maps=8, batch_positions=6, tilt_series=24)
@@ -168,7 +310,7 @@ def test_staged_loader_splits_session_summary_into_tree_and_dashboard_steps() ->
     assert tree_calls == [True], "Dashboard-only stage must NOT re-invoke the summary-tree builder."
 
 
-def test_dashboard_deferred_model_skips_plot_widgets_until_requested(tmp_path: Path) -> None:
+def test_dashboard_omits_empty_plot_widgets_after_deferred_load(tmp_path: Path) -> None:
     app = _app()
     session = _large_session(tmp_path, search_maps=4, batch_positions=3, tilt_series=8)
     model = _prepare_session_ui_payload([session], session).dashboard_model
@@ -183,7 +325,8 @@ def test_dashboard_deferred_model_skips_plot_widgets_until_requested(tmp_path: P
     dashboard.set_model(model, defer_heavy_cards=False)
     app.processEvents()
 
-    assert dashboard.findChild(DefocusScatterPlot) is not None
+    assert dashboard.findChild(DefocusScatterPlot) is None
+    assert dashboard.findChild(DoseInformationScatterPlot) is None
 
 
 def test_loading_overlay_records_animation_timer_gaps(monkeypatch) -> None:

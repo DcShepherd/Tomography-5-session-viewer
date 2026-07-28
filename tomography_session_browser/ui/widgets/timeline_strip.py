@@ -13,11 +13,14 @@ import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from math import ceil
 from typing import Any
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QSizePolicy, QToolTip, QWidget
+
+from tomography_session_browser.domain.display_names import count_phrase
 
 from tomography_session_browser.services.timeline_service import (
     InferredPause,
@@ -77,6 +80,7 @@ class TimelineStrip(QWidget):
         self._segment_metadata: dict[str, Any] = {}
         self._display_mode = "auto"
         self._highlighted_tilt_series_id: str | None = None
+        self._keyboard_segment_index = 0
         self._segment_color_override: QColor | None = None
         self._pause_color_override: QColor | None = None
         self._track_color_override: QColor | None = None
@@ -84,6 +88,8 @@ class TimelineStrip(QWidget):
         self.setMinimumHeight(TIME_CHART_TIMELINE_MIN_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
+        self.setObjectName("acquisitionTimeline")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName("Acquisition timeline")
         self.setAccessibleDescription(
             "Timeline of tilt series acquisition periods with status colouring and inferred pause markers."
@@ -398,7 +404,12 @@ class TimelineStrip(QWidget):
         layer_rect = QRectF(chart_left - 2, y - 2, chart_width + 4, lane_height + 4).toAlignedRect()
         if layer_rect.width() <= 0 or layer_rect.height() <= 0:
             return
-        layer = QPixmap(layer_rect.size())
+        dpr = max(1.0, self.devicePixelRatioF())
+        layer = QPixmap(
+            ceil(layer_rect.width() * dpr),
+            ceil(layer_rect.height() * dpr),
+        )
+        layer.setDevicePixelRatio(dpr)
         layer.fill(Qt.GlobalColor.transparent)
         layer_painter = QPainter(layer)
         try:
@@ -802,6 +813,30 @@ class TimelineStrip(QWidget):
                     return
         super().mousePressEvent(event)
 
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        segments = [segment for _rect, segment in self._segment_rects]
+        if not segments:
+            super().keyPressEvent(event)
+            return
+        key = event.key()
+        if key in {Qt.Key.Key_Left, Qt.Key.Key_Right}:
+            delta = -1 if key == Qt.Key.Key_Left else 1
+            self._keyboard_segment_index = max(
+                0,
+                min(len(segments) - 1, self._keyboard_segment_index + delta),
+            )
+            segment = segments[self._keyboard_segment_index]
+            self.setAccessibleDescription(
+                f"{self._segment_tooltip(segment)} Press Enter to open this tilt series."
+            )
+            event.accept()
+            return
+        if key in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space}:
+            self._emit_segment_clicked(segments[self._keyboard_segment_index])
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt signature
         pos = event.position().toPoint()
         clickable = any(rect.contains(pos) for rect, _payload in self._density_rects) or any(
@@ -831,7 +866,7 @@ class TimelineStrip(QWidget):
                 label += f" · {status}"
             action = menu.addAction(label)
             if hasattr(action, "setIcon"):
-                action.setIcon(_status_icon(status))
+                action.setIcon(_status_icon(status, self.devicePixelRatioF()))
             action.triggered.connect(lambda _checked=False, selected=segment: self._emit_segment_clicked(selected))
         menu.exec(global_pos)
         return True
@@ -913,7 +948,7 @@ class TimelineStrip(QWidget):
         visible.append(
             _TimelineLane(
                 key="other",
-                label=f"+{len(lanes) - len(visible)} groups",
+                label=f"+{count_phrase(len(lanes) - len(visible), 'group')}",
                 segments=overflow_segments,
                 grouped=True,
             )
@@ -962,7 +997,7 @@ class TimelineStrip(QWidget):
         visible.append(
             _TimelineLane(
                 key="other",
-                label=f"+{len(lanes) - len(visible)} positions",
+                label=f"+{count_phrase(len(lanes) - len(visible), 'position')}",
                 segments=overflow_segments,
                 grouped=True,
             )
@@ -1179,7 +1214,7 @@ def _group_key(label: str) -> tuple[str, str]:
     return pretty.lower(), label_text
 
 
-def _status_icon(status: str) -> QIcon:
+def _status_icon(status: str, device_pixel_ratio: float = 1.0) -> QIcon:
     from tomography_session_browser.ui.theme import current_palette
 
     theme = current_palette()
@@ -1192,7 +1227,9 @@ def _status_icon(status: str) -> QIcon:
         color = QColor(theme.chart_grey)
     else:
         color = QColor(theme.chart_green)
-    pixmap = QPixmap(12, 12)
+    dpr = max(1.0, float(device_pixel_ratio))
+    pixmap = QPixmap(ceil(12 * dpr), ceil(12 * dpr))
+    pixmap.setDevicePixelRatio(dpr)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     try:

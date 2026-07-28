@@ -36,7 +36,10 @@ from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.ui.widgets.dashboard_card import DASHBOARD_CARD_MARGINS
 from tomography_session_browser.ui.widgets.defocus_plot import DefocusScatterPlot
 from tomography_session_browser.ui.widgets.dose_information_plot import DoseInformationScatterPlot
-from tomography_session_browser.ui.widgets.session_dashboard import SessionDashboard
+from tomography_session_browser.ui.widgets.session_dashboard import (
+    SessionDashboard,
+    _ResponsiveCardGrid,
+)
 from tomography_session_browser.ui.widgets.stat_card import StatCard
 from tomography_session_browser.ui.widgets.time_chart import (
     TIME_CHART_ELAPSED_AXIS_LABEL,
@@ -60,6 +63,42 @@ def test_large_collection_dashboard_uses_summary_models(tmp_path: Path) -> None:
     assert len(model.search_map_overview.worst) == 5
     assert len(model.search_map_completion) <= 60
     assert any(filter_model.label == "Failed" and filter_model.count > 0 for filter_model in model.filters)
+
+
+def test_dashboard_header_omits_redundant_complete_pill(tmp_path: Path) -> None:
+    app = _app()
+    model = session_dashboard_model(
+        _large_session(tmp_path, search_maps=2, batch_positions=2, tilt_series=4)
+    )
+    model.completeness = "complete"
+    model.completeness_label = "Complete"
+    dashboard = SessionDashboard()
+
+    dashboard.set_model(model)
+    app.processEvents()
+
+    header = dashboard._content_layout.itemAt(0).widget()
+    assert header is not None
+    assert "Complete" not in _label_texts(header)
+
+
+def test_dashboard_count_cards_reflow_at_narrow_widths() -> None:
+    app = _app()
+    cards = [QFrame() for _ in range(5)]
+    grid = _ResponsiveCardGrid(cards)
+    grid.show()
+
+    grid.resize(1200, 300)
+    app.processEvents()
+    assert grid.column_count() == 5
+
+    grid.resize(620, 500)
+    app.processEvents()
+    assert grid.column_count() == 2
+
+    grid.resize(400, 700)
+    app.processEvents()
+    assert grid.column_count() == 1
 
 
 def test_session_scope_deduplicates_direct_and_sample_collections(tmp_path: Path) -> None:
@@ -551,6 +590,40 @@ def test_defocus_readout_widget_uses_adaptive_point_styles() -> None:
     assert plot.color_for_label("Sample 00").name() == plot.color_for_label("Sample 00").name()
 
 
+def test_dense_scatter_reuses_batched_geometry_when_highlight_changes() -> None:
+    _app()
+    plot = DefocusScatterPlot()
+    plot.resize(1000, 320)
+    model = _plot_model_with_points(1200, sample_count=8)
+    plot.set_model(model)
+
+    first_frame = QPixmap(plot.size())
+    plot.render(first_frame)
+
+    assert plot._dense_geometry_builds == 1
+    assert plot._dense_geometry_cache is not None
+    assert sum(
+        len(points)
+        for points in plot._dense_geometry_cache["series_points"].values()
+    ) == len(model.points)
+    assert len(plot._point_rects) == len(model.points)
+    first_hit_rect, first_point = plot._point_rects[0]
+    assert plot._point_at(first_hit_rect.center().toPoint()) is first_point
+
+    plot.set_highlighted_tilt_series_id("ts-1")
+    highlighted_frame = QPixmap(plot.size())
+    plot.render(highlighted_frame)
+
+    # Viewer selection changes only the live emphasis layer. It must not
+    # rebuild all 1,200 point positions before Session can be shown again.
+    assert plot._dense_geometry_builds == 1
+
+    plot.resize(1040, 320)
+    resized_frame = QPixmap(plot.size())
+    plot.render(resized_frame)
+    assert plot._dense_geometry_builds == 2
+
+
 def test_defocus_readout_uses_shared_timeline_time_formatter() -> None:
     _app()
     plot = DefocusScatterPlot()
@@ -725,7 +798,7 @@ def test_session_dashboard_does_not_show_header_highlight_chip(tmp_path: Path) -
     assert dashboard._highlighted_tilt_series_id == tilt_id
 
 
-def test_session_dashboard_stacks_timeline_and_defocus_full_width(tmp_path: Path) -> None:
+def test_session_dashboard_omits_empty_defocus_and_keeps_timeline_full_width(tmp_path: Path) -> None:
     app = _app()
     session = _large_session(tmp_path, search_maps=4, batch_positions=3, tilt_series=6)
     model = session_dashboard_model(session)
@@ -742,37 +815,27 @@ def test_session_dashboard_stacks_timeline_and_defocus_full_width(tmp_path: Path
     ]
     count_cards = widgets[1].findChildren(StatCard)
     timeline_text = _label_texts(widgets[2])
-    defocus_text = _label_texts(widgets[3])
-    lower_text = _label_texts(widgets[4])
+    lower_text = _label_texts(widgets[3])
 
     assert ["Atlases", "Overviews", "Search maps", "Batch positions", "Tilt series"] == [
         card._model.label for card in count_cards
     ]
     assert "ACQUISITION TIMELINE" in timeline_text
     assert widgets[2].minimumHeight() >= 260
-    assert "DEFOCUS READOUT" in defocus_text
-    assert "Per-image MRC Defocus, with angle-aligned MDOC fallback" in defocus_text
-    assert "0 / 6 tilt series" in defocus_text
-    defocus_subtitle = next(
-        label
-        for label in widgets[3].findChildren(QLabel)
-        if label.text() == "Per-image MRC Defocus, with angle-aligned MDOC fallback"
-    )
-    assert "TargetDefocus, application AppliedDefocus" in defocus_subtitle.toolTip()
-    assert widgets[3].minimumHeight() >= 360
-    assert widgets[3].findChild(DefocusScatterPlot).minimumHeight() >= 300
+    assert dashboard.findChild(DefocusScatterPlot) is None
     assert "BATCH POSITIONS" in lower_text
     assert "SEARCH MAPS OVERVIEW" in lower_text
     assert "WARNINGS" in lower_text
 
-    timeline_title_top, timeline_title_height = _card_title_geometry(widgets[2], "ACQUISITION TIMELINE")
-    defocus_title_top, defocus_title_height = _card_title_geometry(widgets[3], "DEFOCUS READOUT")
-    assert timeline_title_top == defocus_title_top
-    assert timeline_title_height == defocus_title_height
+    timeline_title_top, timeline_title_height = _card_title_geometry(
+        widgets[2], "ACQUISITION TIMELINE"
+    )
+    assert timeline_title_top >= 0
+    assert timeline_title_height > 0
 
     lower_cards = [
         card
-        for card in widgets[4].findChildren(QFrame)
+        for card in widgets[3].findChildren(QFrame)
         if card.objectName() == "dashboardCard" and card.layout() is not None
     ]
     lower_titles = [
@@ -784,7 +847,7 @@ def test_session_dashboard_stacks_timeline_and_defocus_full_width(tmp_path: Path
         for card in lower_cards
     ]
     assert lower_titles[:3] == ["SEARCH MAPS OVERVIEW", "BATCH POSITIONS", "WARNINGS"]
-    for card in (*count_cards, widgets[2], widgets[3], *lower_cards):
+    for card in (*count_cards, widgets[2], *lower_cards):
         margins = card.layout().contentsMargins()
         assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == DASHBOARD_CARD_MARGINS
 

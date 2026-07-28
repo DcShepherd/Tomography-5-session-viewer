@@ -19,7 +19,7 @@ active palette so the widget renders correctly in either theme.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QMouseEvent, QPainter
+from PySide6.QtGui import QColor, QFontMetrics, QKeyEvent, QMouseEvent, QPainter
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -105,10 +105,16 @@ class CompletionBar(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setObjectName("dashboardInteractiveRow")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # Predictable footprint regardless of label length / theme.
         self.setMinimumHeight(_ROW_TOTAL_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._identifier = identifier
+        self.setAccessibleName(f"Open search map {label}")
+        self.setAccessibleDescription(
+            f"{acquired} of {planned} planned tiles acquired. Press Enter or Space to open."
+        )
 
         theme = current_palette()
         track_color = QColor(theme.surface_hi)
@@ -165,6 +171,13 @@ class CompletionBar(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self._identifier)
         super().mousePressEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 — Qt signature
+        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space}:
+            self.clicked.emit(self._identifier)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     # ------- accessors used by tests ----------------------------------------
 

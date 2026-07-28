@@ -14,7 +14,7 @@ from math import ceil, floor
 from typing import Any
 
 from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 from tomography_session_browser.ui.session_presenter import DefocusPlotModel, defocus_point_tooltip
@@ -27,10 +27,18 @@ from tomography_session_browser.ui.widgets.time_chart import (
     TIME_CHART_RIGHT_GUTTER,
     TIME_CHART_TOP,
     format_time_axis_tick,
+    nice_axis_ticks,
     time_axis_tick_count,
+    value_axis_tick_count,
 )
 
 LOGGER = logging.getLogger(__name__)
+
+# Above this count, individual colour-and-shape painter calls are visibly
+# expensive but the 2–4 px symbols are too small for their silhouettes to be
+# useful. Dense plots therefore use the earlier, simple-circle visual language
+# and submit one point batch per series.
+_DENSE_POINT_BATCH_THRESHOLD = 500
 
 
 class DefocusScatterPlot(QWidget):
@@ -50,23 +58,32 @@ class DefocusScatterPlot(QWidget):
         self._last_x_axis_label_font = QFont(self.font())
         self._last_y_axis_label_font = QFont(self.font())
         self._highlighted_tilt_series_id: str | None = None
+        self._keyboard_point_index = -1
+        self._dense_geometry_cache: dict[str, Any] | None = None
+        self._dense_geometry_builds = 0
         self.setMinimumHeight(TIME_CHART_DEFOCUS_MIN_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName("Defocus readout plot")
         self.setAccessibleDescription(
             "Scatter plot of per-image Defocus metadata values. "
-            "Double-click a point to open the corresponding tilt series frame."
+            "Double-click a point to open its linked tilt series, or use Left or Right "
+            "to inspect points and Enter to open one."
         )
 
     # ------------------------------------------------------------------ API
 
     def set_model(self, model: DefocusPlotModel | None) -> None:
         self._model = model
+        self._keyboard_point_index = -1
+        self._dense_geometry_cache = None
         self.update()
 
     def set_highlighted_tilt_series_id(self, tilt_series_id: str | None) -> None:
+        if self._highlighted_tilt_series_id == tilt_series_id:
+            return
         self._highlighted_tilt_series_id = tilt_series_id
         self.update()
 
@@ -89,6 +106,10 @@ class DefocusScatterPlot(QWidget):
         return "Defocus (µm)"
 
     def _format_y_tick(self, value: float) -> str:
+        # Defocus is signed, so the +/- prefix is meaningful — except on the
+        # zero line, where "+0.0" is just wrong.
+        if abs(value) < 1e-9:
+            return "0.0"
         return f"{value:+.1f}"
 
     def _empty_title(self) -> str:
@@ -108,6 +129,7 @@ class DefocusScatterPlot(QWidget):
     # ---------------------------------------------------------------- paint
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        del event
         paint_timer = QElapsedTimer()
         if LOGGER.isEnabledFor(logging.DEBUG):
             paint_timer.start()
@@ -131,8 +153,14 @@ class DefocusScatterPlot(QWidget):
 
             x_min, x_max = self._x_range(model)
             y_min, y_max = self._y_range(model.points)
+            # Widen the padded data range onto a round-number grid so the
+            # axis labels are readable values rather than arbitrary
+            # fractions of the data extent.
+            y_min, y_max, y_ticks = nice_axis_ticks(
+                y_min, y_max, max_ticks=value_axis_tick_count(plot.height())
+            )
             self._last_plot_rect = QRectF(plot)
-            self._draw_axes(painter, plot, model, x_min, x_max, y_min, y_max, colors)
+            self._draw_axes(painter, plot, model, x_min, x_max, y_min, y_max, y_ticks, colors)
             self._draw_points(painter, plot, model, x_min, x_max, y_min, y_max)
             self._draw_legend(painter, self._legend_rect(painter, plot, model), model, colors)
         finally:
@@ -154,18 +182,18 @@ class DefocusScatterPlot(QWidget):
         x_max: float,
         y_min: float,
         y_max: float,
+        y_ticks: list[float],
         colors: dict[str, QColor],
     ) -> None:
         metrics = painter.fontMetrics()
         painter.setPen(QPen(colors["grid"], 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        tick_count = time_axis_tick_count(plot.width())
-        for index in range(tick_count):
-            frac = index / (tick_count - 1)
+        y_span = y_max - y_min
+        for value in y_ticks:
+            frac = 0.0 if y_span <= 0 else (value - y_min) / y_span
             y = plot.bottom() - plot.height() * frac
             painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
-            value = y_min + (y_max - y_min) * frac
             label = self._format_y_tick(value)
             painter.setPen(colors["label"])
             painter.drawText(
@@ -175,6 +203,7 @@ class DefocusScatterPlot(QWidget):
             )
             painter.setPen(QPen(colors["grid"], 1))
 
+        tick_count = time_axis_tick_count(plot.width())
         for index in range(tick_count):
             frac = index / (tick_count - 1)
             x = plot.left() + plot.width() * frac
@@ -241,34 +270,240 @@ class DefocusScatterPlot(QWidget):
         y_min: float,
         y_max: float,
     ) -> None:
+        if len(model.points) > _DENSE_POINT_BATCH_THRESHOLD:
+            self._draw_dense_points(
+                painter,
+                plot,
+                model,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+            )
+            return
+
         radius, alpha = _point_style(len(model.points))
         palette = self._series_palette()
+        series_styles = {
+            label: (_color_for_label(label, palette), _series_index(label, 4))
+            for label in {point.sample_name for point in model.points}
+        }
         painter.setPen(Qt.PenStyle.NoPen)
-        for point in model.points:
+        for point_index, point in enumerate(model.points):
             x_value = self._point_x(point, model)
             x_frac = 0.5 if x_max <= x_min else (x_value - x_min) / (x_max - x_min)
             y_value = self._point_value(point)
             y_frac = 0.5 if y_max <= y_min else (y_value - y_min) / (y_max - y_min)
             x = plot.left() + plot.width() * max(0.0, min(x_frac, 1.0))
             y = plot.bottom() - plot.height() * max(0.0, min(y_frac, 1.0))
-            color = _color_for_label(point.sample_name, palette)
+            base_color, shape_index = series_styles[point.sample_name]
+            color = QColor(base_color)
             highlighted = self._point_is_highlighted(point)
             color.setAlpha(self._point_alpha(point, alpha))
             painter.setBrush(color)
             rect = QRectF(x - radius, y - radius, radius * 2, radius * 2)
-            painter.drawEllipse(rect)
-            if highlighted:
+            _draw_point_symbol(
+                painter,
+                rect,
+                shape_index,
+            )
+            keyboard_highlighted = point_index == self._keyboard_point_index and self.hasFocus()
+            if highlighted or keyboard_highlighted:
                 from tomography_session_browser.ui.theme import current_palette
 
                 ring = QColor(current_palette().overlay_selected)
-                ring.setAlpha(118)
+                ring.setAlpha(205 if keyboard_highlighted else 118)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.setPen(QPen(ring, 1.0))
+                painter.setPen(QPen(ring, 1.5 if keyboard_highlighted else 1.0))
                 painter.drawEllipse(rect.adjusted(-2, -2, 2, 2))
                 painter.setPen(Qt.PenStyle.NoPen)
             hit_rect = rect.adjusted(-3, -3, 3, 3)
             self._point_rects.append((hit_rect, point))
             self._add_point_bin(hit_rect, point)
+
+    def _draw_dense_points(
+        self,
+        painter: QPainter,
+        plot: QRectF,
+        model: DefocusPlotModel,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+    ) -> None:
+        """Draw a dense plot in a few vector batches.
+
+        Historical versions used simple circles. Submitting those circles one
+        at a time made every Session-tab reveal scale with the number of
+        images, while a whole-plot pixmap cache became stale whenever a viewer
+        selection changed the highlight. Geometry is stable across highlight
+        and focus changes, so cache only that geometry and keep painting live.
+        """
+
+        radius, alpha = _point_style(len(model.points))
+        geometry = self._dense_point_geometry(
+            plot,
+            model,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            radius,
+        )
+        self._point_rects = geometry["point_rects"]
+        self._point_bins = geometry["point_bins"]
+
+        palette = self._series_palette()
+        base_alpha = (
+            alpha
+            if not self._highlighted_tilt_series_id
+            else max(45, int(alpha * 0.38))
+        )
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for label, positions in geometry["series_points"].items():
+            color = _color_for_label(label, palette)
+            color.setAlpha(base_alpha)
+            painter.setPen(
+                QPen(
+                    color,
+                    radius * 2.0,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                )
+            )
+            painter.drawPoints(positions)
+
+        highlighted_entries = geometry["by_tilt"].get(
+            self._highlighted_tilt_series_id,
+            (),
+        )
+        for entry in highlighted_entries:
+            self._draw_dense_point_emphasis(
+                painter,
+                entry,
+                palette,
+                radius,
+                max(alpha, 235),
+                keyboard=False,
+            )
+
+        if (
+            self.hasFocus()
+            and 0 <= self._keyboard_point_index < len(geometry["entries"])
+        ):
+            entry = geometry["entries"][self._keyboard_point_index]
+            self._draw_dense_point_emphasis(
+                painter,
+                entry,
+                palette,
+                radius,
+                self._point_alpha(entry[2], alpha),
+                keyboard=True,
+            )
+
+    def _dense_point_geometry(
+        self,
+        plot: QRectF,
+        model: DefocusPlotModel,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+        radius: float,
+    ) -> dict[str, Any]:
+        key = (
+            id(model),
+            len(model.points),
+            plot.x(),
+            plot.y(),
+            plot.width(),
+            plot.height(),
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            radius,
+        )
+        cached = self._dense_geometry_cache
+        if cached is not None and cached["key"] == key:
+            return cached
+
+        series_points: dict[str, list[QPointF]] = {}
+        point_rects: list[tuple[QRectF, Any]] = []
+        point_bins: dict[tuple[int, int], list[tuple[QRectF, Any]]] = {}
+        entries: list[tuple[QPointF, QRectF, Any]] = []
+        by_tilt: dict[str, list[tuple[QPointF, QRectF, Any]]] = {}
+        x_span = x_max - x_min
+        y_span = y_max - y_min
+        for point in model.points:
+            x_value = self._point_x(point, model)
+            x_frac = 0.5 if x_span <= 0 else (x_value - x_min) / x_span
+            y_value = self._point_value(point)
+            y_frac = 0.5 if y_span <= 0 else (y_value - y_min) / y_span
+            x = plot.left() + plot.width() * max(0.0, min(x_frac, 1.0))
+            y = plot.bottom() - plot.height() * max(0.0, min(y_frac, 1.0))
+            position = QPointF(x, y)
+            series_points.setdefault(point.sample_name, []).append(position)
+            rect = QRectF(x - radius, y - radius, radius * 2, radius * 2)
+            hit_rect = rect.adjusted(-3, -3, 3, 3)
+            point_rects.append((hit_rect, point))
+            point_bins.setdefault(
+                _bin_key(hit_rect.center().x(), hit_rect.center().y()),
+                [],
+            ).append((hit_rect, point))
+            entry = (position, rect, point)
+            entries.append(entry)
+            tilt_series_id = getattr(point, "tilt_series_id", None)
+            if isinstance(tilt_series_id, str) and tilt_series_id:
+                by_tilt.setdefault(tilt_series_id, []).append(entry)
+
+        geometry: dict[str, Any] = {
+            "key": key,
+            "series_points": {
+                label: QPolygonF(positions)
+                for label, positions in series_points.items()
+            },
+            "point_rects": point_rects,
+            "point_bins": point_bins,
+            "entries": tuple(entries),
+            "by_tilt": {
+                tilt_series_id: tuple(tilt_entries)
+                for tilt_series_id, tilt_entries in by_tilt.items()
+            },
+        }
+        self._dense_geometry_cache = geometry
+        self._dense_geometry_builds += 1
+        return geometry
+
+    @staticmethod
+    def _draw_dense_point_emphasis(
+        painter: QPainter,
+        entry: tuple[QPointF, QRectF, Any],
+        palette: list[QColor],
+        radius: float,
+        alpha: int,
+        *,
+        keyboard: bool,
+    ) -> None:
+        from tomography_session_browser.ui.theme import current_palette
+
+        position, rect, point = entry
+        color = _color_for_label(point.sample_name, palette)
+        color.setAlpha(alpha)
+        painter.setPen(
+            QPen(
+                color,
+                radius * 2.0,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+            )
+        )
+        painter.drawPoint(position)
+        ring = QColor(current_palette().overlay_selected)
+        ring.setAlpha(205 if keyboard else 118)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(ring, 1.5 if keyboard else 1.0))
+        painter.drawEllipse(rect.adjusted(-2, -2, 2, 2))
 
     def _point_is_highlighted(self, point: Any) -> bool:
         return bool(
@@ -312,7 +547,15 @@ class DefocusScatterPlot(QWidget):
             dot.setAlpha(230)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(dot)
-            painter.drawEllipse(QRectF(x, y + 4, 7, 7))
+            symbol_rect = QRectF(x, y + 4, 7, 7)
+            if len(model.points) > _DENSE_POINT_BATCH_THRESHOLD:
+                painter.drawEllipse(symbol_rect)
+            else:
+                _draw_point_symbol(
+                    painter,
+                    symbol_rect,
+                    _series_index(label, 4),
+                )
             painter.setPen(colors["label"])
             painter.drawText(QPointF(x + 13, y + metrics.ascent() + 1), text)
             x += chip_width + 8
@@ -359,10 +602,50 @@ class DefocusScatterPlot(QWidget):
         point = self._point_at(event.pos())
         tilt_series_id = getattr(point, "tilt_series_id", None)
         if isinstance(tilt_series_id, str) and tilt_series_id:
+            if self._model is not None:
+                try:
+                    self._keyboard_point_index = self._model.points.index(point)
+                except ValueError:
+                    self._keyboard_point_index = -1
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
             self.pointClicked.emit(tilt_series_id, getattr(point, "frame_index", None))
+            self.update()
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        points = list(self._model.points) if self._model is not None else []
+        if not points:
+            super().keyPressEvent(event)
+            return
+        key = event.key()
+        if key in {Qt.Key.Key_Left, Qt.Key.Key_Up, Qt.Key.Key_Right, Qt.Key.Key_Down}:
+            direction = -1 if key in {Qt.Key.Key_Left, Qt.Key.Key_Up} else 1
+            if self._keyboard_point_index < 0:
+                self._keyboard_point_index = 0 if direction > 0 else len(points) - 1
+            else:
+                self._keyboard_point_index = (
+                    self._keyboard_point_index + direction
+                ) % len(points)
+            point = points[self._keyboard_point_index]
+            QToolTip.showText(
+                self.mapToGlobal(self.rect().center()),
+                self._point_tooltip(point),
+                self,
+            )
+            self.update()
+            event.accept()
+            return
+        if key in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space}:
+            index = self._keyboard_point_index if self._keyboard_point_index >= 0 else 0
+            point = points[index]
+            tilt_series_id = getattr(point, "tilt_series_id", None)
+            if isinstance(tilt_series_id, str) and tilt_series_id:
+                self.pointClicked.emit(tilt_series_id, getattr(point, "frame_index", None))
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt signature
         if event.button() != Qt.MouseButton.LeftButton:
@@ -495,6 +778,16 @@ class DefocusScatterPlot(QWidget):
         }
 
     def _series_palette(self) -> list[QColor]:
+        """Per-sample series colours.
+
+        ``_color_for_label`` picks from this list by hashing the sample name,
+        so every entry has to stand on its own — list order confers nothing.
+        The requirement is therefore that no two entries are equal (they used
+        to be: ``chart_blue`` and ``chart_violet`` were the same hex, so two
+        samples could render identically) and that all six stay far enough
+        apart to be told apart in a dense scatter.
+        """
+
         from tomography_session_browser.ui.theme import current_palette
 
         theme = current_palette()
@@ -521,9 +814,49 @@ def _color_for_label(label: str, palette: list[QColor]) -> QColor:
         from tomography_session_browser.ui.theme import current_palette
 
         return QColor(current_palette().accent)
-    digest = sha1(label.encode("utf-8", errors="replace")).digest()
-    index = int.from_bytes(digest[:2], "big") % len(palette)
+    index = _series_index(label, len(palette))
     return QColor(palette[index])
+
+
+def _series_index(label: str, count: int) -> int:
+    if count <= 0:
+        return 0
+    digest = sha1(label.encode("utf-8", errors="replace")).digest()
+    return int.from_bytes(digest[:2], "big") % count
+
+
+def _draw_point_symbol(painter: QPainter, rect: QRectF, shape_index: int) -> None:
+    """Draw a compact colour-independent series symbol."""
+
+    shape_index %= 4
+    if shape_index == 0:
+        painter.drawEllipse(rect)
+        return
+    if shape_index == 1:
+        painter.drawRect(rect)
+        return
+    center = rect.center()
+    if shape_index == 2:
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(center.x(), rect.top()),
+                    QPointF(rect.right(), center.y()),
+                    QPointF(center.x(), rect.bottom()),
+                    QPointF(rect.left(), center.y()),
+                ]
+            )
+        )
+        return
+    painter.drawPolygon(
+        QPolygonF(
+            [
+                QPointF(center.x(), rect.top()),
+                QPointF(rect.right(), rect.bottom()),
+                QPointF(rect.left(), rect.bottom()),
+            ]
+        )
+    )
 
 
 def _bin_key(x: float, y: float) -> tuple[int, int]:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 import math
 from pathlib import Path
@@ -10,11 +10,15 @@ import time
 from typing import Any
 
 from PIL import Image
-from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal, Slot
-from PySide6.QtGui import QBrush, QColor, QFont, QImage, QKeySequence, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QShortcut, QWheelEvent
+from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, QStandardPaths, Qt, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QImage, QKeyEvent, QKeySequence, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRegion, QShortcut, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFrame,
     QGraphicsItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
@@ -24,7 +28,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QHeaderView,
+    QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QSplitter,
@@ -32,21 +38,63 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QStyleOptionSlider,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from tomography_session_browser.domain.display_names import format_overview_display_name
+from tomography_session_browser.domain.display_names import count_phrase, format_overview_display_name
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.domain.models import Atlas, BatchPosition, MrcMetadata, Overview, SearchMap, SearchTile, TiltSeries
+from tomography_session_browser.domain.units import ANGSTROM, ANGSTROM_PER_PIXEL, DEGREE, MICROMETRE, NANOMETRE
+from tomography_session_browser.ui.list_decorations import paint_selection_marker
 from tomography_session_browser.parsers.mrc_parser import MrcPreviewSource, NORMALISATION
 from tomography_session_browser.parsers.xml_parser import find_first
-from tomography_session_browser.services.item_status import ItemListStatus
+from tomography_session_browser.services.item_status import ItemListStatus, display_status_label
 from tomography_session_browser.services.batch_label_service import (
     LABEL_STROKE_WIDTH_PX,
+    AtlasLabelPlacement,
+    atlas_batch_label_placements,
     batch_label_screen_font_size_px,
+)
+from tomography_session_browser.services.atlas_marker_style import (
+    CLUSTER_HALO_WIDTH_DP,
+    CLUSTER_INNER_GAP_DP,
+    CLUSTER_SEGMENT_WIDTH_DP,
+    IMAGE_STATUS_COLOURS,
+    LABEL_CORNER_RADIUS_DP,
+    LABEL_FONT_SIZE_DP,
+    LABEL_HEIGHT_DP,
+    LEAF_DIAMETER_DP,
+    LEAF_FAILED_GLYPH_WIDTH_DP,
+    LEAF_FILL_RADIUS_DP,
+    LEAF_HALO_WIDTH_DP,
+    LEAF_HIT_RADIUS_DP,
+    LEAF_RING_RADIUS_DP,
+    LEAF_STATUS_WIDTH_DP,
+    MARKER_INK,
+    MARKER_LABEL_TEXT,
+    MARKER_SELECTED,
+    STATE_RING_OFFSET_DP,
+    cluster_ring_segments,
+)
+from tomography_session_browser.services.marker_clustering import (
+    CLUSTER_RADIUS_PX,
+    MAX_ATLAS_ZOOM,
+    NO_CLUSTER_ABOVE_ZOOM,
+    PER_EXPOSURE_MIN_SCREEN_PX,
+    SEARCH_MAP_FOOTPRINT_MIN_SCREEN_PX,
+    SEARCH_MAP_TILE_MIN_SCREEN_PX,
+    ZOOM_DEBOUNCE_MS,
+    ClusterInput,
+    MarkerCluster,
+    ScreenTransform,
+    cluster_markers,
+    marker_set_fingerprint,
+    screen_extent_visible,
+    zoom_bucket,
 )
 from tomography_session_browser.services.tilt_angle_service import explicit_stack_order_tilt_angles, stack_order_tilt_angles
 from tomography_session_browser.services.timeline_service import build_acquisition_timeline
@@ -69,10 +117,15 @@ MEDIUM_DETAIL_SCALE = 0.9
 HIGH_DETAIL_SCALE = 1.6
 MIN_SCALE_BAR_SCREEN_PX = 58.0
 MAX_SCALE_BAR_SCREEN_PX = 190.0
+ZOOM_LABEL_MIN_WIDTH_PX = 48
+ZOOM_PANEL_HORIZONTAL_PADDING_PX = 6
 FLOATING_CONTROL_INSET_PX = 18
 # Keep every bottom-floating viewer control on the same baseline so the scale
 # bar and zoom strip feel anchored to one frame edge instead of separate panes.
 FLOATING_CONTROL_BOTTOM_INSET_PX = 24
+EXPORT_RENDER_SCALE = 2.0
+MAX_EXPORT_DIMENSION_PX = 8192
+MAX_EXPORT_PIXELS = 50_000_000
 DEFAULT_VISIBLE_MARKER_TYPES = (
     MarkerType.SEARCH_MAP,
     MarkerType.OVERVIEW,
@@ -102,6 +155,7 @@ MARKER_TYPE_LABELS = {
     MarkerType.SEARCH_MAP: "Search map",
     MarkerType.OVERVIEW: "Overview",
     MarkerType.BATCH_POSITION: "Batch position",
+    MarkerType.BATCH_CLUSTER: "Batch-position cluster",
     MarkerType.TILT_SERIES: "Tilt series",
     MarkerType.TEMPLATE_AREA: "Template",
     MarkerType.EXPOSURE_AREA: "Exposure area",
@@ -113,6 +167,17 @@ MARKER_TYPE_LABELS = {
     MarkerType.LINK_LINE: "Link",
     MarkerType.STAGE_CROSSHAIR: "Other",
 }
+
+ATLAS_LOD_CLUSTER = "cluster_batch_positions"
+ATLAS_LOD_LABELS = "batch_position_labels"
+ATLAS_LOD_TILE_GRIDS = "search_map_tile_grids"
+ATLAS_LOD_EXPOSURES = "per_exposure_markers"
+ATLAS_LOD_CONTROL_LABELS = (
+    (ATLAS_LOD_CLUSTER, "Cluster batch positions", "cluster-positions", True),
+    (ATLAS_LOD_LABELS, "Batch position labels", "position-labels", True),
+    (ATLAS_LOD_TILE_GRIDS, "Search-map tile grids", "tile-grid", True),
+    (ATLAS_LOD_EXPOSURES, "Per-exposure markers", "exposure-markers", False),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +192,13 @@ class ViewerNavigationAction:
     label: str
     enabled: bool = True
     tooltip: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AtlasCollectionOverlayOption:
+    key: str
+    label: str
+    visible: bool = True
 
 
 @dataclass(slots=True)
@@ -200,6 +272,19 @@ class _MrcLoadTask(QRunnable):
         self._max_size = max_size
         self._signals = signals
 
+    def _emit(self, signal, *args: object) -> None:
+        """Emit unless the receiving widget has already been torn down.
+
+        Closing the window while a preview is still decoding destroys the
+        C++ side of ``_MrcLoadSignals`` under this worker, and the bare emit
+        surfaced as an uncaught ``RuntimeError`` in the crash log on exit.
+        """
+
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            LOGGER.debug("Dropped preview result for %s; viewer was closed", self._path)
+
     @Slot()
     def run(self) -> None:
         cache_key = _preview_cache_key(self._path, max(0, self._slice_index), self._max_size)
@@ -209,11 +294,18 @@ class _MrcLoadTask(QRunnable):
         except Exception as exc:  # pragma: no cover - exercised through UI thread safety
             LOGGER.warning("MRC preview load failed path=%s slice=%s: %s", self._path, self._slice_index, exc)
             MRC_PREFETCH_KEYS.discard(cache_key)
-            self._signals.failed.emit(self._request_id, self._path, max(0, self._slice_index), 0, [str(exc)])
+            self._emit(self._signals.failed, self._request_id, self._path, max(0, self._slice_index), 0, [str(exc)])
             return
         if preview.image is None:
             MRC_PREFETCH_KEYS.discard(cache_key)
-            self._signals.failed.emit(self._request_id, self._path, preview.slice_index, preview.slice_count, preview.warnings)
+            self._emit(
+                self._signals.failed,
+                self._request_id,
+                self._path,
+                preview.slice_index,
+                preview.slice_count,
+                preview.warnings,
+            )
             return
         image = _pil_to_qimage(preview.image)
         estimated_bytes = image.sizeInBytes()
@@ -223,7 +315,8 @@ class _MrcLoadTask(QRunnable):
             CachedPreview(image, preview.slice_count, preview.warnings, estimated_bytes),
         )
         MRC_PREFETCH_KEYS.discard(cache_key)
-        self._signals.loaded.emit(
+        self._emit(
+            self._signals.loaded,
             self._request_id,
             self._path,
             preview.slice_index,
@@ -239,6 +332,640 @@ class _MrcLoadTask(QRunnable):
             preview.preview_shape,
             estimated_bytes,
         )
+
+
+class _AtlasLodMarkerItem(QGraphicsItem):
+    """Fixed-screen-size Atlas glyph with an 11 dp interaction target."""
+
+    def __init__(self, marker: ImageMarker) -> None:
+        super().__init__()
+        self._marker = marker
+        self._hovered = False
+        diameter = float(marker.metadata.get("diameter_px") or LEAF_DIAMETER_DP)
+        self._radius = diameter / 2.0
+        self._hit_radius = max(
+            LEAF_HIT_RADIUS_DP,
+            self._radius + STATE_RING_OFFSET_DP
+            if marker.marker_type == MarkerType.BATCH_CLUSTER
+            else LEAF_HIT_RADIUS_DP,
+        )
+        margin = max(
+            self._hit_radius - self._radius,
+            STATE_RING_OFFSET_DP + 4.0,
+        )
+        self._bounds = QRectF(
+            -self._radius - margin,
+            -self._radius - margin,
+            diameter + margin * 2,
+            diameter + margin * 2,
+        )
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+        self.setAcceptHoverEvents(bool(marker.metadata.get("navigation_enabled", True)))
+        self._update_z_value()
+
+    def boundingRect(self) -> QRectF:  # noqa: N802 - Qt signature
+        return self._bounds
+
+    def shape(self) -> QPainterPath:
+        path = QPainterPath()
+        path.addEllipse(
+            QPointF(0.0, 0.0),
+            self._hit_radius,
+            self._hit_radius,
+        )
+        return path
+
+    def hoverEnterEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        if bool(self._marker.metadata.get("navigation_enabled", True)):
+            self._hovered = True
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._update_z_value()
+            self.update()
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        self._hovered = False
+        self.unsetCursor()
+        self._update_z_value()
+        self.update()
+        super().hoverLeaveEvent(event)
+
+    def _update_z_value(self) -> None:
+        status = (self._marker.status or "").lower()
+        if self._marker.selected:
+            z_value = 50.0
+        elif self._hovered:
+            z_value = 40.0
+        elif status == "failed":
+            z_value = 30.0
+        elif self._marker.marker_type == MarkerType.BATCH_CLUSTER:
+            z_value = 20.0
+        else:
+            z_value = 10.0
+        self.setZValue(z_value)
+
+    def paint(self, painter: QPainter, _option, _widget=None) -> None:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        status = (self._marker.status or "queued").lower()
+        if self._marker.marker_type == MarkerType.BATCH_CLUSTER:
+            self._paint_cluster(painter)
+        else:
+            self._paint_leaf(painter, status)
+
+    def _paint_leaf(self, painter: QPainter, status: str) -> None:
+        navigable = bool(self._marker.metadata.get("navigation_enabled", True))
+        colour = _atlas_status_color(status)
+        if not navigable and status != "unattributed":
+            colour = _atlas_status_color("unattributed")
+        rect = QRectF(
+            -LEAF_RING_RADIUS_DP,
+            -LEAF_RING_RADIUS_DP,
+            LEAF_RING_RADIUS_DP * 2,
+            LEAF_RING_RADIUS_DP * 2,
+        )
+
+        if navigable and status in {"collected", "failed"}:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(colour)
+            painter.drawEllipse(
+                QPointF(0.0, 0.0),
+                LEAF_FILL_RADIUS_DP,
+                LEAF_FILL_RADIUS_DP,
+            )
+        elif navigable and status == "partial":
+            fill_rect = QRectF(
+                -LEAF_FILL_RADIUS_DP,
+                -LEAF_FILL_RADIUS_DP,
+                LEAF_FILL_RADIUS_DP * 2,
+                LEAF_FILL_RADIUS_DP * 2,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(colour)
+            painter.drawPie(fill_rect, 90 * 16, 180 * 16)
+
+        halo = QPen(QColor(MARKER_INK), LEAF_HALO_WIDTH_DP)
+        halo.setCapStyle(Qt.PenCapStyle.FlatCap)
+        halo.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        painter.setPen(halo)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(rect)
+
+        status_pen = QPen(colour, LEAF_STATUS_WIDTH_DP)
+        status_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        status_pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        if status == "unattributed":
+            status_pen.setDashPattern(
+                [3.9 / LEAF_STATUS_WIDTH_DP, 2.4 / LEAF_STATUS_WIDTH_DP]
+            )
+            circumference = 2.0 * math.pi * LEAF_RING_RADIUS_DP
+            status_pen.setDashOffset((circumference / 4.0) / LEAF_STATUS_WIDTH_DP)
+        painter.setPen(status_pen)
+        painter.drawEllipse(rect)
+
+        if navigable and status == "failed":
+            glyph = LEAF_FILL_RADIUS_DP * 0.62
+            cross_pen = QPen(QColor(MARKER_INK), LEAF_FAILED_GLYPH_WIDTH_DP)
+            cross_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(cross_pen)
+            painter.drawLine(QPointF(-glyph, -glyph), QPointF(glyph, glyph))
+            painter.drawLine(QPointF(glyph, -glyph), QPointF(-glyph, glyph))
+
+        self._paint_interaction_state(painter, colour, navigable=navigable)
+
+    def _paint_cluster(self, painter: QPainter) -> None:
+        diameter = self._radius * 2.0
+        ring_radius = diameter / 2.0 - 2.3
+        colour = _atlas_status_color(self._marker.status or "queued")
+        inner_radius = (
+            ring_radius - CLUSTER_SEGMENT_WIDTH_DP / 2.0 - CLUSTER_INNER_GAP_DP
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(colour)
+        painter.drawEllipse(QPointF(0.0, 0.0), inner_radius, inner_radius)
+
+        ring_rect = QRectF(
+            -ring_radius,
+            -ring_radius,
+            ring_radius * 2.0,
+            ring_radius * 2.0,
+        )
+        halo = QPen(QColor(MARKER_INK), CLUSTER_HALO_WIDTH_DP)
+        halo.setCapStyle(Qt.PenCapStyle.FlatCap)
+        painter.setPen(halo)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(ring_rect)
+
+        counts = self._marker.metadata.get("status_counts")
+        if isinstance(counts, dict):
+            for segment in cluster_ring_segments(counts):
+                pen = QPen(
+                    _atlas_status_color(segment.status),
+                    CLUSTER_SEGMENT_WIDTH_DP,
+                )
+                pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+                painter.setPen(pen)
+                # Qt uses positive counter-clockwise sweeps.  Negating both
+                # authored screen-space angles keeps 12 o'clock as the start
+                # and proceeds clockwise.
+                painter.drawArc(
+                    ring_rect,
+                    round(-segment.start_degrees * 16),
+                    round(-segment.sweep_degrees * 16),
+                )
+
+        count = len(self._marker.metadata.get("member_ids", ()))
+        from tomography_session_browser.ui.theme import MONO_FONT_NAME
+
+        font = QFont(MONO_FONT_NAME)
+        font.setPixelSize(
+            max(1, round(diameter * (0.30 if count >= 100 else 0.36)))
+        )
+        font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(font)
+        painter.setPen(QColor(MARKER_INK))
+        painter.drawText(
+            QRectF(-self._radius, -self._radius + 0.5, diameter, diameter),
+            Qt.AlignmentFlag.AlignCenter,
+            str(count),
+        )
+        self._paint_interaction_state(
+            painter,
+            colour,
+            navigable=True,
+            ring_radius=ring_radius,
+        )
+
+    def _paint_interaction_state(
+        self,
+        painter: QPainter,
+        colour: QColor,
+        *,
+        navigable: bool,
+        ring_radius: float = LEAF_RING_RADIUS_DP,
+    ) -> None:
+        if not navigable:
+            return
+        state_radius = ring_radius + STATE_RING_OFFSET_DP
+        state_rect = QRectF(
+            -state_radius,
+            -state_radius,
+            state_radius * 2,
+            state_radius * 2,
+        )
+        if self._marker.selected:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(MARKER_INK), 3.0))
+            painter.drawEllipse(state_rect)
+            selected_pen = QPen(QColor(MARKER_SELECTED), 1.4)
+            selected_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(selected_pen)
+            painter.drawEllipse(state_rect)
+            for degrees in (45.0, 135.0, 225.0, 315.0):
+                radians = math.radians(degrees)
+                start = QPointF(
+                    math.cos(radians) * state_radius,
+                    math.sin(radians) * state_radius,
+                )
+                end = QPointF(
+                    math.cos(radians) * (state_radius + 3.0),
+                    math.sin(radians) * (state_radius + 3.0),
+                )
+                painter.drawLine(start, end)
+        elif self._hovered:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(MARKER_INK), 2.2))
+            painter.drawEllipse(state_rect)
+            painter.setPen(QPen(colour, 1.0))
+            painter.drawEllipse(state_rect)
+
+
+class _AtlasLodLabelItem(QGraphicsItem):
+    """Short numeric Atlas label on an 88% ink plate."""
+
+    def __init__(self, marker: ImageMarker, placement: AtlasLabelPlacement) -> None:
+        super().__init__()
+        self._marker = marker
+        self._placement = placement
+        self._plate = QRectF(
+            placement.x_offset_px,
+            placement.y_offset_px,
+            placement.width_px,
+            placement.height_px,
+        )
+        self._bounds = self._plate.adjusted(-3.0, -3.0, 3.0, 3.0)
+        if placement.leader:
+            self._bounds = self._bounds.united(
+                QRectF(
+                    LEAF_RING_RADIUS_DP + 3.0,
+                    min(0.0, self._plate.center().y()),
+                    max(1.0, self._plate.left() - LEAF_RING_RADIUS_DP),
+                    abs(self._plate.center().y()) + 1.0,
+                ).normalized()
+            )
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+
+    def boundingRect(self) -> QRectF:  # noqa: N802 - Qt signature
+        return self._bounds
+
+    def paint(self, painter: QPainter, _option, _widget=None) -> None:
+        from tomography_session_browser.ui.theme import MONO_FONT_NAME
+
+        text = self._marker.label or ""
+        if not text:
+            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self._placement.leader:
+            start = QPointF(LEAF_RING_RADIUS_DP + 3.0, 0.0)
+            end = QPointF(self._plate.left(), self._plate.center().y())
+            ink_pen = QPen(QColor(MARKER_INK), 2.4)
+            ink_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            painter.setPen(ink_pen)
+            painter.drawLine(start, end)
+            text_pen = QPen(QColor(MARKER_LABEL_TEXT), 1.0)
+            text_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            painter.setPen(text_pen)
+            painter.drawLine(start, end)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        plate = QColor(MARKER_INK)
+        plate.setAlphaF(0.88)
+        painter.setBrush(plate)
+        painter.drawRoundedRect(
+            self._plate,
+            LABEL_CORNER_RADIUS_DP,
+            LABEL_CORNER_RADIUS_DP,
+        )
+        font = QFont(MONO_FONT_NAME)
+        font.setPixelSize(round(LABEL_FONT_SIZE_DP))
+        font.setWeight(QFont.Weight.Medium)
+        painter.setFont(font)
+        painter.setPen(QColor(MARKER_LABEL_TEXT))
+        painter.drawText(self._plate, Qt.AlignmentFlag.AlignCenter, text)
+
+
+class AtlasMarkerLegend(QWidget):
+    """Collapsed-by-default status legend anchored above the scale bar."""
+
+    _ROW_ORDER = (
+        ("collected", "Collected"),
+        ("partial", "Partial"),
+        ("queued", "Queued"),
+        ("failed", "Failed"),
+        ("unattributed", "Unattributed"),
+    )
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._expanded = False
+        self._counts = {status: 0 for status, _label in self._ROW_ORDER}
+        self.setObjectName("atlasMarkerLegend")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Show or hide the Atlas batch-position marker legend")
+        self._sync_size()
+
+    @property
+    def expanded(self) -> bool:
+        return self._expanded
+
+    def set_markers(self, markers: list[ImageMarker]) -> None:
+        counts = {status: 0 for status, _label in self._ROW_ORDER}
+        for marker in markers:
+            if marker.metadata.get("atlas_lod_role") not in {
+                "batch_position",
+                "unattributed",
+            }:
+                continue
+            status = (
+                (marker.status or "queued").lower()
+                if bool(marker.metadata.get("navigation_enabled", True))
+                else "unattributed"
+            )
+            if status in counts:
+                counts[status] += 1
+        if counts != self._counts:
+            self._counts = counts
+            self.update()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._expanded = not self._expanded
+            self._sync_size()
+            self.update()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _sync_size(self) -> None:
+        self.setFixedSize(228, 184 if self._expanded else 34)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        super().paintEvent(event)
+        from tomography_session_browser.ui.theme import DARK_PALETTE, MONO_FONT_NAME, SANS_FONT_NAME
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            painter.setPen(QPen(QColor(DARK_PALETTE.border_strong), 1.0))
+            painter.setBrush(QColor(DARK_PALETTE.surface))
+            painter.drawRoundedRect(
+                QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0),
+                8.0,
+                8.0,
+            )
+            painter.setPen(QColor(DARK_PALETTE.safe_text_light))
+            title_font = QFont(SANS_FONT_NAME)
+            title_font.setPixelSize(12)
+            painter.setFont(title_font)
+            painter.drawText(
+                QRectF(34.0, 0.0, 160.0, 34.0),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                "Marker legend",
+            )
+            _paint_legend_cluster_glyph(painter, QPointF(17.0, 17.0))
+            painter.setPen(QColor(DARK_PALETTE.text_muted))
+            painter.drawText(
+                QRectF(196.0, 0.0, 18.0, 34.0),
+                Qt.AlignmentFlag.AlignCenter,
+                "▴" if self._expanded else "▾",
+            )
+            if not self._expanded:
+                return
+
+            y = 34.0
+            label_font = QFont(SANS_FONT_NAME)
+            label_font.setPixelSize(12)
+            count_font = QFont(MONO_FONT_NAME)
+            count_font.setPixelSize(11)
+            for status, label in self._ROW_ORDER:
+                _paint_chrome_leaf_glyph(
+                    painter,
+                    QPointF(17.0, y + 12.0),
+                    status,
+                    diameter=12.0,
+                    halo=True,
+                )
+                painter.setFont(label_font)
+                painter.setPen(QColor(MARKER_LABEL_TEXT))
+                painter.drawText(
+                    QRectF(34.0, y, 140.0, 24.0),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                    label,
+                )
+                painter.setFont(count_font)
+                painter.setPen(QColor(DARK_PALETTE.text_muted))
+                painter.drawText(
+                    QRectF(174.0, y, 38.0, 24.0),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                    str(self._counts[status]),
+                )
+                y += 24.0
+
+            painter.setPen(QPen(QColor(DARK_PALETTE.border_strong), 1.0))
+            painter.drawLine(QPointF(12.0, y + 1.0), QPointF(216.0, y + 1.0))
+            _paint_legend_cluster_glyph(painter, QPointF(17.0, y + 15.0))
+            painter.setFont(label_font)
+            painter.setPen(QColor(DARK_PALETTE.safe_text_light))
+            painter.drawText(
+                QRectF(34.0, y + 3.0, 178.0, 24.0),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                "n = members, ring = mix",
+            )
+        finally:
+            painter.end()
+
+
+class _AtlasClusterRow(QPushButton):
+    def __init__(
+        self,
+        marker: ImageMarker,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._marker = marker
+        self.setFixedHeight(24)
+        self.setFlat(True)
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor
+            if bool(marker.metadata.get("navigation_enabled", True))
+            else Qt.CursorShape.ArrowCursor
+        )
+        self.setToolTip(marker.tooltip or "")
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        from tomography_session_browser.ui.theme import DARK_PALETTE, MONO_FONT_NAME
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            if self.underMouse():
+                painter.fillRect(self.rect(), QColor(DARK_PALETTE.surface_hi))
+            _paint_chrome_leaf_glyph(
+                painter,
+                QPointF(14.0, 12.0),
+                (self._marker.status or "queued").lower(),
+                diameter=10.0,
+                halo=False,
+            )
+            font = QFont(MONO_FONT_NAME)
+            font.setPixelSize(11)
+            painter.setFont(font)
+            painter.setPen(QColor(MARKER_LABEL_TEXT))
+            label = self._marker.label or self._marker.id
+            painter.drawText(
+                QRectF(28.0, 0.0, 120.0, 24.0),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                f"Position {label}",
+            )
+            planned = int(self._marker.metadata.get("planned_count") or 0)
+            acquired = int(self._marker.metadata.get("acquired_count") or 0)
+            ratio = f"{acquired}/{planned}" if planned > 0 else "—"
+            ratio_font = QFont(MONO_FONT_NAME)
+            ratio_font.setPixelSize(10)
+            painter.setFont(ratio_font)
+            painter.setPen(QColor(DARK_PALETTE.text_muted))
+            painter.drawText(
+                QRectF(150.0, 0.0, 48.0, 24.0),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                ratio,
+            )
+        finally:
+            painter.end()
+
+
+class AtlasClusterPopup(QFrame):
+    """Fixed-width cluster member list positioned inside the viewer viewport."""
+
+    def __init__(
+        self,
+        members: list[ImageMarker],
+        *,
+        on_member_selected: Callable[[ImageMarker], None] | None,
+        parent: QWidget,
+    ) -> None:
+        super().__init__(parent)
+        from tomography_session_browser.ui.theme import DARK_PALETTE
+
+        self.setObjectName("atlasClusterPopup")
+        self.setFixedWidth(216)
+        self.setStyleSheet(
+            f"#atlasClusterPopup {{ background: {DARK_PALETTE.surface}; "
+            f"border: 1px solid {DARK_PALETTE.border_strong}; border-radius: 8px; }}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        header = QLabel(f"{len(members)} batch positions", self)
+        header.setFixedHeight(26)
+        header.setContentsMargins(10, 0, 8, 0)
+        header.setStyleSheet(
+            f"color: {MARKER_LABEL_TEXT}; font-weight: 600; border: none;"
+        )
+        layout.addWidget(header)
+
+        scroll = QScrollArea(self)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            if len(members) > 8
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        rows = QWidget(scroll)
+        rows.setStyleSheet(f"background: {DARK_PALETTE.surface};")
+        rows_layout = QVBoxLayout(rows)
+        rows_layout.setContentsMargins(0, 0, 0, 0)
+        rows_layout.setSpacing(0)
+        for member in members:
+            row = _AtlasClusterRow(member, rows)
+            if on_member_selected is not None:
+                row.clicked.connect(
+                    lambda _checked=False, value=member: on_member_selected(value)
+                )
+            rows_layout.addWidget(row)
+        rows.setFixedHeight(len(members) * 24)
+        scroll.setWidget(rows)
+        scroll.setWidgetResizable(True)
+        scroll.setFixedHeight(min(len(members), 8) * 24)
+        layout.addWidget(scroll)
+
+        footer = QLabel("Esc to close", self)
+        footer.setFixedHeight(26)
+        footer.setContentsMargins(10, 0, 8, 0)
+        footer.setStyleSheet(
+            f"color: {DARK_PALETTE.text_muted}; border: none;"
+        )
+        layout.addWidget(footer)
+        self.setFixedHeight(52 + min(len(members), 8) * 24)
+
+
+def _paint_chrome_leaf_glyph(
+    painter: QPainter,
+    center: QPointF,
+    status: str,
+    *,
+    diameter: float,
+    halo: bool,
+) -> None:
+    """Paint a compact status glyph on known dark chrome."""
+
+    from tomography_session_browser.ui.theme import current_palette
+
+    theme = current_palette()
+    colour = QColor(
+        {
+            "collected": theme.atlas_marker_collected,
+            "partial": theme.atlas_marker_partial,
+            "queued": theme.atlas_marker_queued,
+            "failed": theme.atlas_marker_failed,
+            "unattributed": theme.atlas_marker_unattributed,
+        }.get(status, theme.atlas_marker_queued)
+    )
+    ring_radius = max(2.5, diameter / 2.0 - 1.0)
+    fill_radius = max(1.5, ring_radius - 1.4)
+    painter.save()
+    painter.translate(center)
+    if status in {"collected", "failed"}:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(colour)
+        painter.drawEllipse(QPointF(0.0, 0.0), fill_radius, fill_radius)
+    elif status == "partial":
+        rect = QRectF(-fill_radius, -fill_radius, fill_radius * 2, fill_radius * 2)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(colour)
+        painter.drawPie(rect, 90 * 16, 180 * 16)
+    ring_rect = QRectF(-ring_radius, -ring_radius, ring_radius * 2, ring_radius * 2)
+    if halo:
+        painter.setPen(QPen(QColor(MARKER_INK), 3.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(ring_rect)
+    pen = QPen(colour, 1.4)
+    if status == "unattributed":
+        pen.setStyle(Qt.PenStyle.DashLine)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(ring_rect)
+    if status == "failed":
+        glyph = fill_radius * 0.62
+        cross = QPen(QColor(MARKER_INK), 1.2)
+        cross.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(cross)
+        painter.drawLine(QPointF(-glyph, -glyph), QPointF(glyph, glyph))
+        painter.drawLine(QPointF(glyph, -glyph), QPointF(-glyph, glyph))
+    painter.restore()
+
+
+def _paint_legend_cluster_glyph(painter: QPainter, center: QPointF) -> None:
+    painter.save()
+    painter.translate(center)
+    painter.setPen(QPen(QColor(MARKER_INK), 3.0))
+    painter.setBrush(QColor(IMAGE_STATUS_COLOURS["failed"]))
+    painter.drawEllipse(QPointF(0.0, 0.0), 6.0, 6.0)
+    painter.setPen(QPen(QColor(IMAGE_STATUS_COLOURS["failed"]), 2.0))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawArc(QRectF(-6.0, -6.0, 12.0, 12.0), 90 * 16, -90 * 16)
+    painter.setPen(QPen(QColor(IMAGE_STATUS_COLOURS["collected"]), 2.0))
+    painter.drawArc(QRectF(-6.0, -6.0, 12.0, 12.0), 0, -270 * 16)
+    painter.restore()
 
 
 class ImagePreviewView(QGraphicsView):
@@ -257,18 +984,44 @@ class ImagePreviewView(QGraphicsView):
         self._marker_items: list[QGraphicsItem] = []
         self._marker_selected: Callable[[ImageMarker], None] | None = None
         self._marker_opened: Callable[[ImageMarker], None] | None = None
+        self._cluster_member_activated: Callable[[ImageMarker], None] | None = None
         self._visible_marker_types: set[str] = set(DEFAULT_VISIBLE_MARKER_TYPES)
+        self._atlas_lod_enabled = False
+        self._atlas_lod_options = {
+            ATLAS_LOD_CLUSTER: True,
+            ATLAS_LOD_LABELS: True,
+            ATLAS_LOD_TILE_GRIDS: True,
+            ATLAS_LOD_EXPOSURES: False,
+        }
+        self._cluster_cache: dict[tuple[object, ...], tuple[MarkerCluster, ...]] = {}
+        self._cluster_compute_count = 0
+        self._last_display_markers: list[ImageMarker] = []
+        self._keyboard_marker_id: str | None = None
+        self._cluster_member_popup: AtlasClusterPopup | None = None
+        self._cluster_popup_connector: QFrame | None = None
+        self._selection_cleared: Callable[[], None] | None = None
+        self._highlighted_exposure_marker_ids: set[str] = set()
+        self._marker_redraw_debounce = QTimer(self)
+        self._marker_redraw_debounce.setSingleShot(True)
+        self._marker_redraw_debounce.setInterval(ZOOM_DEBOUNCE_MS)
+        self._marker_redraw_debounce.timeout.connect(self._redraw_markers)
         self.setScene(self._scene)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         self.setBackgroundBrush(Qt.GlobalColor.black)
 
     def clear(self, message: str = "") -> None:
+        self._close_cluster_popup()
         self._scene.clear()
         self._pixmap_item = None
         self._marker_items = []
+        self._last_display_markers = []
+        self._cluster_cache.clear()
+        self._keyboard_marker_id = None
+        self._highlighted_exposure_marker_ids.clear()
         self._zoom = 1.0
         self._current_image_key = None
         self._has_user_interacted = False
@@ -330,6 +1083,27 @@ class ImagePreviewView(QGraphicsView):
     def set_marker_opened_callback(self, callback: Callable[[ImageMarker], None]) -> None:
         self._marker_opened = callback
 
+    def set_cluster_member_activated_callback(
+        self,
+        callback: Callable[[ImageMarker], None] | None,
+    ) -> None:
+        self._cluster_member_activated = callback
+
+    def set_selection_cleared_callback(self, callback: Callable[[], None]) -> None:
+        self._selection_cleared = callback
+
+    def set_atlas_lod_enabled(self, enabled: bool) -> None:
+        self._atlas_lod_enabled = bool(enabled)
+        self._cluster_cache.clear()
+        self._redraw_markers()
+
+    def set_atlas_lod_option(self, key: str, enabled: bool) -> None:
+        if key not in self._atlas_lod_options:
+            raise KeyError(f"Unknown Atlas LOD option: {key}")
+        self._atlas_lod_options[key] = bool(enabled)
+        self._cluster_cache.clear()
+        self._redraw_markers()
+
     def set_marker_type_visible(self, marker_type: str, visible: bool) -> None:
         if visible:
             self._visible_marker_types.add(marker_type)
@@ -338,6 +1112,11 @@ class ImagePreviewView(QGraphicsView):
         self._redraw_markers()
 
     def set_markers(self, markers: list[ImageMarker], selected_marker_id: str | None = None) -> None:
+        self._close_cluster_popup()
+        self._cluster_cache.clear()
+        self._keyboard_marker_id = None
+        marker_ids = {marker.id for marker in markers}
+        self._highlighted_exposure_marker_ids.intersection_update(marker_ids)
         self._markers = [
             ImageMarker(
                 id=marker.id,
@@ -382,6 +1161,15 @@ class ImagePreviewView(QGraphicsView):
     def zoom_out(self) -> None:
         self._scale_by_center(0.8)
 
+    def set_atlas_zoom(self, zoom: float) -> None:
+        if not self._atlas_lod_enabled or self._pixmap_item is None:
+            return
+        target = min(MAX_ATLAS_ZOOM, max(1.0, float(zoom)))
+        if target <= 1.0 + 1e-9:
+            self.fit_image()
+            return
+        self._scale_by_center(target / max(self._zoom, 0.01))
+
     def fit_image(self) -> None:
         self._mark_user_interacted("fit")
         self._fit_image()
@@ -404,6 +1192,82 @@ class ImagePreviewView(QGraphicsView):
         rect = self.mapToScene(self.viewport().rect()).boundingRect()
         return ((rect.left(), rect.right()), (rect.top(), rect.bottom()))
 
+    def rendered_image_rect(self) -> QRect | None:
+        """Where the image is actually drawn, in viewport coordinates.
+
+        A fitted image rarely fills the viewport — an image wider than it is
+        tall leaves letterbox bands above and below. Overlaid chrome that
+        belongs to the image (the scale bar) needs this rather than the
+        widget rect, or it floats in the empty band.
+        """
+
+        if self._pixmap_item is None:
+            return None
+        mapped = self.mapFromScene(self._pixmap_item.sceneBoundingRect()).boundingRect()
+        visible = mapped.intersected(self.viewport().rect())
+        return visible if not visible.isEmpty() else None
+
+    def render_current_view(self) -> tuple[QImage, float] | None:
+        """Render the visible image and scene overlays without viewer chrome.
+
+        ``QGraphicsView.render`` replays the scene rather than copying pixels
+        from the desktop. Rendering at a larger target size preserves the
+        vector marker edges and text antialiasing in the exported PNG.
+        """
+
+        source_rect = self.rendered_image_rect()
+        if source_rect is None or source_rect.isEmpty():
+            return None
+        source_width = max(1, source_rect.width())
+        source_height = max(1, source_rect.height())
+        export_scale = min(
+            EXPORT_RENDER_SCALE,
+            MAX_EXPORT_DIMENSION_PX / source_width,
+            MAX_EXPORT_DIMENSION_PX / source_height,
+            math.sqrt(MAX_EXPORT_PIXELS / (source_width * source_height)),
+        )
+        export_scale = max(0.1, export_scale)
+        target_size = QSize(
+            max(1, round(source_width * export_scale)),
+            max(1, round(source_height * export_scale)),
+        )
+        image = QImage(
+            target_size,
+            QImage.Format.Format_ARGB32_Premultiplied,
+        )
+        image.fill(QColor(Qt.GlobalColor.black))
+        # Use a high-DPI paint device rather than only enlarging the render
+        # target. Screen-fixed overlay items intentionally ignore the view
+        # transform; without a device pixel ratio they stayed at 1x while the
+        # microscope image became 2x, making numeric labels look half-sized.
+        image.setDevicePixelRatio(export_scale)
+        painter = QPainter(image)
+        painter.setRenderHints(
+            QPainter.RenderHint.Antialiasing
+            | QPainter.RenderHint.TextAntialiasing
+            | QPainter.RenderHint.SmoothPixmapTransform,
+            True,
+        )
+        try:
+            self.render(
+                painter,
+                QRectF(
+                    0.0,
+                    0.0,
+                    target_size.width() / export_scale,
+                    target_size.height() / export_scale,
+                ),
+                source_rect,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+            )
+        finally:
+            painter.end()
+        # PNG consumers use the physical pixel matrix. Resetting the DPR keeps
+        # the saved image dimensions and subsequent scale-bar composition in
+        # that coordinate system.
+        image.setDevicePixelRatio(1.0)
+        return image, export_scale
+
     @property
     def current_logical_image_key(self) -> Any | None:
         return self._current_image_key
@@ -419,11 +1283,12 @@ class ImagePreviewView(QGraphicsView):
     def _fit_image(self) -> None:
         if self._pixmap_item is None:
             return
+        self._close_cluster_popup()
         LOGGER.debug("fit_to_view logical_key=%s", self._current_image_key)
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
         self._zoom = 1.0
         self._last_view_range = self.view_range()
-        self._redraw_markers()
+        self._schedule_marker_redraw()
         if self._zoom_changed is not None:
             self._zoom_changed(self._zoom)
 
@@ -433,7 +1298,12 @@ class ImagePreviewView(QGraphicsView):
             QTimer.singleShot(0, lambda: self._zoom_changed(self._zoom))
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        factor = 1.25 if event.angleDelta().y() > 0 else 0.8
+        delta = event.angleDelta().y()
+        factor = (
+            math.pow(1.0015, delta)
+            if self._atlas_lod_enabled
+            else (1.25 if delta > 0 else 0.8)
+        )
         LOGGER.debug(
             "wheel zoom logical_key=%s factor=%s position=%s",
             self._current_image_key,
@@ -451,6 +1321,7 @@ class ImagePreviewView(QGraphicsView):
         logical_image_key: Any | None = None,
         pyramid_level: int | None = None,
     ) -> None:
+        self._close_cluster_popup()
         old_shape = self._current_image_shape
         old_range = self.view_range()
         old_rect = self._pixmap_item.boundingRect() if self._pixmap_item is not None else None
@@ -521,9 +1392,17 @@ class ImagePreviewView(QGraphicsView):
     def _scale_by(self, factor: float, anchor_scene: QPointF) -> None:
         if self._pixmap_item is None:
             return
+        self._close_cluster_popup()
         self._mark_user_interacted("wheel_zoom")
+        if self._atlas_lod_enabled:
+            target_zoom = min(MAX_ATLAS_ZOOM, max(1.0, self._zoom * factor))
+            factor = target_zoom / max(self._zoom, 0.01)
+            if abs(factor - 1.0) < 1e-6:
+                return
+            self._zoom = target_zoom
+        else:
+            self._zoom *= factor
         anchor_view = self.mapFromScene(anchor_scene)
-        self._zoom *= factor
         self.scale(factor, factor)
         shifted_anchor = self.mapToScene(anchor_view)
         delta = shifted_anchor - anchor_scene
@@ -531,29 +1410,82 @@ class ImagePreviewView(QGraphicsView):
         self.centerOn(current_center - delta)
         if self._zoom_changed is not None:
             self._zoom_changed(self._zoom)
-        self._redraw_markers()
+        self._schedule_marker_redraw()
 
     def _scale_by_center(self, factor: float) -> None:
         if self._pixmap_item is None:
             return
+        self._close_cluster_popup()
         self._mark_user_interacted("button_zoom")
+        if self._atlas_lod_enabled:
+            target_zoom = min(MAX_ATLAS_ZOOM, max(1.0, self._zoom * factor))
+            factor = target_zoom / max(self._zoom, 0.01)
+            if abs(factor - 1.0) < 1e-6:
+                return
+            self._zoom = target_zoom
+        else:
+            self._zoom *= factor
         anchor_scene = self.mapToScene(self.viewport().rect().center())
-        self._zoom *= factor
         self.scale(factor, factor)
         self.centerOn(anchor_scene)
         if self._zoom_changed is not None:
             self._zoom_changed(self._zoom)
-        self._redraw_markers()
+        self._schedule_marker_redraw()
+
+    def _schedule_marker_redraw(self) -> None:
+        if self._atlas_lod_enabled:
+            self._marker_redraw_debounce.start()
+        else:
+            self._redraw_markers()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        if self._pixmap_item is not None and event.button() == Qt.MouseButton.LeftButton:
-            item = self.itemAt(event.position().toPoint())
-            marker = item.data(0) if item is not None else None
+        if self._pixmap_item is None:
+            super().mousePressEvent(event)
+            return
+
+        item = self.itemAt(event.position().toPoint())
+        marker = item.data(0) if item is not None else None
+        if event.button() == Qt.MouseButton.RightButton:
+            self._clear_marker_interaction()
+            event.accept()
+            return
+        linked_exposure_gesture = (
+            event.button() == Qt.MouseButton.MiddleButton
+            or (
+                event.button() == Qt.MouseButton.LeftButton
+                and bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            )
+        )
+        if (
+            linked_exposure_gesture
+            and isinstance(marker, ImageMarker)
+            and marker.marker_type
+            in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}
+        ):
+            self._highlight_linked_exposures(marker)
+            if self._marker_selected is not None:
+                self._marker_selected(marker)
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            if (
+                self._cluster_member_popup is not None
+                and not self._cluster_member_popup.geometry().contains(
+                    event.position().toPoint()
+                )
+            ):
+                self._close_cluster_popup()
             if isinstance(marker, ImageMarker):
+                if marker.marker_type == MarkerType.BATCH_CLUSTER:
+                    self._activate_cluster(marker)
+                    event.accept()
+                    return
                 if self._marker_selected is not None:
                     self._marker_selected(marker)
                 event.accept()
                 return
+            if self._image_contains_view_position(event.position().toPoint()):
+                self._clear_marker_interaction()
             self._mark_user_interacted("pan")
         super().mousePressEvent(event)
 
@@ -562,11 +1494,234 @@ class ImagePreviewView(QGraphicsView):
             item = self.itemAt(event.position().toPoint())
             marker = item.data(0) if item is not None else None
             if isinstance(marker, ImageMarker):
+                if marker.marker_type == MarkerType.BATCH_CLUSTER:
+                    self._activate_cluster(marker)
+                    event.accept()
+                    return
                 if self._marker_opened is not None:
                     self._marker_opened(marker)
                 event.accept()
                 return
         super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt signature
+        if self._atlas_lod_enabled and event.key() == Qt.Key.Key_Escape:
+            self._clear_marker_interaction()
+            event.accept()
+            return
+        if self._atlas_lod_enabled and event.key() in {
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+        }:
+            interactive = self._atlas_interactive_markers()
+            if interactive:
+                ids = [marker.id for marker in interactive]
+                try:
+                    index = ids.index(self._keyboard_marker_id or "")
+                except ValueError:
+                    index = -1
+                delta = -1 if event.key() in {Qt.Key.Key_Left, Qt.Key.Key_Up} else 1
+                selected = interactive[(index + delta) % len(interactive)]
+                self._keyboard_marker_id = selected.id
+                self._redraw_markers()
+                if self._marker_selected is not None and selected.marker_type != MarkerType.BATCH_CLUSTER:
+                    self._marker_selected(selected)
+                event.accept()
+                return
+        if (
+            self._atlas_lod_enabled
+            and event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}
+            and self._keyboard_marker_id is not None
+        ):
+            marker = next(
+                (
+                    value
+                    for value in self._atlas_interactive_markers()
+                    if value.id == self._keyboard_marker_id
+                ),
+                None,
+            )
+            if marker is not None:
+                if marker.marker_type == MarkerType.BATCH_CLUSTER:
+                    self._activate_cluster(marker)
+                elif bool(marker.metadata.get("navigation_enabled", False)) and self._marker_opened is not None:
+                    self._marker_opened(marker)
+                elif self._marker_selected is not None:
+                    self._marker_selected(marker)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _atlas_interactive_markers(self) -> list[ImageMarker]:
+        return sorted(
+            [
+                marker
+                for marker in self._last_display_markers
+                if marker.marker_type == MarkerType.BATCH_CLUSTER
+                or marker.metadata.get("atlas_lod_role") in {"batch_position", "unattributed"}
+            ],
+            key=lambda marker: marker.id,
+        )
+
+    def _activate_cluster(self, marker: ImageMarker) -> None:
+        bounds = marker.metadata.get("member_bounds_scene")
+        if not (
+            isinstance(bounds, tuple | list)
+            and len(bounds) == 4
+            and all(isinstance(value, int | float) for value in bounds)
+        ):
+            return
+        x, y, width, height = (float(value) for value in bounds)
+        current_scale = self._zoom_scale()
+        spread_now = max(width, height) * current_scale
+        if self._zoom >= MAX_ATLAS_ZOOM - 1e-6 or spread_now <= 3.0:
+            self._show_cluster_member_popup(marker)
+            return
+
+        center = QPointF(x + width / 2, y + height / 2)
+        target_zoom = min(
+            MAX_ATLAS_ZOOM,
+            max(2.2, self._zoom * 2.2),
+        )
+        factor = target_zoom / max(self._zoom, 0.01)
+        self._zoom = target_zoom
+        self.scale(factor, factor)
+        self.centerOn(center)
+        self._keyboard_marker_id = marker.id
+        if self._zoom_changed is not None:
+            self._zoom_changed(self._zoom)
+        self._redraw_markers()
+
+    def _show_cluster_member_popup(self, marker: ImageMarker) -> None:
+        self._close_cluster_popup()
+        member_ids = tuple(marker.metadata.get("member_ids", ()))
+        by_id = {value.id: value for value in self._markers}
+        members = [by_id[member_id] for member_id in member_ids if member_id in by_id]
+        if not members:
+            return
+        self._keyboard_marker_id = marker.id
+        marker.selected = True
+        self._redraw_markers()
+        popup = AtlasClusterPopup(
+            members,
+            on_member_selected=self._select_popup_member,
+            parent=self.viewport(),
+        )
+        popup.adjustSize()
+        center = self.mapFromScene(QPointF(float(marker.x or 0.0), float(marker.y or 0.0)))
+        diameter = float(marker.metadata.get("diameter_px") or 22.0)
+        right_space = self.viewport().width() - center.x()
+        left_space = center.x()
+        right_x = center.x() + diameter / 2.0 + 16.0
+        left_x = center.x() - diameter / 2.0 - 16.0 - popup.width()
+        right_fits = right_x + popup.width() <= self.viewport().width() - 4
+        left_fits = left_x >= 4
+        use_right = (
+            (right_space >= left_space and right_fits)
+            or (not left_fits and right_fits)
+            or (not left_fits and not right_fits and right_space >= left_space)
+        )
+        x_pos = right_x if use_right else left_x
+        x_pos = max(4, min(round(x_pos), self.viewport().width() - popup.width() - 4))
+        if use_right:
+            connector_left = center.x() + diameter / 2.0
+            connector_right = x_pos
+        else:
+            connector_left = x_pos + popup.width()
+            connector_right = center.x() - diameter / 2.0
+        y_pos = max(
+            4,
+            min(
+                round(center.y() - 13.0),
+                self.viewport().height() - popup.height() - 4,
+            ),
+        )
+        popup.move(x_pos, y_pos)
+        popup.show()
+        popup.raise_()
+
+        connector = QFrame(self.viewport())
+        from tomography_session_browser.ui.theme import DARK_PALETTE
+
+        connector.setStyleSheet(
+            f"background: {DARK_PALETTE.border_strong}; border: none;"
+        )
+        connector_x = round(min(connector_left, connector_right))
+        connector_width = max(1, round(abs(connector_right - connector_left)))
+        connector.setGeometry(connector_x, round(center.y()), connector_width, 1)
+        connector.show()
+        connector.raise_()
+        popup.raise_()
+        self._cluster_member_popup = popup
+        self._cluster_popup_connector = connector
+
+    def _select_popup_member(self, marker: ImageMarker) -> None:
+        self._close_cluster_popup()
+        self._keyboard_marker_id = marker.id
+        if self._cluster_member_activated is not None:
+            self._cluster_member_activated(marker)
+        elif self._marker_selected is not None:
+            self._marker_selected(marker)
+
+    def highlighted_exposure_marker_ids(self) -> frozenset[str]:
+        return frozenset(self._highlighted_exposure_marker_ids)
+
+    def clear_exposure_highlights(self, *, redraw: bool = True) -> None:
+        if not self._highlighted_exposure_marker_ids:
+            return
+        self._highlighted_exposure_marker_ids.clear()
+        if redraw:
+            self._redraw_markers()
+
+    def _highlight_linked_exposures(self, marker: ImageMarker) -> None:
+        batch_id = str(
+            marker.metadata.get("batch_id")
+            or marker.linked_object_id
+            or ""
+        )
+        if not batch_id:
+            self._highlighted_exposure_marker_ids = {marker.id}
+        else:
+            self._highlighted_exposure_marker_ids = {
+                candidate.id
+                for candidate in self._markers
+                if candidate.marker_type
+                in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}
+                and str(
+                    candidate.metadata.get("batch_id")
+                    or candidate.linked_object_id
+                    or ""
+                )
+                == batch_id
+                and candidate.source_object_id == marker.source_object_id
+            }
+        self._redraw_markers()
+
+    def _image_contains_view_position(self, position: QPoint) -> bool:
+        if self._pixmap_item is None:
+            return False
+        return self._pixmap_item.boundingRect().contains(self.mapToScene(position))
+
+    def _clear_marker_interaction(self) -> None:
+        self._close_cluster_popup()
+        self._keyboard_marker_id = None
+        self._highlighted_exposure_marker_ids.clear()
+        for marker in self._markers:
+            marker.selected = False
+        if self._selection_cleared is not None:
+            self._selection_cleared()
+        else:
+            self._redraw_markers()
+
+    def _close_cluster_popup(self) -> None:
+        if self._cluster_member_popup is not None:
+            self._cluster_member_popup.deleteLater()
+            self._cluster_member_popup = None
+        if self._cluster_popup_connector is not None:
+            self._cluster_popup_connector.deleteLater()
+            self._cluster_popup_connector = None
 
     def _mark_user_interacted(self, reason: str) -> None:
         if not self._has_user_interacted or self._pending_initial_fit:
@@ -586,7 +1741,32 @@ class ImagePreviewView(QGraphicsView):
         self._marker_items = []
         if self._pixmap_item is None:
             return
-        for marker in self._display_markers():
+        display_markers = self._display_markers()
+        self._last_display_markers = display_markers
+        for marker in display_markers:
+            if (
+                marker.marker_type == MarkerType.BATCH_CLUSTER
+                or marker.metadata.get("atlas_lod_role") in {"batch_position", "unattributed"}
+            ):
+                shape = _AtlasLodMarkerItem(marker)
+                shape.setPos(float(marker.x or 0.0), float(marker.y or 0.0))
+                shape.setData(0, marker)
+                shape.setToolTip(marker.tooltip or marker.label or marker.marker_type)
+                self._scene.addItem(shape)
+                self._marker_items.append(shape)
+                if marker.label and marker.marker_type != MarkerType.BATCH_CLUSTER:
+                    placement = marker.metadata.get("atlas_label_placement")
+                    if not isinstance(placement, AtlasLabelPlacement):
+                        continue
+                    label = _AtlasLodLabelItem(marker, placement)
+                    label.setPos(float(marker.x or 0.0), float(marker.y or 0.0))
+                    label.setZValue(35)
+                    label.setData(0, marker)
+                    label.setData(1, "atlas_batch_label")
+                    label.setToolTip(marker.tooltip or marker.label)
+                    self._scene.addItem(label)
+                    self._marker_items.append(label)
+                continue
             if marker.marker_type == MarkerType.BATCH_LABEL:
                 self._add_batch_label(marker)
                 continue
@@ -601,7 +1781,19 @@ class ImagePreviewView(QGraphicsView):
             brush = QBrush(fill_color)
             if marker.bbox is not None:
                 x, y, width, height = marker.bbox
-                if marker.marker_type == MarkerType.CAMERA_FOV:
+                atlas_outline = (
+                    self._atlas_lod_enabled
+                    and (
+                        marker.marker_type == MarkerType.OVERVIEW
+                        or marker.metadata.get("atlas_lod_role")
+                        in {"search_map_footprint", "search_map_tile"}
+                    )
+                )
+                if atlas_outline:
+                    pen.setCosmetic(True)
+                    pen.setWidthF(1.2)
+                    fill = QBrush(Qt.BrushStyle.NoBrush)
+                elif marker.marker_type == MarkerType.CAMERA_FOV:
                     pen.setCosmetic(True)
                     fallback_fill = bool(marker.metadata.get("filled_fallback")) if marker.metadata else False
                     fill = QBrush(fill_color if fallback_fill else Qt.BrushStyle.NoBrush)
@@ -616,7 +1808,14 @@ class ImagePreviewView(QGraphicsView):
             else:
                 assert marker.x is not None and marker.y is not None
                 shape = self._scene.addEllipse(marker.x - radius, marker.y - radius, radius * 2, radius * 2, pen, brush)
-            if marker.selected and marker.marker_type == MarkerType.EXPOSURE_AREA:
+            if (
+                marker.marker_type
+                in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}
+                and (
+                    marker.selected
+                    or marker.id in self._highlighted_exposure_marker_ids
+                )
+            ):
                 self._add_exposure_highlight_edge(marker, radius)
             if marker.marker_type == MarkerType.CAMERA_FOV:
                 shape.setZValue(14)
@@ -750,7 +1949,158 @@ class ImagePreviewView(QGraphicsView):
             and (marker.marker_type != MarkerType.LINK_LINE or MarkerType.EXPOSURE_AREA in self._visible_marker_types)
             and (marker.x is not None or marker.bbox is not None or marker.polygon)
         ]
-        return markers
+        if not self._atlas_lod_enabled:
+            return markers
+        return self._atlas_lod_display_markers(markers)
+
+    def _atlas_lod_display_markers(self, markers: list[ImageMarker]) -> list[ImageMarker]:
+        screen_scale = self._zoom_scale()
+        static_markers: list[ImageMarker] = []
+        batch_markers: list[ImageMarker] = []
+        unattributed: list[ImageMarker] = []
+        for marker in markers:
+            role = marker.metadata.get("atlas_lod_role")
+            if role == "batch_position":
+                batch_markers.append(marker)
+                continue
+            if role == "unattributed":
+                unattributed.append(marker)
+                continue
+            if role == "search_map_footprint":
+                if marker.bbox is not None and screen_extent_visible(
+                    marker.bbox[2],
+                    marker.bbox[3],
+                    screen_scale=screen_scale,
+                    threshold_px=SEARCH_MAP_FOOTPRINT_MIN_SCREEN_PX,
+                ):
+                    static_markers.append(marker)
+                continue
+            if role == "search_map_tile":
+                if (
+                    self._atlas_lod_options[ATLAS_LOD_TILE_GRIDS]
+                    and marker.bbox is not None
+                    and screen_extent_visible(
+                        marker.bbox[2],
+                        marker.bbox[3],
+                        screen_scale=screen_scale,
+                        threshold_px=SEARCH_MAP_TILE_MIN_SCREEN_PX,
+                        use_short_edge=True,
+                    )
+                ):
+                    static_markers.append(marker)
+                continue
+            if role == "per_exposure":
+                width, height = _marker_scene_extent(marker)
+                if (
+                    self._atlas_lod_options[ATLAS_LOD_EXPOSURES]
+                    and screen_extent_visible(
+                        width,
+                        height,
+                        screen_scale=screen_scale,
+                        threshold_px=PER_EXPOSURE_MIN_SCREEN_PX,
+                        use_short_edge=True,
+                    )
+                ):
+                    static_markers.append(marker)
+                continue
+            static_markers.append(marker)
+
+        cluster_inputs = [
+            ClusterInput(
+                id=marker.id,
+                x=float(marker.x),
+                y=float(marker.y),
+                status=(
+                    marker.status or "queued"
+                    if bool(marker.metadata.get("navigation_enabled", True))
+                    else "unattributed"
+                ),
+            )
+            for marker in batch_markers
+            if marker.x is not None and marker.y is not None
+        ]
+        scope_id = next(
+            (marker.source_object_id for marker in batch_markers if marker.source_object_id),
+            self._current_image_key,
+        )
+        fingerprint = marker_set_fingerprint(cluster_inputs)
+        clustering_enabled = self._atlas_lod_options[ATLAS_LOD_CLUSTER]
+        cache_key = (
+            scope_id,
+            zoom_bucket(screen_scale),
+            fingerprint,
+            clustering_enabled,
+            self._zoom >= NO_CLUSTER_ABOVE_ZOOM,
+        )
+        clusters = self._cluster_cache.get(cache_key)
+        if clusters is None:
+            clusters = cluster_markers(
+                cluster_inputs,
+                transform=ScreenTransform(screen_scale, screen_scale),
+                logical_zoom=(
+                    self._zoom
+                    if clustering_enabled
+                    else NO_CLUSTER_ABOVE_ZOOM + 1.0
+                ),
+            )
+            self._cluster_cache[cache_key] = clusters
+            self._cluster_compute_count += 1
+
+        marker_by_id = {marker.id: marker for marker in batch_markers}
+        leaves: list[ImageMarker] = []
+        cluster_markers_out: list[ImageMarker] = []
+        for index, cluster in enumerate(clusters):
+            if not cluster.is_cluster:
+                leaf = marker_by_id.get(cluster.member_ids[0])
+                if leaf is not None:
+                    leaves.append(leaf)
+                continue
+            members = [marker_by_id[member_id] for member_id in cluster.member_ids]
+            summaries = [
+                f"{member.label or member.id}: {(member.status or 'unknown').title()}"
+                for member in members
+            ]
+            status_counts = dict(cluster.status_counts)
+            cluster_markers_out.append(
+                ImageMarker(
+                    id=f"{scope_id}:batch-cluster:{index}:{fingerprint[:10]}",
+                    marker_type=MarkerType.BATCH_CLUSTER,
+                    linked_object_id=None,
+                    source_object_id=str(scope_id) if scope_id is not None else None,
+                    x=cluster.centroid_scene[0],
+                    y=cluster.centroid_scene[1],
+                    radius=cluster.diameter_px / (2 * max(screen_scale, 0.01)),
+                    tooltip="\n".join(
+                        [f"{len(members)} batch positions", *summaries]
+                    ),
+                    status=cluster.status,
+                    selected=self._keyboard_marker_id
+                    == f"{scope_id}:batch-cluster:{index}:{fingerprint[:10]}",
+                    metadata={
+                        "diameter_px": cluster.diameter_px,
+                        "member_ids": cluster.member_ids,
+                        "member_bounds_scene": cluster.bounds_scene,
+                        "status_counts": status_counts,
+                        "navigation_enabled": True,
+                    },
+                )
+            )
+
+        leaves.extend(unattributed)
+        label_placements = (
+            atlas_batch_label_placements(leaves, view_scale=screen_scale)
+            if self._atlas_lod_options[ATLAS_LOD_LABELS] and self._zoom >= 2.0
+            else {}
+        )
+        for leaf in leaves:
+            placement = label_placements.get(leaf.id)
+            if placement is None:
+                leaf.label = None
+            else:
+                leaf.metadata["atlas_label_placement"] = placement
+            leaf.selected = leaf.selected or leaf.id == self._keyboard_marker_id
+            leaf.metadata["diameter_px"] = LEAF_DIAMETER_DP
+        return static_markers + cluster_markers_out + leaves
 
     def _zoom_scale(self) -> float:
         return max(abs(self.transform().m11()), 0.01)
@@ -793,10 +2143,10 @@ class ImagePreviewView(QGraphicsView):
             and isinstance(image_size[1], int | float)
             and self._current_image_shape is not None
         ):
-            return marker
+            return replace(marker, metadata=dict(marker.metadata))
         source_width, source_height = float(image_size[0]), float(image_size[1])
         if source_width <= 0 or source_height <= 0:
-            return marker
+            return replace(marker, metadata=dict(marker.metadata))
         displayed_height, displayed_width = self._current_image_shape
         scale_x = displayed_width / source_width
         scale_y = displayed_height / source_height
@@ -879,7 +2229,10 @@ def _marker_colors(marker: ImageMarker) -> tuple[QColor, QColor]:
         MarkerType.BATCH_POSITION: (theme.marker_batch, fill(theme.marker_batch, 70)),
         MarkerType.TEMPLATE_AREA: (theme.marker_template, fill(theme.marker_template, 35)),
         MarkerType.EXPOSURE_AREA: (theme.marker_exposure, fill(theme.marker_exposure, 65)),
-        MarkerType.CAMERA_FOV: (theme.marker_camera, fill(theme.overlay_camera_fill, 46)),
+        # Camera fields can span a large fraction of the image. Keep the
+        # outline vivid but make the default fill deliberately restrained so
+        # membrane/detail contrast remains visible underneath.
+        MarkerType.CAMERA_FOV: (theme.marker_camera, fill(theme.overlay_camera_fill, 34)),
         MarkerType.BATCH_LABEL: (theme.marker_exposure, fill(theme.marker_exposure, 0)),
         MarkerType.TRACKING_AREA: (theme.marker_tracking, fill(theme.marker_tracking, 70)),
         MarkerType.FOCUS_AREA: (theme.marker_focus, fill(theme.marker_focus, 70)),
@@ -979,6 +2332,24 @@ def _status_color(status: str | None) -> QColor | None:
     if any(value in normalized for value in ("refined", "initial")):
         return QColor(theme.overlay_status_complete)
     return None
+
+
+def _atlas_status_color(status: str) -> QColor:
+    normalized = (status or "").strip().lower()
+    return QColor(
+        IMAGE_STATUS_COLOURS.get(normalized, IMAGE_STATUS_COLOURS["queued"])
+    )
+
+
+def _marker_scene_extent(marker: ImageMarker) -> tuple[float, float]:
+    if marker.bbox is not None:
+        return abs(float(marker.bbox[2])), abs(float(marker.bbox[3]))
+    if marker.polygon:
+        xs = [point[0] for point in marker.polygon]
+        ys = [point[1] for point in marker.polygon]
+        return max(xs) - min(xs), max(ys) - min(ys)
+    radius = abs(float(marker.radius or 0.0))
+    return radius * 2, radius * 2
 
 
 def _pixel_size_meters_for_item(value: Any, displayed_path: Path | None = None) -> float | None:
@@ -1099,13 +2470,13 @@ def _format_pixel_size_label(value_meters: float | None) -> str:
 def _format_scale_length_label(value_meters: float) -> str:
     angstrom = value_meters * 1e10
     if angstrom < 100:
-        return f"{_format_scale_number(angstrom)} Å"
+        return f"{_format_scale_number(angstrom)} {ANGSTROM}"
     nm = value_meters * 1e9
     if nm < 1000:
-        return f"{_format_scale_number(nm)} nm"
+        return f"{_format_scale_number(nm)} {NANOMETRE}"
     um = value_meters * 1e6
     if um < 1000:
-        return f"{_format_scale_number(um)} µm"
+        return f"{_format_scale_number(um)} {MICROMETRE}"
     return f"{_format_scale_number(value_meters * 1e3)} mm"
 
 
@@ -1160,6 +2531,10 @@ class FrameSelectionSlider(QSlider):
         self.setMinimumHeight(42)
         self.setTickPosition(QSlider.TickPosition.TicksAbove)
         self.setTickInterval(1)
+        self.setAccessibleName("Tilt-series frame")
+        self.setAccessibleDescription(
+            "Select a tilt-series frame. Use the Left and Right arrow keys to move one frame."
+        )
 
     def paintEvent(self, event) -> None:
         frame_count = self.maximum() - self.minimum() + 1
@@ -1230,6 +2605,10 @@ class _ViewerListDelegate(QStyledItemDelegate):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(fill)
         painter.drawRoundedRect(rect.adjusted(2, 1, -2, -1), 7, 7)
+        if selected:
+            # The selection fill is ~1.2:1 against the panel; the accent bar
+            # is what actually makes the current row findable.
+            paint_selection_marker(painter, rect.adjusted(2, 0, 0, 0), theme)
 
         painter.setPen(QPen(QColor(theme.border), 1))
         painter.drawLine(rect.bottomLeft(), rect.bottomRight())
@@ -1259,7 +2638,10 @@ class _ViewerListDelegate(QStyledItemDelegate):
         painter.drawText(
             QRectF(left, top, text_width, 20),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            name_metrics.elidedText(primary, Qt.TextElideMode.ElideRight, text_width),
+            # Middle-elide: Tomography 5 names share a long common prefix
+            # ("SearchMap_2026...") and differ only in the tail, so eliding
+            # the right made every row in the list read identically.
+            name_metrics.elidedText(primary, Qt.TextElideMode.ElideMiddle, text_width),
         )
 
         summary_font = QFont(option.font)
@@ -1274,11 +2656,11 @@ class _ViewerListDelegate(QStyledItemDelegate):
         )
 
         if status:
-            fg, bg = _status_badge_colors(status)
-            painter.setPen(QPen(fg, 1))
+            semantic_color, bg = _status_badge_colors(status)
+            painter.setPen(QPen(semantic_color, 1))
             painter.setBrush(bg)
             painter.drawRoundedRect(badge_rect, badge_h / 2, badge_h / 2)
-            painter.setPen(fg)
+            painter.setPen(QColor(theme.text_strong))
             painter.setFont(badge_font)
             _draw_centered_badge_text(painter, badge_rect, status)
 
@@ -1323,6 +2705,35 @@ def _status_badge_colors(status: str) -> tuple[QColor, QColor]:
     return fg, bg
 
 
+#: What each status word means, so the header chip explains itself instead of
+#: repeating its own text as a tooltip.
+_STATUS_CHIP_TOOLTIPS = {
+    "acquired": "Acquisition completed for this position.",
+    "done": "Acquisition completed.",
+    "complete": "Every planned image was acquired.",
+    "completed": "Every planned image was acquired.",
+    "available": "The source file is present and readable.",
+    "partial": "Fewer images than expected were acquired.",
+    "incomplete": "Fewer images than expected were acquired.",
+    "warning": "Acquired, but the metadata reports a problem.",
+    "warn": "Acquired, but the metadata reports a problem.",
+    "failed": "Acquisition stopped before a usable series was produced.",
+    "fail": "Acquisition stopped before a usable series was produced.",
+    "error": "The source data could not be interpreted.",
+    "missing": "The expected source file was not found.",
+    "empty": "No images are associated with this item.",
+    "queued": "Planned but not yet acquired.",
+    "pending": "Planned but not yet acquired.",
+    "unknown": "There is not enough metadata to classify this item.",
+}
+
+
+def _status_chip_tooltip(value: str) -> str:
+    normalized = value.strip().lower()
+    explanation = _STATUS_CHIP_TOOLTIPS.get(normalized)
+    return f"{value} — {explanation}" if explanation else value
+
+
 def _is_status_chip(value: str) -> bool:
     normalized = value.strip().lower()
     return normalized in {
@@ -1346,9 +2757,7 @@ def _is_status_chip(value: str) -> bool:
 def _warning_count_text(warnings: list[str]) -> str:
     if not warnings:
         return ""
-    if len(warnings) == 1:
-        return " · 1 warning"
-    return f" · {len(warnings)} warnings"
+    return f" · {count_phrase(len(warnings), 'warning')}"
 
 
 def _warning_tooltip(warnings: list[str]) -> str:
@@ -1370,52 +2779,184 @@ class ScaleBarWidget(QWidget):
         self._length_px = 0.0
         self._label = ""
         self.setObjectName("viewerScaleBar")
-        self.setFixedSize(230, 46)
+        self.setFixedSize(round(MAX_SCALE_BAR_SCREEN_PX + 8), 34)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setToolTip(
+            "Scale bar with a snapped physical-distance label."
+        )
 
     def set_scale(self, length_px: float, label: str) -> None:
-        self._length_px = max(0.0, min(length_px, self.width() - 42))
+        self._length_px = max(0.0, min(float(length_px), self.width() - 8.0))
         self._label = label
-        self.setVisible(self._length_px >= MIN_SCALE_BAR_SCREEN_PX and bool(label))
+        self.setVisible(
+            self._length_px >= MIN_SCALE_BAR_SCREEN_PX and bool(label)
+        )
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt signature
         super().paintEvent(event)
         if self._length_px <= 0 or not self._label:
             return
-        from tomography_session_browser.ui.theme import current_palette
+        from tomography_session_browser.ui.theme import DARK_PALETTE, MONO_FONT_NAME
 
-        theme = current_palette()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         try:
-            bg = QColor(theme.panel)
-            bg.setAlpha(210)
-            border = QColor(theme.border)
-            painter.setPen(QPen(border, 1))
-            painter.setBrush(bg)
-            painter.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 8, 8)
-
-            x0 = 16.0
+            x0 = 1.5
             y = 27.0
             x1 = x0 + self._length_px
-            pen = QPen(QColor(theme.text_strong), 3)
-            pen.setCapStyle(Qt.PenCapStyle.SquareCap)
-            painter.setPen(pen)
-            painter.drawLine(QPointF(x0, y), QPointF(x1, y))
-            tick_pen = QPen(QColor(theme.text_strong), 2)
-            painter.setPen(tick_pen)
-            painter.drawLine(QPointF(x0, y - 6), QPointF(x0, y + 6))
-            painter.drawLine(QPointF(x1, y - 6), QPointF(x1, y + 6))
-
-            from tomography_session_browser.ui.theme import MONO_FONT_NAME
-
-            font = QFont(MONO_FONT_NAME, 9, QFont.Weight.DemiBold)
+            font = QFont(MONO_FONT_NAME)
+            font.setPixelSize(11)
+            font.setWeight(QFont.Weight.Medium)
             painter.setFont(font)
-            painter.setPen(QColor(theme.text))
-            painter.drawText(QRectF(12, 4, self.width() - 24, 18), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._label)
+            metrics = QFontMetricsF(font)
+            plate_width = min(
+                self.width() - 2.0,
+                max(20.0, metrics.horizontalAdvance(self._label) + 12.0),
+            )
+            plate = QColor(MARKER_INK)
+            plate.setAlphaF(0.88)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(plate)
+            painter.drawRoundedRect(
+                QRectF(x0 - 1.0, 1.0, plate_width, 16.0),
+                3.0,
+                3.0,
+            )
+            painter.setPen(QColor(DARK_PALETTE.safe_text_light))
+            painter.drawText(
+                QRectF(x0 + 5.0, 1.0, plate_width - 10.0, 16.0),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                self._label,
+            )
+
+            bar_path = QPainterPath()
+            bar_path.moveTo(x0, y)
+            bar_path.lineTo(x1, y)
+            bar_path.moveTo(x0, y - 3.5)
+            bar_path.lineTo(x0, y + 3.5)
+            bar_path.moveTo(x1, y - 3.5)
+            bar_path.lineTo(x1, y + 3.5)
+            ink_pen = QPen(QColor(MARKER_INK), 3.4)
+            ink_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            painter.setPen(ink_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(bar_path)
+            light_pen = QPen(QColor(DARK_PALETTE.safe_text_light), 1.4)
+            light_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            painter.setPen(light_pen)
+            painter.drawPath(bar_path)
         finally:
             painter.end()
+
+
+class ImageExportDialog(QDialog):
+    """Preview an offscreen viewer render and collect its PNG destination."""
+
+    def __init__(
+        self,
+        image: QImage,
+        default_path: Path,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._selected_path: Path | None = None
+        self.setWindowTitle("Export image")
+        self.setModal(True)
+        self.resize(820, 650)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        preview = QLabel(self)
+        preview.setObjectName("imageExportPreview")
+        preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview.setMinimumSize(480, 320)
+        preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        preview_image = image.scaled(
+            QSize(760, 480),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        preview.setPixmap(QPixmap.fromImage(preview_image))
+        preview.setToolTip(
+            "Preview of the exported image; the PNG is saved at full resolution."
+        )
+        layout.addWidget(preview, stretch=1)
+
+        details = QLabel(
+            f"PNG · {image.width():,} × {image.height():,} px",
+            self,
+        )
+        details.setObjectName("viewerStatus")
+        layout.addWidget(details)
+
+        destination_row = QHBoxLayout()
+        destination_row.setSpacing(8)
+        destination_label = QLabel("Save to", self)
+        self.path_edit = QLineEdit(str(default_path), self)
+        self.path_edit.setAccessibleName("Export destination")
+        self.path_edit.setToolTip("Destination for the full-resolution PNG")
+        browse_button = QPushButton("Browse…", self)
+        browse_button.clicked.connect(self._browse)
+        destination_row.addWidget(destination_label)
+        destination_row.addWidget(self.path_edit, stretch=1)
+        destination_row.addWidget(browse_button)
+        layout.addLayout(destination_row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self._accept_path)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def selected_path(self) -> Path | None:
+        return self._selected_path
+
+    def _browse(self) -> None:
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Export image",
+            self.path_edit.text().strip(),
+            "PNG images (*.png)",
+        )
+        if selected:
+            self.path_edit.setText(selected)
+
+    def _accept_path(self) -> None:
+        raw_path = self.path_edit.text().strip()
+        if not raw_path:
+            QMessageBox.warning(
+                self,
+                "Export image",
+                "Choose where the PNG should be saved.",
+            )
+            return
+        path = Path(raw_path)
+        if path.suffix.lower() != ".png":
+            path = path.with_suffix(".png")
+            self.path_edit.setText(str(path))
+        if path.exists():
+            answer = QMessageBox.question(
+                self,
+                "Replace image?",
+                f"{path.name} already exists. Replace it?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self._selected_path = path
+        self.accept()
 
 
 class ViewerTab(QWidget):
@@ -1431,7 +2972,10 @@ class ViewerTab(QWidget):
         markers_for: Callable[[Any], list[ImageMarker]] | None = None,
         on_marker_selected: Callable[[ImageMarker], None] | None = None,
         on_marker_opened: Callable[[ImageMarker], None] | None = None,
+        on_cluster_member_activated: Callable[[ImageMarker], None] | None = None,
+        on_marker_selection_cleared: Callable[[], None] | None = None,
         show_marker_controls: bool = True,
+        atlas_lod: bool = False,
         navigation_actions_for: Callable[[Any], list[ViewerNavigationAction]] | None = None,
         on_navigation_requested: Callable[[Any, str], None] | None = None,
     ) -> None:
@@ -1445,11 +2989,14 @@ class ViewerTab(QWidget):
         self._markers_for = markers_for or (lambda _value: [])
         self._on_marker_selected = on_marker_selected
         self._on_marker_opened = on_marker_opened
+        self._on_marker_selection_cleared = on_marker_selection_cleared
         self._show_marker_controls = show_marker_controls
+        self._atlas_lod = atlas_lod
         self._navigation_actions_for = navigation_actions_for
         self._on_navigation_requested = on_navigation_requested
         self._item_status_for: Callable[[Any], ItemListStatus] | None = None
         self._selected_marker_id_override: str | None = None
+        self._marker_selection_explicitly_cleared = False
         self._show_tilt_controls = show_tilt_controls
         self._scale_bar_enabled = True
         self._current_value: Any | None = None
@@ -1478,9 +3025,14 @@ class ViewerTab(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
         self.viewer = ImagePreviewView(self)
+        self.viewer.set_atlas_lod_enabled(atlas_lod)
         self.viewer.set_zoom_changed_callback(self._zoom_changed)
         self.viewer.set_marker_selected_callback(self._marker_selected)
         self.viewer.set_marker_opened_callback(self._marker_opened)
+        self.viewer.set_cluster_member_activated_callback(
+            on_cluster_member_activated
+        )
+        self.viewer.set_selection_cleared_callback(self._marker_selection_cleared)
 
         header = QHBoxLayout()
         header.setSpacing(8)
@@ -1495,30 +3047,52 @@ class ViewerTab(QWidget):
         self.zoom_in_button = QPushButton("", self)
         self.zoom_out_button = QPushButton("", self)
         self.fit_button = QPushButton("Fit", self)
+        self.export_image_button = QPushButton("", self)
         self.overlay_button = QPushButton("Overlays", self)
         self.overlay_button.setCheckable(True)
         self.overlay_button.setToolTip("Show overlay controls")
         self.zoom_in_button.setIcon(themed_icon("zoom-in", size=16))
         self.zoom_out_button.setIcon(themed_icon("zoom-out", size=16))
+        self.export_image_button.setIcon(themed_icon("download", size=16))
         self.overlay_button.setIcon(themed_icon("layers", size=16))
         self.fit_button.setIcon(themed_icon("maximize", size=16))
         self.zoom_label = QLabel("100%", self)
         self.zoom_label.setObjectName("viewerZoomLabel")
         self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.zoom_label.setFixedWidth(30)
+        # Reserve enough stable width for four-digit values such as 1000%.
+        # Resizing this floating strip at each digit boundary is distracting
+        # and can make the Fit button appear to jump horizontally.
+        zoom_label_width = max(
+            ZOOM_LABEL_MIN_WIDTH_PX,
+            self.zoom_label.fontMetrics().horizontalAdvance("9999%") + 8,
+        )
+        self.zoom_label.setFixedWidth(zoom_label_width)
         self.image_badge = QLabel("", self)
         self.image_badge.setObjectName("viewerImageBadge")
         self.image_badge.setVisible(False)
         self.scale_bar = ScaleBarWidget(self)
+        self.atlas_marker_legend = AtlasMarkerLegend(self)
+        self.atlas_marker_legend.setVisible(atlas_lod)
         self.zoom_in_button.setToolTip("Zoom in")
         self.zoom_out_button.setToolTip("Zoom out")
         self.fit_button.setToolTip("Fit preview to the available space")
+        self.export_image_button.setToolTip(
+            "Export the current image view as a high-quality PNG (Ctrl+S)"
+        )
+        self.zoom_in_button.setAccessibleName("Zoom in")
+        self.zoom_out_button.setAccessibleName("Zoom out")
+        self.fit_button.setAccessibleName("Fit preview")
+        self.export_image_button.setAccessibleName("Export current image view")
+        self.overlay_button.setAccessibleName("Overlay controls")
         for button in (self.zoom_in_button, self.zoom_out_button, self.fit_button, self.overlay_button):
             button.setObjectName("viewerToolButton")
             button.setIconSize(QSize(16, 16))
         for button in (self.zoom_in_button, self.zoom_out_button):
             button.setObjectName("viewerZoomButton")
             button.setFixedSize(30, 28)
+        self.export_image_button.setObjectName("viewerZoomButton")
+        self.export_image_button.setFixedSize(30, 28)
+        self.export_image_button.setEnabled(False)
         self.status = QLabel(empty_text, self)
         self.status.setObjectName("viewerStatus")
         self.status.setWordWrap(True)
@@ -1527,6 +3101,7 @@ class ViewerTab(QWidget):
         self.frame_label.setObjectName("frameLabel")
         self.frame_label.setToolTip("Current tilt series frame")
         self.slice_slider = FrameSelectionSlider(self)
+        self.slice_slider.setToolTip("Select a tilt-series frame; use Left or Right to move one frame")
         self.slice_slider.setVisible(show_tilt_controls)
         self.frame_label.setVisible(False)
         self.slice_slider.setEnabled(False)
@@ -1539,6 +3114,18 @@ class ViewerTab(QWidget):
             marker_type: True for marker_type in MARKER_TYPES_WITH_CONTROLS
         }
         self._unavailable_marker_types: set[str] = set()
+        self._atlas_lod_checks: dict[str, QCheckBox] = {}
+        self.marker_legend_checkbox: QCheckBox | None = None
+        self._atlas_collection_overlay_options_for: (
+            Callable[[Any], list[AtlasCollectionOverlayOption]] | None
+        ) = None
+        self._on_atlas_collection_visibility_changed: (
+            Callable[[str, bool], None] | None
+        ) = None
+        self._atlas_collection_checks: dict[str, QCheckBox] = {}
+        self._atlas_collection_section_button: QToolButton | None = None
+        self._atlas_collection_section: QWidget | None = None
+        self._atlas_collection_section_layout: QVBoxLayout | None = None
         self.overlay_panel = QWidget(self)
         self.overlay_panel.setObjectName("viewerOverlayPanel")
         overlay_panel_layout = QVBoxLayout(self.overlay_panel)
@@ -1552,9 +3139,78 @@ class ViewerTab(QWidget):
                 checkbox.stateChanged.connect(lambda _state, marker_type=marker_type: self._marker_type_toggled(marker_type))
                 self._marker_type_checks[marker_type] = checkbox
                 overlay_panel_layout.addWidget(checkbox)
+        if atlas_lod:
+            for key, label, icon_name, default in ATLAS_LOD_CONTROL_LABELS:
+                checkbox = QCheckBox(label, self.overlay_panel)
+                checkbox.setChecked(default)
+                checkbox.setToolTip(f"Show or hide {label.lower()}")
+                checkbox.setIcon(themed_icon(icon_name, size=16))
+                checkbox.setIconSize(QSize(16, 16))
+                checkbox.stateChanged.connect(
+                    lambda _state, option=key: self._atlas_lod_toggled(option)
+                )
+                self._atlas_lod_checks[key] = checkbox
+                overlay_panel_layout.addWidget(checkbox)
+            self._atlas_collection_section_button = QToolButton(
+                self.overlay_panel
+            )
+            self._atlas_collection_section_button.setObjectName(
+                "viewerOverlaySectionButton"
+            )
+            self._atlas_collection_section_button.setText(
+                "Data collections"
+            )
+            self._atlas_collection_section_button.setCheckable(True)
+            self._atlas_collection_section_button.setChecked(False)
+            self._atlas_collection_section_button.setArrowType(
+                Qt.ArrowType.RightArrow
+            )
+            self._atlas_collection_section_button.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+            )
+            self._atlas_collection_section_button.setToolTip(
+                "Show batch-position visibility controls by data collection"
+            )
+            self._atlas_collection_section_button.toggled.connect(
+                self._atlas_collection_section_toggled
+            )
+            self._atlas_collection_section_button.setVisible(False)
+            overlay_panel_layout.addWidget(
+                self._atlas_collection_section_button
+            )
+
+            self._atlas_collection_section = QWidget(self.overlay_panel)
+            self._atlas_collection_section.setObjectName(
+                "viewerAtlasCollectionSection"
+            )
+            self._atlas_collection_section_layout = QVBoxLayout(
+                self._atlas_collection_section
+            )
+            self._atlas_collection_section_layout.setContentsMargins(
+                18,
+                0,
+                0,
+                2,
+            )
+            self._atlas_collection_section_layout.setSpacing(4)
+            self._atlas_collection_section.setVisible(False)
+            overlay_panel_layout.addWidget(self._atlas_collection_section)
+
+            self.marker_legend_checkbox = QCheckBox(
+                "Marker legend",
+                self.overlay_panel,
+            )
+            self.marker_legend_checkbox.setChecked(True)
+            self.marker_legend_checkbox.setToolTip(
+                "Show or hide the Atlas marker legend"
+            )
+            self.marker_legend_checkbox.stateChanged.connect(
+                self._marker_legend_toggled
+            )
+            overlay_panel_layout.addWidget(self.marker_legend_checkbox)
         self.scale_bar_checkbox = QCheckBox("Scale bar", self.overlay_panel)
         self.scale_bar_checkbox.setChecked(True)
-        self.scale_bar_checkbox.setToolTip("Show or hide the dynamic scale bar")
+        self.scale_bar_checkbox.setToolTip("Show or hide the scale bar")
         self.scale_bar_checkbox.stateChanged.connect(self._scale_bar_toggled)
         overlay_panel_layout.addWidget(self.scale_bar_checkbox)
         self.overlay_panel.setVisible(False)
@@ -1564,14 +3220,16 @@ class ViewerTab(QWidget):
         if self._navigation_actions_for is not None:
             controls.addSpacing(8)
             for key, label in (
-                ("batch", "\u2197 Batch"),
-                ("search", "\u2197 Search"),
-                ("search_map", "\u2197 Search map"),
-                ("overview", "\u2197 Overview"),
-                ("tilt_series", "\u2197 Tilt series"),
+                ("batch", "Batch"),
+                ("search", "Search"),
+                ("search_map", "Search map"),
+                ("overview", "Overview"),
+                ("tilt_series", "Tilt series"),
             ):
                 button = QPushButton(label, self)
                 button.setObjectName("viewerNavButton")
+                button.setIcon(themed_icon("arrow-right", size=14))
+                button.setAccessibleName(f"Open linked {label.lower()}")
                 button.setVisible(False)
                 button.clicked.connect(lambda _checked=False, key=key: self._navigation_button_clicked(key))
                 self._navigation_buttons[key] = button
@@ -1580,13 +3238,26 @@ class ViewerTab(QWidget):
         self.zoom_in_button.clicked.connect(self.viewer.zoom_in)
         self.zoom_out_button.clicked.connect(self.viewer.zoom_out)
         self.fit_button.clicked.connect(self.viewer.fit_image)
+        self.export_image_button.clicked.connect(self._export_current_view)
+        self._export_shortcut = QShortcut(
+            QKeySequence.StandardKey.Save,
+            self,
+        )
+        self._export_shortcut.setContext(
+            Qt.ShortcutContext.WindowShortcut
+        )
+        # Each viewer tab owns the same shortcut. Only the visible tab keeps
+        # its shortcut enabled, avoiding ambiguity while still allowing
+        # Ctrl+S when focus is in a dock or another part of the main window.
+        self._export_shortcut.setEnabled(False)
+        self._export_shortcut.activated.connect(self._export_current_view)
 
         self.list = QTreeWidget(self)
         self.list.setObjectName("viewerList")
         self.list.setColumnCount(1)
         self.list.setHeaderHidden(True)
         self.list.setIndentation(12)
-        self.list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.list.header().setStretchLastSection(False)
         self.list.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.list.setItemDelegate(_ViewerListDelegate(self.list))
@@ -1599,6 +3270,14 @@ class ViewerTab(QWidget):
         self.list_filter.setObjectName("viewerFilter")
         self.list_filter.setPlaceholderText("Filter items...")
         self.list_filter.setToolTip("Filter this list by name, status, or summary")
+        self.list_filter.setAccessibleName("Filter viewer items")
+        self.list_filter.setClearButtonEnabled(True)
+        self._clear_filter_shortcut = QShortcut(
+            QKeySequence(Qt.Key.Key_Escape),
+            self.list_filter,
+        )
+        self._clear_filter_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self._clear_filter_shortcut.activated.connect(self.list_filter.clear)
         self.list_filter.setVisible(show_list)
         self.list_filter.textChanged.connect(self._filter_list)
         self.list_header = QLabel("Items", self)
@@ -1629,7 +3308,6 @@ class ViewerTab(QWidget):
         top_right_row.setContentsMargins(0, 0, 0, 0)
         top_right_row.setSpacing(6)
         top_right_row.addWidget(self.overlay_button)
-        top_right_row.addWidget(self.fit_button)
         top_right_layout.addLayout(top_right_row)
         top_right_layout.addWidget(self.overlay_panel, alignment=Qt.AlignmentFlag.AlignRight)
         top_right_anchor = QWidget(viewer_shell)
@@ -1650,14 +3328,23 @@ class ViewerTab(QWidget):
         )
 
         zoom_panel = QWidget(viewer_shell)
+        self.zoom_panel = zoom_panel
         zoom_panel.setObjectName("viewerZoomPanel")
-        zoom_panel.setFixedWidth(36)
+        zoom_panel.setFixedWidth(
+            zoom_label_width + ZOOM_PANEL_HORIZONTAL_PADDING_PX
+        )
         zoom_layout = QVBoxLayout(zoom_panel)
         zoom_layout.setContentsMargins(3, 5, 3, 5)
         zoom_layout.setSpacing(3)
         zoom_layout.addWidget(self.zoom_in_button, alignment=Qt.AlignmentFlag.AlignHCenter)
         zoom_layout.addWidget(self.zoom_label, alignment=Qt.AlignmentFlag.AlignHCenter)
         zoom_layout.addWidget(self.zoom_out_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        # "Fit" is a zoom action, but it used to live in the opposite corner
+        # from the zoom controls. Icon-only here because the panel is narrow;
+        # the tooltip carries the name.
+        self.fit_button.setText("")
+        self.fit_button.setObjectName("viewerZoomButton")
+        zoom_layout.addWidget(self.fit_button, alignment=Qt.AlignmentFlag.AlignHCenter)
         zoom_anchor = QWidget(viewer_shell)
         zoom_anchor.setObjectName("viewerFloatingBottomRightAnchor")
         zoom_anchor_layout = QVBoxLayout(zoom_anchor)
@@ -1667,7 +3354,23 @@ class ViewerTab(QWidget):
             FLOATING_CONTROL_INSET_PX,
             FLOATING_CONTROL_BOTTOM_INSET_PX,
         )
+        export_panel = QWidget(viewer_shell)
+        export_panel.setObjectName("viewerZoomPanel")
+        export_panel.setFixedWidth(
+            zoom_label_width + ZOOM_PANEL_HORIZONTAL_PADDING_PX
+        )
+        export_layout = QVBoxLayout(export_panel)
+        export_layout.setContentsMargins(3, 5, 3, 5)
+        export_layout.addWidget(
+            self.export_image_button,
+            alignment=Qt.AlignmentFlag.AlignHCenter,
+        )
+        zoom_anchor_layout.addWidget(export_panel)
+        zoom_anchor_layout.addSpacing(6)
         zoom_anchor_layout.addWidget(zoom_panel)
+        # Kept alongside the scale-bar anchor so both share one baseline —
+        # see ``_reposition_floating_controls``.
+        self._zoom_anchor_layout = zoom_anchor_layout
         viewer_shell_layout.addWidget(
             zoom_anchor,
             0,
@@ -1675,7 +3378,10 @@ class ViewerTab(QWidget):
             alignment=Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight,
         )
         scale_bar_anchor = QWidget(viewer_shell)
-        scale_bar_anchor.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        scale_bar_anchor.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            not atlas_lod,
+        )
         scale_bar_anchor_layout = QVBoxLayout(scale_bar_anchor)
         scale_bar_anchor_layout.setContentsMargins(
             FLOATING_CONTROL_INSET_PX,
@@ -1683,7 +3389,14 @@ class ViewerTab(QWidget):
             0,
             FLOATING_CONTROL_BOTTOM_INSET_PX,
         )
+        if atlas_lod:
+            scale_bar_anchor_layout.addWidget(self.atlas_marker_legend)
+            scale_bar_anchor_layout.addSpacing(12)
         scale_bar_anchor_layout.addWidget(self.scale_bar)
+        # Kept so ``_reposition_scale_bar`` can pin the bar to the rendered
+        # image rather than to the canvas corner.
+        self._scale_bar_anchor = scale_bar_anchor
+        self._scale_bar_anchor_layout = scale_bar_anchor_layout
         viewer_shell_layout.addWidget(scale_bar_anchor, 0, 0, alignment=Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         image_badge_anchor = QWidget(viewer_shell)
         image_badge_anchor.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -1744,7 +3457,104 @@ class ViewerTab(QWidget):
         layout.addWidget(splitter, stretch=1)
         layout.addWidget(self.status)
 
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        super().showEvent(event)
+        self._export_shortcut.setEnabled(True)
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        self._export_shortcut.setEnabled(False)
+        super().hideEvent(event)
+
+    def set_atlas_collection_overlay_provider(
+        self,
+        provider: Callable[
+            [Any],
+            list[AtlasCollectionOverlayOption],
+        ]
+        | None,
+        on_visibility_changed: Callable[[str, bool], None] | None,
+    ) -> None:
+        self._atlas_collection_overlay_options_for = provider
+        self._on_atlas_collection_visibility_changed = on_visibility_changed
+        self._update_atlas_collection_overlay_controls(self._current_value)
+
+    def _atlas_collection_section_toggled(self, expanded: bool) -> None:
+        if self._atlas_collection_section_button is not None:
+            self._atlas_collection_section_button.setArrowType(
+                Qt.ArrowType.DownArrow
+                if expanded
+                else Qt.ArrowType.RightArrow
+            )
+        if self._atlas_collection_section is not None:
+            self._atlas_collection_section.setVisible(
+                expanded and bool(self._atlas_collection_checks)
+            )
+
+    def _update_atlas_collection_overlay_controls(
+        self,
+        value: Any,
+    ) -> None:
+        if (
+            not self._atlas_lod
+            or self._atlas_collection_section_layout is None
+            or self._atlas_collection_section_button is None
+            or self._atlas_collection_section is None
+        ):
+            return
+        while self._atlas_collection_section_layout.count():
+            item = self._atlas_collection_section_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._atlas_collection_checks = {}
+        options = (
+            self._atlas_collection_overlay_options_for(value)
+            if self._atlas_collection_overlay_options_for is not None
+            and value is not None
+            else []
+        )
+        self._atlas_collection_section_button.setText(
+            f"Data collections ({len(options)})"
+            if options
+            else "Data collections"
+        )
+        self._atlas_collection_section_button.setVisible(bool(options))
+        for option in options:
+            checkbox = QCheckBox(
+                option.label,
+                self._atlas_collection_section,
+            )
+            checkbox.setObjectName("viewerAtlasCollectionCheck")
+            checkbox.setChecked(option.visible)
+            checkbox.setToolTip(
+                f"Show batch positions from {option.label}"
+            )
+            checkbox.stateChanged.connect(
+                lambda _state, key=option.key: self._atlas_collection_toggled(
+                    key
+                )
+            )
+            self._atlas_collection_checks[option.key] = checkbox
+            self._atlas_collection_section_layout.addWidget(checkbox)
+        self._atlas_collection_section.setVisible(
+            bool(options)
+            and self._atlas_collection_section_button.isChecked()
+        )
+
+    def _atlas_collection_toggled(self, key: str) -> None:
+        checkbox = self._atlas_collection_checks.get(key)
+        if checkbox is None:
+            return
+        if self._on_atlas_collection_visibility_changed is not None:
+            self._on_atlas_collection_visibility_changed(
+                key,
+                checkbox.isChecked(),
+            )
+        self._refresh_marker_selection()
+
     def _set_header_chips(self, values: list[str]) -> None:
+        from tomography_session_browser.ui.theme import current_palette
+
         layout = self.layout().itemAt(0).layout() if self.layout() and self.layout().count() else None
         if layout is None:
             return
@@ -1758,9 +3568,23 @@ class ViewerTab(QWidget):
         self.header_chips = []
         for index, value in enumerate(values):
             chip = QLabel(value, self)
-            chip.setObjectName("viewerChipStatus" if _is_status_chip(value) else "viewerChip")
+            is_status = _is_status_chip(value)
+            chip.setObjectName("viewerChipStatus" if is_status else "viewerChip")
+            if is_status:
+                # The status chip used to be painted with the accent colour
+                # whatever the status was, so a failed tilt series showed a
+                # calm sage chip in the header while the list row beside it
+                # showed a red one. Reuse the list-row badge colours.
+                semantic_color, background = _status_badge_colors(value)
+                text_color = current_palette().text_strong
+                chip.setStyleSheet(
+                    f"color: {text_color};"
+                    f" border-color: {semantic_color.name()};"
+                    f" background: rgba({background.red()}, {background.green()},"
+                    f" {background.blue()}, {background.alpha()});"
+                )
             chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            chip.setToolTip(value)
+            chip.setToolTip(_status_chip_tooltip(value) if is_status else value)
             layout.insertWidget(1 + index, chip)
             self.header_chips.append(chip)
 
@@ -1768,9 +3592,19 @@ class ViewerTab(QWidget):
         """Refresh custom-painted and pixmap-based viewer controls after theme changes."""
 
         self.overlay_button.setIcon(themed_icon("layers", size=16))
+        self.export_image_button.setIcon(themed_icon("download", size=16))
         self.fit_button.setIcon(themed_icon("maximize", size=16))
         self.zoom_in_button.setIcon(themed_icon("zoom-in", size=16))
         self.zoom_out_button.setIcon(themed_icon("zoom-out", size=16))
+        for button in self._navigation_buttons.values():
+            button.setIcon(themed_icon("arrow-right", size=14))
+        if self._atlas_lod:
+            icon_by_key = {
+                key: icon_name
+                for key, _label, icon_name, _default in ATLAS_LOD_CONTROL_LABELS
+            }
+            for key, checkbox in self._atlas_lod_checks.items():
+                checkbox.setIcon(themed_icon(icon_by_key[key], size=16))
         if self._current_value is not None:
             self._refresh_marker_selection()
         self.viewer.viewport().update()
@@ -1781,14 +3615,32 @@ class ViewerTab(QWidget):
         self.update()
 
     def _update_header(self, value: Any) -> None:
-        self.header_title.setText(_title_for_item(value))
+        self.header_title.setText(self._header_title_for(value))
         chips = _chips_for_item(value)
         if isinstance(value, TiltSeries) and self._item_status_for is not None:
             status = self._item_status_for(value).status
             if status:
-                chips.insert(0, "Acquired" if status == "done" else status)
+                chips.insert(0, display_status_label(status))
         self._set_header_chips(chips)
         self._update_navigation_actions(value)
+
+    def _header_title_for(self, value: Any) -> str:
+        """Title the header with the same label the list row shows.
+
+        ``Atlas`` carries no name of its own, so ``_title_for_item`` could
+        only return the literal word "Atlas" while every other tab titled
+        itself with the selected item. The owning tab already resolved a
+        real label (e.g. "SSK_vellio") to populate the list; reuse it.
+        """
+
+        for index in range(self.list.topLevelItemCount()):
+            item = self.list.topLevelItem(index)
+            if item.data(0, VIEWER_OBJECT_ROLE) is value:
+                label = str(item.data(0, LIST_PRIMARY_ROLE) or "")
+                if label:
+                    return label
+                break
+        return _title_for_item(value)
 
     def _update_navigation_actions(self, value: Any | None) -> None:
         if not self._navigation_buttons:
@@ -1805,7 +3657,7 @@ class ViewerTab(QWidget):
             if action is None:
                 button.setVisible(False)
                 continue
-            button.setText(action.label)
+            button.setText(action.label.lstrip("↗ ").strip())
             button.setEnabled(action.enabled)
             button.setToolTip(action.tooltip)
             button.setVisible(True)
@@ -1877,6 +3729,8 @@ class ViewerTab(QWidget):
         self._displayed_slice_index = None
         self._current_value = None
         self._selected_marker_id_override = None
+        self._marker_selection_explicitly_cleared = False
+        self._update_atlas_collection_overlay_controls(None)
         self._current_mrc_max_size = MAX_PREVIEW_DIMENSION
         self._request_id += 1
         self._slider_debounce.stop()
@@ -1886,6 +3740,7 @@ class ViewerTab(QWidget):
             self.list.clear()
             empty_text = "Select an item" if items else "No items for the current selection."
             self.viewer.clear(empty_text)
+            self.export_image_button.setEnabled(False)
             self.image_badge.setVisible(False)
             self.scale_bar.setVisible(False)
             self._set_status_text(empty_text)
@@ -1893,13 +3748,17 @@ class ViewerTab(QWidget):
             self._set_header_chips([])
             self._update_navigation_actions(None)
             self.list_count.setText(str(len(items)))
-            self.list_header.setText(_panel_title_for_items(items))
+            panel_title = _panel_title_for_items(items)
+            self.list_header.setText(panel_title)
+            self.list_filter.setPlaceholderText(f"Filter {panel_title.lower()}...")
+            self.list_filter.setAccessibleName(f"Filter {panel_title.lower()}")
             self._set_slice_state(1, 0, valid_stack=False)
             tree_items: list[QTreeWidgetItem] = []
             for index, item in enumerate(items):
                 label = label_for(item)
                 list_status = item_status_for(item) if item_status_for is not None else None
-                status = list_status.status if list_status is not None else _status_label_for_item(item)
+                raw_status = list_status.status if list_status is not None else _status_label_for_item(item)
+                status = display_status_label(raw_status) if raw_status else ""
                 summary = list_status.summary if list_status is not None else _summary_for_item(item)
                 tooltip = list_status.tooltip if list_status is not None else ""
                 tree_item = QTreeWidgetItem([label])
@@ -2001,16 +3860,22 @@ class ViewerTab(QWidget):
         path = sources.primary
         self._current_value = value
         self._selected_marker_id_override = None
+        self._marker_selection_explicitly_cleared = False
+        self.viewer.clear_exposure_highlights(redraw=False)
+        self._update_atlas_collection_overlay_controls(value)
         self._update_header(value)
         markers = self._markers_for(value)
         self._update_marker_type_availability(markers)
         self.viewer.set_markers(markers, selected_marker_id=self._active_selected_marker_id(value, markers))
+        if self._atlas_lod:
+            self.atlas_marker_legend.set_markers(markers)
         if path is None:
             self._current_path = None
             self._current_fallback = None
             self._displayed_path = None
             self._displayed_slice_index = None
             self.viewer.clear("Preview unavailable")
+            self.export_image_button.setEnabled(False)
             self._set_status_text("No preview image found for this item.")
             self._set_slice_state(1, 0, valid_stack=False)
             return
@@ -2086,6 +3951,7 @@ class ViewerTab(QWidget):
             )
         else:
             self.viewer.clear("Loading MRC preview...")
+            self.export_image_button.setEnabled(False)
             self._set_status_text(f"Loading MRC preview: {path.name}", tooltip=str(path))
         self._thread_pool.start(_MrcLoadTask(request_id, path, clamped_index, self._current_mrc_max_size, self._mrc_signals))
 
@@ -2146,6 +4012,14 @@ class ViewerTab(QWidget):
         self.slice_slider.setMaximum(max(0, slice_count - 1))
         self.slice_slider.setValue(min(slice_index, max(0, slice_count - 1)))
         self.slice_slider.blockSignals(False)
+        frame_number = min(slice_index, max(0, slice_count - 1)) + 1
+        frame_tooltip = (
+            f"Frame {frame_number} of {slice_count}; use Left or Right to move one frame"
+            if show_slider
+            else "Tilt-series frame control"
+        )
+        self.slice_slider.setToolTip(frame_tooltip)
+        self.slice_slider.setAccessibleDescription(frame_tooltip)
         self._update_frame_label(slice_count)
         self._notify_frame_changed(slice_count)
 
@@ -2249,6 +4123,7 @@ class ViewerTab(QWidget):
             )
             return
         self.viewer.clear("Preview unavailable")
+        self.export_image_button.setEnabled(False)
         self.image_badge.setVisible(False)
         self.scale_bar.setVisible(False)
         self._set_slice_state(slice_count, slice_index, valid_stack=False)
@@ -2279,6 +4154,8 @@ class ViewerTab(QWidget):
                     if camera is not None:
                         return camera.id
             return self._selected_marker_id_override
+        if self._marker_selection_explicitly_cleared:
+            return None
         if isinstance(value, SearchTile):
             area_name = str(value.metadata.get("ExposureAreaName") or "").strip().casefold()
             if area_name:
@@ -2305,9 +4182,12 @@ class ViewerTab(QWidget):
         markers = self._markers_for(self._current_value)
         self._update_marker_type_availability(markers)
         self.viewer.set_markers(markers, selected_marker_id=self._active_selected_marker_id(self._current_value, markers))
+        if self._atlas_lod:
+            self.atlas_marker_legend.set_markers(markers)
 
     def select_marker(self, marker_id: str | None) -> None:
         self._selected_marker_id_override = marker_id
+        self._marker_selection_explicitly_cleared = marker_id is None
         self._refresh_marker_selection()
         self._update_navigation_actions(self._current_value)
 
@@ -2315,6 +4195,11 @@ class ViewerTab(QWidget):
         self.select_marker(marker.id)
         if self._on_marker_selected is not None:
             self._on_marker_selected(marker)
+
+    def _marker_selection_cleared(self) -> None:
+        self.select_marker(None)
+        if self._on_marker_selection_cleared is not None:
+            self._on_marker_selection_cleared()
 
     def _marker_opened(self, marker: ImageMarker) -> None:
         self.select_marker(marker.id)
@@ -2325,6 +4210,16 @@ class ViewerTab(QWidget):
         checkbox = self._marker_type_checks[marker_type]
         self._user_marker_type_visible[marker_type] = checkbox.isChecked()
         self._apply_marker_type_visibility(marker_type)
+
+    def _atlas_lod_toggled(self, key: str) -> None:
+        checkbox = self._atlas_lod_checks[key]
+        self.viewer.set_atlas_lod_option(key, checkbox.isChecked())
+
+    def _marker_legend_toggled(self) -> None:
+        if self.marker_legend_checkbox is not None:
+            self.atlas_marker_legend.setVisible(
+                self.marker_legend_checkbox.isChecked()
+            )
 
     def _update_marker_type_availability(self, markers: list[ImageMarker]) -> None:
         has_camera_fov = any(marker.marker_type == MarkerType.CAMERA_FOV for marker in markers)
@@ -2383,14 +4278,73 @@ class ViewerTab(QWidget):
 
     def _overlay_panel_toggled(self, checked: bool) -> None:
         self.overlay_panel.setVisible(checked)
+        self.overlay_button.setToolTip(
+            "Hide overlay controls" if checked else "Show overlay controls"
+        )
 
     def _scale_bar_toggled(self) -> None:
         self._scale_bar_enabled = self.scale_bar_checkbox.isChecked()
         self._update_scale_bar()
 
+    def _floating_control_insets(self) -> tuple[int, int, int]:
+        """Return ``(left, right, bottom)`` margins for the overlaid controls.
+
+        Both bottom-corner overlays are positioned from the *rendered image*
+        rather than the canvas: on a letterboxed image the canvas corner sits
+        in the empty band below the data, which made the scale bar read as
+        detached from what it measures.
+
+        Crucially the bottom inset is shared, so the scale bar and the zoom
+        stack always sit on one baseline. Anchoring only the scale bar to the
+        image (as the first version of this did) left the two overlays
+        stepped apart whenever the image did not fill the canvas.
+        """
+
+        left = FLOATING_CONTROL_INSET_PX
+        right = FLOATING_CONTROL_INSET_PX
+        bottom = FLOATING_CONTROL_BOTTOM_INSET_PX
+        image_rect = self.viewer.rendered_image_rect()
+        if image_rect is None:
+            return left, right, bottom
+
+        # The anchors and the viewport all span the viewer shell, so the
+        # image rect's viewport-local offsets are the margins we want.
+        # (Mapping through ``mapTo`` here double-counted the viewport origin
+        # and pushed the bar into the middle of the image.)
+        viewport = self.viewer.viewport().rect()
+        left = max(FLOATING_CONTROL_INSET_PX, image_rect.left() + FLOATING_CONTROL_INSET_PX)
+        right = max(
+            FLOATING_CONTROL_INSET_PX,
+            (viewport.right() - image_rect.right()) + FLOATING_CONTROL_INSET_PX,
+        )
+        bottom = max(
+            FLOATING_CONTROL_BOTTOM_INSET_PX,
+            (viewport.bottom() - image_rect.bottom()) + FLOATING_CONTROL_BOTTOM_INSET_PX,
+        )
+        return left, right, bottom
+
+    def _reposition_floating_controls(self) -> None:
+        """Keep the scale bar and the zoom stack on a common baseline."""
+
+        scale_layout = getattr(self, "_scale_bar_anchor_layout", None)
+        zoom_layout = getattr(self, "_zoom_anchor_layout", None)
+        if scale_layout is None and zoom_layout is None:
+            return
+
+        left, right, bottom = self._floating_control_insets()
+        if scale_layout is not None:
+            margins = scale_layout.contentsMargins()
+            if (margins.left(), margins.bottom()) != (left, bottom):
+                scale_layout.setContentsMargins(left, 0, 0, bottom)
+        if zoom_layout is not None:
+            margins = zoom_layout.contentsMargins()
+            if (margins.right(), margins.bottom()) != (right, bottom):
+                zoom_layout.setContentsMargins(0, 0, right, bottom)
+
     def _zoom_changed(self, zoom: float) -> None:
         self.zoom_label.setText(f"{max(1, round(zoom * 100))}%")
         self._update_scale_bar()
+        self._reposition_floating_controls()
         if self._current_path is None or self._current_path.suffix.lower() != ".mrc":
             return
         source = MRC_SOURCE_CACHE.get(self._current_path)
@@ -2424,6 +4378,7 @@ class ViewerTab(QWidget):
         return max(nx, ny)
 
     def _update_image_badge(self) -> None:
+        self.export_image_button.setEnabled(self.viewer.has_image())
         if self._displayed_path is None or self._current_value is None or not self.viewer.has_image():
             self.image_badge.setVisible(False)
             return
@@ -2433,6 +4388,130 @@ class ViewerTab(QWidget):
         self.image_badge.setText(f"{kind}{pixel_text}")
         self.image_badge.setToolTip(str(self._displayed_path))
         self.image_badge.setVisible(True)
+
+    def _export_current_view(self) -> None:
+        rendered = self.viewer.render_current_view()
+        if rendered is None:
+            QMessageBox.information(
+                self,
+                "Export image",
+                "Load an image before exporting.",
+            )
+            return
+        image, render_scale = rendered
+        self._composite_export_overlays(image, render_scale)
+        dialog = ImageExportDialog(
+            image,
+            self._default_export_path(),
+            self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        destination = dialog.selected_path
+        if destination is None:
+            return
+        if not image.save(str(destination), "PNG", 100):
+            QMessageBox.critical(
+                self,
+                "Export failed",
+                f"Could not save the PNG to:\n{destination}",
+            )
+
+    def _default_export_path(self) -> Path:
+        base_name = (
+            self._displayed_path.stem
+            if self._displayed_path is not None
+            else "tomography_image"
+        )
+        if (
+            self._displayed_path is not None
+            and self._displayed_path.suffix.lower() == ".mrc"
+            and self._displayed_slice_index is not None
+        ):
+            base_name += f"_frame_{self._displayed_slice_index + 1:04d}"
+        zoom_percent = max(1, round(self.viewer.zoom_scale() * 100))
+        filename = f"{base_name}_view_{zoom_percent}pct.png"
+        export_directory = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.PicturesLocation
+        )
+        if not export_directory:
+            export_directory = QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.DocumentsLocation
+            )
+        return Path(export_directory or Path.cwd()) / filename
+
+    def _composite_export_overlays(
+        self,
+        image: QImage,
+        render_scale: float,
+    ) -> None:
+        """Add visible image-bound widgets to the offscreen scene render."""
+
+        overlays: list[tuple[QWidget, int]] = []
+        if not self.scale_bar.isHidden():
+            overlays.append((self.scale_bar, 0))
+        if self._atlas_lod and not self.atlas_marker_legend.isHidden():
+            overlays.append((self.atlas_marker_legend, 12))
+        if not overlays:
+            return
+
+        left_inset = round(FLOATING_CONTROL_INSET_PX * render_scale)
+        bottom = image.height() - round(
+            FLOATING_CONTROL_BOTTOM_INSET_PX * render_scale
+        )
+        painter = QPainter(image)
+        painter.setRenderHints(
+            QPainter.RenderHint.Antialiasing
+            | QPainter.RenderHint.TextAntialiasing
+            | QPainter.RenderHint.SmoothPixmapTransform,
+            True,
+        )
+        try:
+            for widget, spacing_above in overlays:
+                bottom -= round(spacing_above * render_scale)
+                widget_image = self._render_widget_for_export(
+                    widget,
+                    render_scale,
+                )
+                bottom -= widget_image.height()
+                painter.drawImage(
+                    QPoint(left_inset, max(0, bottom)),
+                    widget_image,
+                )
+        finally:
+            painter.end()
+
+    @staticmethod
+    def _render_widget_for_export(
+        widget: QWidget,
+        render_scale: float,
+    ) -> QImage:
+        target = QImage(
+            QSize(
+                max(1, round(widget.width() * render_scale)),
+                max(1, round(widget.height() * render_scale)),
+            ),
+            QImage.Format.Format_ARGB32_Premultiplied,
+        )
+        target.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(target)
+        painter.setRenderHints(
+            QPainter.RenderHint.Antialiasing
+            | QPainter.RenderHint.TextAntialiasing
+            | QPainter.RenderHint.SmoothPixmapTransform,
+            True,
+        )
+        try:
+            painter.scale(render_scale, render_scale)
+            widget.render(
+                painter,
+                QPoint(),
+                QRegion(),
+                QWidget.RenderFlag.DrawChildren,
+            )
+        finally:
+            painter.end()
+        return target
 
     def _update_scale_bar(self) -> None:
         if not self._scale_bar_enabled or self._current_value is None or not self.viewer.has_image():
@@ -2454,9 +4533,15 @@ class ViewerTab(QWidget):
         source_width = float(source_size[0]) if source_size is not None and source_size[0] else float(displayed_width)
         meters_per_scene_px = pixel_size_m * (source_width / float(displayed_width))
         zoom = self.viewer.zoom_scale()
+        if zoom <= 0 or not math.isfinite(zoom):
+            self.scale_bar.setVisible(False)
+            return
         target_screen_px = min(
             MAX_SCALE_BAR_SCREEN_PX,
-            max(MIN_SCALE_BAR_SCREEN_PX, self.viewer.viewport().width() * 0.15),
+            max(
+                MIN_SCALE_BAR_SCREEN_PX,
+                self.viewer.viewport().width() * 0.15,
+            ),
         )
         target_meters = (target_screen_px / zoom) * meters_per_scene_px
         length_meters = _nice_scale_length_meters(target_meters)
@@ -2476,7 +4561,10 @@ class ViewerTab(QWidget):
                 if larger_px <= MAX_SCALE_BAR_SCREEN_PX:
                     length_meters = larger
                     screen_px = larger_px
-        self.scale_bar.set_scale(screen_px, _format_scale_length_label(length_meters))
+        self.scale_bar.set_scale(
+            screen_px,
+            _format_scale_length_label(length_meters),
+        )
 
     def _default_frame_index(self, value: Any, path: Path, requested_index: int) -> int:
         if not self._show_tilt_controls or not isinstance(value, TiltSeries) or path.suffix.lower() != ".mrc":
@@ -2609,21 +4697,21 @@ def _chips_for_item(value: Any) -> list[str]:
     if isinstance(value, Atlas):
         chips: list[str] = []
         if value.tile_paths:
-            chips.append(f"{len(value.tile_paths)} tiles")
+            chips.append(count_phrase(len(value.tile_paths), "tile"))
         if value.mrc_metadata and value.mrc_metadata.nx and value.mrc_metadata.ny:
             chips.append(f"{value.mrc_metadata.nx} × {value.mrc_metadata.ny}")
         return chips
     if isinstance(value, Overview):
         chips = []
         if value.linked_search_map_ids:
-            chips.append(f"{len(value.linked_search_map_ids)} search maps")
+            chips.append(count_phrase(len(value.linked_search_map_ids), "search map"))
         return chips
     if isinstance(value, SearchMap):
         chips = []
         if value.tile_paths:
-            chips.append(f"{len({path.stem for path in value.tile_paths})} tiles")
+            chips.append(count_phrase(len({path.stem for path in value.tile_paths}), "tile"))
         if value.linked_batch_position_ids:
-            chips.append(f"{len(value.linked_batch_position_ids)} batch positions")
+            chips.append(count_phrase(len(value.linked_batch_position_ids), "batch position"))
         return chips
     if isinstance(value, SearchTile):
         chips = []
@@ -2644,27 +4732,27 @@ def _chips_for_item(value: Any) -> list[str]:
     if isinstance(value, TiltSeries):
         chips = []
         if value.tilt_count:
-            chips.append(f"{value.tilt_count} frames")
+            chips.append(count_phrase(value.tilt_count, "frame"))
         step = _tilt_step_chip(value)
         if step:
             chips.append(step)
         if value.tilt_range:
-            chips.append(_range_chip(value.tilt_range, "°"))
+            chips.append(_range_chip(value.tilt_range, DEGREE))
         duration = _tilt_duration_chip(value)
         if duration:
             chips.append(duration)
         if value.pixel_size:
-            chips.append(f"{value.pixel_size:g} A/px")
+            chips.append(f"{value.pixel_size:g} {ANGSTROM_PER_PIXEL}")
         return chips
     return []
 
 
 def _summary_for_item(value: Any) -> str:
     if isinstance(value, Overview):
-        return f"{len(value.linked_search_map_ids)} linked search maps"
+        return count_phrase(len(value.linked_search_map_ids), "linked search map")
     if isinstance(value, SearchMap):
         tile_count = len({path.stem for path in value.tile_paths})
-        return f"{tile_count} tiles · {len(value.linked_batch_position_ids)} batch positions"
+        return f"{count_phrase(tile_count, 'tile')} · {count_phrase(len(value.linked_batch_position_ids), 'batch position')}"
     if isinstance(value, SearchTile):
         parts = []
         if value.search_map_name:
@@ -2672,16 +4760,17 @@ def _summary_for_item(value: Any) -> str:
         if value.batch_position_name:
             parts.append(value.batch_position_name)
         if value.linked_tilt_series_ids:
-            parts.append(f"{len(value.linked_tilt_series_ids)} tilt series")
+            parts.append(count_phrase(len(value.linked_tilt_series_ids), "tilt series", "tilt series"))
         return " · ".join(parts)
     if isinstance(value, BatchPosition):
         status = value.status or "unknown"
-        return f"{status} · {len(value.linked_tilt_series_ids)} linked tilt series"
+        return f"{status} · {count_phrase(len(value.linked_tilt_series_ids), 'linked tilt series', 'linked tilt series')}"
     if isinstance(value, TiltSeries):
         tilt_count = value.tilt_count or len(value.sections)
-        return f"{tilt_count or 'unknown'} frames · {_range_chip(value.tilt_range, '°') if value.tilt_range else 'range unknown'}"
+        frames = count_phrase(tilt_count, "frame") if tilt_count else "unknown frames"
+        return f"{frames} · {_range_chip(value.tilt_range, DEGREE) if value.tilt_range else 'range unknown'}"
     if isinstance(value, Atlas):
-        return f"{len(value.tile_paths)} tiles"
+        return count_phrase(len(value.tile_paths), "tile")
     return ""
 
 
@@ -2723,7 +4812,7 @@ def _tilt_step_chip(value: TiltSeries) -> str | None:
     step = abs((high - low) / (count - 1))
     if step <= 0:
         return None
-    return f"{step:g}° step"
+    return f"{step:g}{DEGREE} step"
 
 
 def _tilt_duration_chip(value: TiltSeries) -> str | None:

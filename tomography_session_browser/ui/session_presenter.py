@@ -25,6 +25,14 @@ from tomography_session_browser.domain.models import (
     TiltSeries,
 )
 from tomography_session_browser.domain.enums import SessionKind
+from tomography_session_browser.domain.display_names import count_phrase
+from tomography_session_browser.domain.units import (
+    ANGSTROM,
+    ANGSTROM_PER_PIXEL,
+    DEGREE,
+    MICROMETRE,
+    NANOMETRE_PER_PIXEL,
+)
 from tomography_session_browser.parsers.path_utils import natural_key
 from tomography_session_browser.parsers.xml_parser import find_first
 from tomography_session_browser.services.batch_inference import (
@@ -716,7 +724,8 @@ def _search_map_description(search_map: SearchMap) -> str:
     summary_rows = [
         f"Pixel size: {_xml_pixel_size(metadata)}",
         f"Magnification: {_metadata_value(metadata, 'NominalMagnification')}",
-        f"Tiles: {len(search_map.tile_paths)}",
+        f"Tiles: {len({path.stem for path in search_map.tile_paths})}",
+        f"Tile image files: {len(search_map.tile_paths)}",
         f"Tile metadata files: {len(search_map.tile_metadata_paths)}",
         f"Linked batch positions: {len(search_map.linked_batch_position_ids)}",
         f"Linked tilt series: {len(search_map.linked_tilt_series_ids)}",
@@ -751,7 +760,7 @@ def _search_tile_description(search_tile: SearchTile) -> str:
             f"Search map: {search_tile.search_map_name or 'unknown'}",
             f"Batch position: {search_tile.batch_position_name or 'unknown'}",
             f"Tile index: {search_tile.tile_index if search_tile.tile_index is not None else 'unknown'}",
-            f"Acquisition time: {search_tile.acquisition_time or 'unknown'}",
+            f"Acquisition time: {_format_timestamp(search_tile.acquisition_time)}",
             f"Link method: {search_tile.link_method or 'unresolved'}",
             f"Linked tilt series: {len(search_tile.linked_tilt_series_ids)}",
         ],
@@ -839,8 +848,8 @@ def _tilt_series_description(
         blocks,
         "Summary",
         [
-            f"Tilt count: {tilt_series.tilt_count or 'unknown'}",
-            f"Tilt range: {_range_text(tilt_series.tilt_range, 'deg')}",
+            f"Tilt images: {tilt_series.tilt_count or 'unknown'}",
+            f"Tilt range: {_angle_range_text(tilt_series.tilt_range)}",
             f"Tilt increment: {_tilt_increment_text(tilt_series)}",
             f"Pixel size: {_tilt_pixel_size_text(tilt_series)}",
             f"Binning: {_binning_text(tilt_series.binning)}",
@@ -932,18 +941,22 @@ def _tilt_series_quality_lines(
     validation = validation or _standalone_tilt_validation(tilt)
     expected = validation.expected_count if validation is not None else None
     actual = validation.actual_count if validation is not None else actual_tilt_count(tilt)
+    # The Summary and Validation sections already state the image count and
+    # the expected count. This block is about the judgement drawn from them,
+    # so it leads with that rather than printing the same ratio a third time
+    # under a third noun.
     if expected:
         if actual + 1 < expected:
-            lines.append(f"Sections: {actual} of {expected} expected (partial)")
+            lines.append(f"Coverage: partial — {actual} of {expected} expected")
         elif actual >= expected:
-            lines.append(f"Sections: {actual} (complete)")
+            lines.append(f"Coverage: complete — {actual} of {expected} expected")
         else:
-            lines.append(f"Sections: {actual} of {expected} expected")
+            lines.append(f"Coverage: near-complete — {actual} of {expected} expected")
     elif actual:
-        lines.append(f"Sections: {actual}")
+        lines.append(f"Coverage: {count_phrase(actual, 'tilt image')}, expected count unknown")
 
     if not actual:
-        lines.append("Mdoc has no sections.")
+        lines.append("The MDOC file records no tilt images.")
         return lines
 
     # Defocus stats
@@ -956,7 +969,7 @@ def _tilt_series_quality_lines(
         lo = min(defocus_values)
         hi = max(defocus_values)
         spread = hi - lo
-        line = f"Defocus: median {med:+.2f} um (range {lo:+.2f} → {hi:+.2f}, spread {spread:.2f})"
+        line = f"Defocus: median {med:+.2f} {MICROMETRE} (range {lo:+.2f} → {hi:+.2f}, spread {spread:.2f})"
         if abs(spread) > 1.5 and len(defocus_values) >= 5:
             line += "  ⚠ wide drift"
         lines.append(line)
@@ -1043,7 +1056,7 @@ def _search_map_group_description(label: str, values: list[Any]) -> str:
     tilt_count = sum(len(search_map.linked_tilt_series_ids) for search_map in search_maps)
     return "\n".join(
         [
-            f"{label}: {len(search_maps)} search maps",
+            f"{label}: {count_phrase(len(search_maps), 'search map')}",
             f"Pixel size: {_common_xml_pixel_size(metadata_values)}",
             f"Magnification: {_common_metadata_value(metadata_values, 'NominalMagnification')}",
             f"Linked batch positions: {batch_count}",
@@ -1074,7 +1087,7 @@ def _atlas_group_description(label: str, values: list[Any]) -> str:
     metadata_values = [_first_metadata(atlas.metadata) for atlas in atlases]
     return "\n".join(
         [
-            f"{label}: {len(atlases)} atlases",
+            f"{label}: {count_phrase(len(atlases), 'atlas', 'atlases')}",
             f"Pixel size: {_common_xml_pixel_size(metadata_values)}",
             f"Magnification: {_common_metadata_value(metadata_values, 'NominalMagnification')}",
             f"Tiles: {sum(len(atlas.tile_paths) for atlas in atlases)}",
@@ -1094,7 +1107,7 @@ def _tilt_series_group_description(label: str, values: list[Any]) -> str:
     total_duration = (max(all_dates) - min(all_dates)).total_seconds() if len(all_dates) >= 2 else None
     return "\n".join(
         [
-            f"{label}: {len(tilt_series)} tilt series",
+            f"{label}: {count_phrase(len(tilt_series), 'tilt series', 'tilt series')}",
             f"Successful tilt series: {len(successful)}",
             f"Magnification: {_common_section_value(tilt_series, 'Magnification')}",
             f"Tilt range: {_combined_tilt_range_text(tilt_series)}",
@@ -1131,12 +1144,12 @@ def _mrc_metadata_lines(metadata: MrcMetadata | None) -> list[str]:
     if metadata is None:
         return []
     rows = [
-        f"Dimensions: {_display_value(metadata.nx)} x {_display_value(metadata.ny)} x {_display_value(metadata.nz)}",
+        f"Dimensions: {_dimensions_text(metadata)}",
         f"Frames: {_display_value(metadata.nz)}",
-        f"Mode/dtype: {_display_value(metadata.mode)}",
+        f"Data type: {_mrc_mode_text(metadata.mode)}",
         f"Voxel size: {_voxel_size_text(metadata.voxel_size)}",
         f"Extended header: {metadata.extended_header_type or 'none'}",
-        f"Parsed frame metadata: {len(metadata.frame_metadata)}",
+        f"Frames with parsed metadata: {len(metadata.frame_metadata)}",
         f"Tilt angles: {len(metadata.tilt_angles)} ({metadata.tilt_angle_source or 'unavailable'})",
     ]
     if metadata.warnings:
@@ -1158,9 +1171,45 @@ def _mrc_metadata_summary(metadata: MrcMetadata | None) -> str:
     return "\n".join(lines)
 
 
+#: MRC header mode codes. The raw integer alone ("Mode/dtype: 6") told the
+#: reader nothing; the name is what identifies the sample format.
+_MRC_MODE_LABELS = {
+    0: "int8",
+    1: "int16",
+    2: "float32",
+    3: "complex int16",
+    4: "complex float32",
+    6: "uint16",
+    12: "float16",
+}
+
+
+def _mrc_mode_text(mode: int | None) -> str:
+    if mode is None:
+        return "unknown"
+    label = _MRC_MODE_LABELS.get(mode)
+    return f"{mode} ({label})" if label else f"{mode} (unrecognised)"
+
+
+def _dimensions_text(metadata: MrcMetadata) -> str:
+    """Format the MRC extents with a real multiplication sign and a unit."""
+
+    parts = [_display_value(metadata.nx), _display_value(metadata.ny), _display_value(metadata.nz)]
+    return f"{' × '.join(parts)} px"
+
+
 def _voxel_size_text(value: tuple[float | None, float | None, float | None]) -> str:
+    """Format the voxel extents, which MRC records in ångström.
+
+    The unit was previously omitted entirely, so the panel showed the same
+    physical quantity twice in different units with only one of them labelled
+    (``Pixel size: 466.07 nm`` beside ``Voxel size: 4660.71 x ...``).
+    """
+
+    if all(item is None for item in value):
+        return "unknown"
     parts = ["unknown" if item is None else f"{item:g}" for item in value]
-    return " x ".join(parts)
+    return f"{' × '.join(parts)} {ANGSTROM}"
 
 
 def _prefix_warnings(prefix: str, warnings: Iterable[str]) -> list[str]:
@@ -1238,10 +1287,10 @@ def _nested_numeric(value: Any, key: str) -> float | None:
 def _format_length_from_meters(value: float) -> str:
     angstrom = value * 1e10
     if angstrom < 100:
-        return f"{angstrom:.2f} A"
+        return f"{angstrom:.2f} {ANGSTROM_PER_PIXEL}"
     nm = value * 1e9
     if nm < 1000:
-        return f"{nm:.2f} nm"
+        return f"{nm:.2f} {NANOMETRE_PER_PIXEL}"
     return f"{value:.3g} m"
 
 
@@ -1329,16 +1378,33 @@ def _range_text(value: tuple[float, float] | None, unit: str | None = None) -> s
     return f"{value[0]:g} to {value[1]:g}{suffix}"
 
 
+def _angle_range_text(value: tuple[float, float] | None) -> str:
+    """Format a tilt range the way the validation section already does.
+
+    The degree sign attaches to both endpoints (``-60° to 60°``) rather than
+    trailing the pair, so the Summary and Validation blocks of the same
+    context panel read identically.
+    """
+
+    if value is None:
+        return "unknown"
+    return f"{value[0]:g}{DEGREE} to {value[1]:g}{DEGREE}"
+
+
 def _binning_text(value: int | None) -> str:
-    return f"{value}x" if value is not None else "unknown"
+    return f"{value}×" if value is not None else "unknown"
 
 
 def _tilt_pixel_size_text(tilt_series: TiltSeries) -> str:
     if tilt_series.pixel_size is None:
         return "unknown"
     if tilt_series.original_pixel_size and tilt_series.binning and tilt_series.binning > 1:
-        return f"{tilt_series.pixel_size:g} A (original {tilt_series.original_pixel_size:g} A, binning {tilt_series.binning}x)"
-    return f"{tilt_series.pixel_size:g} A"
+        return (
+            f"{tilt_series.pixel_size:g} {ANGSTROM_PER_PIXEL} "
+            f"(original {tilt_series.original_pixel_size:g} {ANGSTROM_PER_PIXEL}, "
+            f"binning {tilt_series.binning}×)"
+        )
+    return f"{tilt_series.pixel_size:g} {ANGSTROM_PER_PIXEL}"
 
 
 def _section_value_text(tilt_series: TiltSeries, key: str, unit: str | None = None) -> str:
@@ -1365,14 +1431,16 @@ def _tilt_increment_text(tilt_series: TiltSeries) -> str:
     increments = [round(abs(next_angle - angle), 2) for angle, next_angle in zip(angles, angles[1:]) if next_angle != angle]
     if not increments:
         return "unknown"
-    return f"{median(increments):g} deg"
+    return f"{median(increments):g}{DEGREE}"
 
 
 def _combined_tilt_range_text(tilt_series: list[TiltSeries]) -> str:
     ranges = [tilt.tilt_range for tilt in tilt_series if tilt.tilt_range is not None]
     if not ranges:
         return "unknown"
-    return f"{min(item[0] for item in ranges):g} to {max(item[1] for item in ranges):g} deg"
+    return _angle_range_text(
+        (min(item[0] for item in ranges), max(item[1] for item in ranges))
+    )
 
 
 def _common_tilt_increment(tilt_series: list[TiltSeries]) -> str:
@@ -1428,8 +1496,44 @@ def _leading_number(value: str) -> float | None:
         return None
 
 
+_DISPLAY_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+_FRACTIONAL_SECONDS_RE = re.compile(r"\.(\d{7,})")
+
+
 def _parse_datetime(value: str | None) -> datetime | None:
     return parse_datetime(value)
+
+
+def _format_timestamp(value: Any) -> str:
+    """Render a parsed or raw acquisition timestamp consistently.
+
+    Tomography 5 writes full-precision ISO strings such as
+    ``2026-03-19T13:52:11.3176724+11:00``. Shown verbatim they were the only
+    place in the app using ``T`` separators, seven fractional digits, and a
+    timezone offset that the panel then truncated mid-value. Anything that
+    will not parse is passed through unchanged rather than hidden.
+    """
+
+    if value is None or value == "":
+        return "unknown"
+    if isinstance(value, datetime):
+        return value.strftime(_DISPLAY_TIMESTAMP_FORMAT)
+
+    text = str(value).strip()
+    # Deliberately *not* ``parse_datetime``: that normalises to UTC for
+    # sorting, which would display a 13:52 local acquisition as 02:52. The
+    # wall-clock time the microscope recorded is what the reviewer wants.
+    candidate = text.replace("T", " ", 1)
+    match = _FRACTIONAL_SECONDS_RE.search(candidate)
+    if match is not None:
+        # ``fromisoformat`` accepts 3 or 6 fractional digits; Tomography 5
+        # writes 7.
+        candidate = candidate[: match.start(1) + 6] + candidate[match.end(1) :]
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return text
+    return parsed.strftime(_DISPLAY_TIMESTAMP_FORMAT)
 
 
 def _series_duration_seconds(tilt_series: TiltSeries) -> float | None:
@@ -1644,6 +1748,22 @@ class SearchMapOverviewRowModel:
         )
 
     @property
+    def is_affected(self) -> bool:
+        """True when this search map has something a reviewer should act on."""
+
+        if not self.acquisition_associated:
+            return False
+        if self.status in {TILE_STATUS_FAILED, TILE_STATUS_WARNING, TILE_STATUS_MISSING}:
+            return True
+        return bool(
+            self.failed_tilt_series
+            or self.incomplete_tilt_series
+            or self.unknown_tilt_series
+            or self.missing
+            or self.acquired_batch_positions < self.batch_positions
+        )
+
+    @property
     def summary(self) -> str:
         if not self.acquisition_associated:
             return "N/A"
@@ -1665,7 +1785,21 @@ class SearchMapOverviewModel:
 
     @property
     def worst(self) -> list[SearchMapOverviewRowModel]:
-        return sorted(self.rows, key=lambda row: row.score, reverse=True)[:5]
+        """The rows that actually warrant attention, worst first.
+
+        This used to return the top five by score regardless of whether
+        anything was wrong, so a healthy session filled a section headed
+        "MOST AFFECTED" with green, fully-complete maps. Only rows that are
+        genuinely affected qualify; when none are, the section is empty and
+        the card says so.
+        """
+
+        affected = [row for row in self.rows if row.is_affected]
+        return sorted(affected, key=lambda row: row.score, reverse=True)[:5]
+
+    @property
+    def has_affected_rows(self) -> bool:
+        return any(row.is_affected for row in self.rows)
 
 
 @dataclass(slots=True)
@@ -1737,6 +1871,11 @@ class BatchPositionProgressModel:
     queued: int
     status: str
     tooltip: str
+    #: True when this row is a display-only group inferred from orphaned
+    #: failed tilt series rather than a parsed ``BatchPosition``. Inferred
+    #: rows are why the card can list more entries than the Batch position
+    #: tab counts, so the dashboard has to say which ones they are.
+    inferred: bool = False
 
     @property
     def total(self) -> int:
@@ -2511,6 +2650,7 @@ def _batch_position_progress_rows(
                     frame_text=frame_text,
                     inferred=True,
                 ),
+                inferred=True,
             )
         )
     rows.sort(key=lambda row: _natural_label_key(row.label))

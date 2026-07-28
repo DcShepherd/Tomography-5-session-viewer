@@ -1,9 +1,32 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import os
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer
 from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QLayout, QWidget
+
+
+def animations_enabled(widget: QWidget | None = None) -> bool:
+    """Return whether optional interface motion is enabled.
+
+    Hosts can provide a reduced-motion preference through the application
+    property ``tomo_reduce_motion`` or the ``TOMOAPP_REDUCE_MOTION``
+    environment variable. Essential state changes still happen immediately.
+    """
+
+    app = QApplication.instance()
+    if app is None:
+        return False
+    reduced = app.property("tomo_reduce_motion")
+    if reduced is not None and bool(reduced):
+        return False
+    env_value = os.environ.get("TOMOAPP_REDUCE_MOTION", "").strip().lower()
+    if env_value in {"1", "true", "yes", "on"}:
+        return False
+    if widget is not None and widget.property("_tomo_disable_animations"):
+        return False
+    return True
 
 
 def fade_in(
@@ -108,10 +131,7 @@ def fade_in_layout_children(
 
 
 def _can_animate(widget: QWidget, *, allow_hidden: bool = False) -> bool:
-    app = QApplication.instance()
-    if app is None:
-        return False
-    if widget.property("_tomo_disable_animations"):
+    if not animations_enabled(widget):
         return False
     if not allow_hidden and not widget.isVisible():
         return False

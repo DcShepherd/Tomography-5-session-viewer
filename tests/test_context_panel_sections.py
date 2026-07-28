@@ -146,8 +146,9 @@ def test_failed_tilt_quality_uses_validator_expected_count_not_actual_tilt_count
 
     assert "Status: FAILED" in text
     assert "Tilt images: 1 / 35 expected" in text
-    assert "Sections: 1 of 35 expected (partial)" in text
-    assert "Sections: 1 (complete)" not in text
+    # Quality states the judgement, not a third copy of the ratio's noun.
+    assert "Coverage: partial — 1 of 35 expected" in text
+    assert "Coverage: complete" not in text
 
 
 def test_context_panel_uses_same_session_majority_expected_count_as_list_row(
@@ -182,7 +183,7 @@ def test_context_panel_uses_same_session_majority_expected_count_as_list_row(
 
     assert "Tilt images: 1 / 35 expected" in text
     assert "Expected source: inferred session majority" in text
-    assert "Sections: 1 of 35 expected (partial)" in text
+    assert "Coverage: partial — 1 of 35 expected" in text
 
 
 def test_common_numeric_summary_orders_values_by_number() -> None:

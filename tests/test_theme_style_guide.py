@@ -56,6 +56,20 @@ def test_image_overlay_tokens_remain_high_contrast() -> None:
     assert DARK_PALETTE.marker_search == "#22c55e"
     assert LIGHT_PALETTE.marker_exposure == DARK_PALETTE.marker_exposure
     assert LIGHT_PALETTE.marker_search == DARK_PALETTE.marker_search
+    assert DARK_PALETTE.overlay_status_unattributed == "#9ca3af"
+    assert DARK_PALETTE.overlay_marker_halo == "#020617"
+    assert LIGHT_PALETTE.overlay_status_unattributed == DARK_PALETTE.overlay_status_unattributed
+    assert LIGHT_PALETTE.overlay_marker_halo == DARK_PALETTE.overlay_marker_halo
+    assert DARK_PALETTE.atlas_marker_collected == "#48B06C"
+    assert DARK_PALETTE.atlas_marker_partial == "#C78B09"
+    assert DARK_PALETTE.atlas_marker_queued == "#599FD8"
+    assert DARK_PALETTE.atlas_marker_failed == "#FD7468"
+    assert DARK_PALETTE.atlas_marker_unattributed == "#8F9AA4"
+    assert LIGHT_PALETTE.atlas_marker_collected == "#137D41"
+    assert LIGHT_PALETTE.atlas_marker_partial == "#8E5E00"
+    assert LIGHT_PALETTE.atlas_marker_queued == "#036EAE"
+    assert LIGHT_PALETTE.atlas_marker_failed == "#C53732"
+    assert LIGHT_PALETTE.atlas_marker_unattributed == "#606A74"
 
 
 def test_generated_stylesheet_uses_central_type_and_theme_tokens() -> None:
@@ -82,6 +96,19 @@ def test_viewer_floating_controls_keep_transparent_parent_chrome() -> None:
     assert tool_button_blocks
     assert "background:" in tool_button_blocks[0]
     assert "border: 1px solid" in tool_button_blocks[0]
+
+
+def test_checked_viewer_tool_button_uses_solid_theme_contrast() -> None:
+    for palette in (DARK_PALETTE, LIGHT_PALETTE):
+        stylesheet = build_stylesheet(palette)
+        checked_blocks = _style_blocks_for_selector(
+            stylesheet,
+            "QPushButton#viewerToolButton:checked",
+        )
+
+        assert checked_blocks
+        assert f"background: {palette.primary_fill};" in checked_blocks[0]
+        assert f"color: {palette.primary_text};" in checked_blocks[0]
 
 
 def test_session_pill_keeps_capsule_shape() -> None:
@@ -122,6 +149,20 @@ def test_ui_hex_colours_are_centralised_in_theme_tokens() -> None:
         if re.search(r"#[0-9A-Fa-f]{3,8}", text):
             offenders.append(str(path.relative_to(REPO_ROOT)))
     assert offenders == []
+
+
+def test_atlas_overlay_icons_are_present_and_use_current_color() -> None:
+    icon_dir = REPO_ROOT / "tomography_session_browser" / "assets" / "icons"
+    for name in (
+        "cluster-positions.svg",
+        "position-labels.svg",
+        "tile-grid.svg",
+        "exposure-markers.svg",
+    ):
+        text = (icon_dir / name).read_text(encoding="utf-8")
+        assert 'viewBox="0 0 24 24"' in text
+        assert 'stroke="currentColor"' in text
+        assert 'stroke-width="1.8"' in text
 
 
 def _contrast_ratio(foreground: str, background: str) -> float:

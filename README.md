@@ -166,6 +166,32 @@ Use the **Atlas**, **Overview**, **Search map**, **Search**, **Batch position**,
 
 Warnings and failed or incomplete status labels are expected when source data or links are missing. The browser shows unresolved information rather than inventing a scientific relationship.
 
+The Atlas overlay uses zoom-dependent batch-position clustering. At a fitted
+whole-grid view, nearby batches appear as counted status clusters. Zooming in
+dissolves clusters into short numeric batch IDs; search-map footprints and tile
+grids appear only when they are large enough to read. Select a batch marker to
+inspect its status and metadata; double-click it to open an unambiguous linked
+Overview. When a cluster remains coincident at maximum zoom, select an
+individual popup row to open its unambiguous linked Search map. Unresolved or
+ambiguous links remain visible with an explanation. The **Overlays** panel
+controls clustering, labels, tile grids, marker-legend visibility, and the
+default-off per-exposure detail layer. When the linked project node is
+selected, its collapsed **Data collections** section controls batch-position
+visibility for each collection session independently. Selecting a specific
+data-collection node instead scopes Atlas batch markers to that session
+automatically. The scale bar uses readable snapped physical distances while
+retaining the compact overlay style.
+
+In Overview and Search-map images, middle-click or Shift-click an exposure area
+to highlight every exposure area linked to the same batch position. Left-click
+an empty part of the image, right-click the image, or press Escape to clear
+marker selections and linked-exposure highlights.
+
+Use the export button above the zoom strip, or press **Ctrl+S**, to preview and
+save a high-resolution PNG of the current image crop and zoom. Visible markers,
+highlights, the scale bar, and the optional Atlas marker legend are rendered
+into the PNG; viewer controls and the pixel-size badge are not included.
+
 ### 4. Generate a scoped PDF report
 
 Select **Report**, choose the linked group, session, or individual data collection samples to include, and then select **Generate report**. Supporting atlas context is included once where required.

@@ -11,7 +11,7 @@ Layout (top to bottom):
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -47,12 +47,33 @@ _STATUS_CHIP_ORDER = (
     TILE_STATUS_MISSING,
     TILE_STATUS_NEUTRAL,
 )
+# U+FE0E (VARIATION SELECTOR-15) forces text presentation. Without it Windows
+# resolves U+26A0 through Segoe UI Emoji, so the warning chip rendered as a
+# full-colour emoji triangle beside monochrome, theme-tinted check and cross
+# glyphs — and ignored the status colour applied to it.
+_TEXT_PRESENTATION = "︎"
 _STATUS_GLYPHS = {
     TILE_STATUS_COMPLETE: "✓",
-    TILE_STATUS_WARNING: "⚠",
+    TILE_STATUS_WARNING: f"⚠{_TEXT_PRESENTATION}",
     TILE_STATUS_FAILED: "✕",
     TILE_STATUS_MISSING: "✕",
     TILE_STATUS_NEUTRAL: "•",
+}
+#: What each count card actually measures. The Search maps card and the
+#: "Search maps overview" panel lower down the dashboard classify the same
+#: maps by different questions — one asks whether the map's own tiles were
+#: acquired, the other whether its batch positions produced tilt series — so
+#: both have to say which question they answered.
+_CARD_HELP = {
+    "Atlases": "Atlas images available in this scope.",
+    "Overviews": "Overview images available in this scope.",
+    "Search maps": (
+        "Search maps in this scope, classified by whether the map's own tiles were acquired.\n"
+        "The Search maps overview panel lower down classifies the same maps by whether their "
+        "batch positions produced tilt series, so the two breakdowns differ by design."
+    ),
+    "Batch positions": "Acquisition targets parsed from BatchPositionsList.xml.",
+    "Tilt series": "Acquired MRC stacks, classified by tilt-series validation.",
 }
 _STATUS_LABELS = {
     TILE_STATUS_COMPLETE: "complete",
@@ -92,10 +113,15 @@ class StatCard(QFrame):
         self._accent = accent or current_palette().accent
         self.setObjectName("dashboardCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(f"Open {model.label}")
+        self.setAccessibleDescription(
+            f"{model.value} {model.label.lower()} in this scope. Press Enter or Space to open the list."
+        )
         # Stable footprint: we deliberately do NOT grow taller for cards with
         # many items — the tile grid manages its own internal sizing and
         # falls back to grouped chips when needed.
-        self.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Preferred)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setMinimumHeight(134)
 
         layout = QVBoxLayout(self)
@@ -105,6 +131,10 @@ class StatCard(QFrame):
         title = QLabel(model.label.upper())
         title.setObjectName("cardTitle")
         title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        help_text = _CARD_HELP.get(model.label)
+        if help_text:
+            title.setToolTip(help_text)
+            self.setToolTip(help_text)
         layout.addWidget(title)
 
         value_label = QLabel(str(model.value))
@@ -192,3 +222,10 @@ class StatCard(QFrame):
             # grid; the grid emits its own ``tile_clicked`` for in-grid hits.
             self.clicked.emit(self._destination)
         super().mousePressEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 — Qt signature
+        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space}:
+            self.clicked.emit(self._destination)
+            event.accept()
+            return
+        super().keyPressEvent(event)

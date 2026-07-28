@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QFrame,
@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QToolButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -71,7 +72,12 @@ _LABEL_ALIASES = {
     "Linked tilt series": "Linked tilt series",
 }
 _KEY_COLUMN_MIN_WIDTH = 78
-_KEY_COLUMN_MAX_WIDTH = 112
+# Widened from 112. At the old cap roughly a third of rows wrapped onto two
+# lines ("Acquisition spot size:", "Linked data collections:", "Expected
+# source:") while the value column beside them sat half empty. 152px clears
+# every alias in ``_LABEL_ALIASES`` at 9pt on one line and still leaves the
+# panel's default ~340px width usable for values.
+_KEY_COLUMN_MAX_WIDTH = 152
 _PROVENANCE_TOOLTIP_KEYS = {
     "Detector",
     "Search spot size",
@@ -142,8 +148,10 @@ class _PathRow(QWidget):
         copy_button.setIcon(themed_icon("copy", size=14))
         copy_button.setIconSize(QSize(14, 14))
         copy_button.setToolTip("Copy full path")
+        copy_button.setAccessibleName(f"Copy {key.lower()}")
         copy_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        copy_button.setFixedSize(22, 22)
+        copy_button.setFixedSize(28, 28)
+        self._copy_button = copy_button
         copy_button.clicked.connect(self._copy_to_clipboard)
         layout.addWidget(copy_button, alignment=Qt.AlignmentFlag.AlignTop)
 
@@ -155,6 +163,17 @@ class _PathRow(QWidget):
         clipboard = QGuiApplication.clipboard()
         if clipboard is not None:
             clipboard.setText(self._value.text_full())
+            original_tooltip = self._copy_button.toolTip()
+            self._copy_button.setToolTip("Copied")
+            QToolTip.showText(
+                self._copy_button.mapToGlobal(self._copy_button.rect().bottomLeft()),
+                "Copied",
+                self._copy_button,
+            )
+            QTimer.singleShot(
+                1200,
+                lambda button=self._copy_button, tooltip=original_tooltip: button.setToolTip(tooltip),
+            )
 
 
 class _KeyValueRow(QWidget):
@@ -170,7 +189,7 @@ class _KeyValueRow(QWidget):
         self._value_label = QLabel(value)
         self._value_label.setObjectName("metaValue")
         self._value_label.setWordWrap(True)
-        self._value_label.setToolTip(tooltip or value)
+        self._value_label.setToolTip(tooltip or "")
         self._value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._value_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         layout.addWidget(self._value_label, stretch=1)
@@ -178,7 +197,7 @@ class _KeyValueRow(QWidget):
     def set_value(self, value: str, tooltip: str | None = None) -> None:
         if self._value_label.text() != value:
             self._value_label.setText(value)
-        next_tooltip = tooltip or value
+        next_tooltip = tooltip or ""
         if self._value_label.toolTip() != next_tooltip:
             self._value_label.setToolTip(next_tooltip)
         row_tooltip = tooltip or ""

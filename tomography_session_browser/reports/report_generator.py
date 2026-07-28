@@ -50,6 +50,7 @@ from reportlab.platypus import (
 
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
+from tomography_session_browser.domain.units import ANGSTROM_PER_PIXEL, DEGREE
 from tomography_session_browser.domain.models import (
     Atlas,
     BatchPosition,
@@ -68,6 +69,7 @@ from tomography_session_browser.reports.warning_summary import (
 )
 from tomography_session_browser.services.marker_service import (
     MarkerContext,
+    atlas_lod_markers,
     image_size_for_markers,
     markers_for_object,
     project_marker_to_size,
@@ -551,7 +553,7 @@ def _outcomes_block(totals: _Totals) -> Table:
         graphics.StatusSegment("Complete", totals.complete, "complete"),
         graphics.StatusSegment("Incomplete", totals.incomplete, "incomplete"),
         graphics.StatusSegment("Failed", totals.failed, "failed"),
-        graphics.StatusSegment("Unknown", totals.unknown, "unknown"),
+        graphics.StatusSegment("Unavailable", totals.unknown, "unknown"),
     ]
     donut = graphics.DonutChart(
         segments,
@@ -705,7 +707,7 @@ def _session_overview_block(
             graphics.StatusSegment("Complete", outcomes.complete, "complete"),
             graphics.StatusSegment("Incomplete", outcomes.incomplete, "incomplete"),
             graphics.StatusSegment("Failed", outcomes.failed, "failed"),
-            graphics.StatusSegment("Unknown", outcomes.unknown, "unknown"),
+            graphics.StatusSegment("Unavailable", outcomes.unknown, "unknown"),
         ]
         flowables.append(Spacer(1, 4))
         flowables.append(
@@ -717,7 +719,7 @@ def _session_overview_block(
                 f"<font color=\"#065f46\">●</font> {outcomes.complete} complete &nbsp;&nbsp; "
                 f"<font color=\"#92400e\">●</font> {outcomes.incomplete} incomplete &nbsp;&nbsp; "
                 f"<font color=\"#991b1b\">●</font> {outcomes.failed} failed &nbsp;&nbsp; "
-                f"<font color=\"#1f2937\">●</font> {outcomes.unknown} unknown",
+                f"<font color=\"#1f2937\">●</font> {outcomes.unknown} unavailable",
                 styles.SMALL_STYLE,
             )
         )
@@ -901,6 +903,7 @@ def _data_collection_section(
             scope_overviews=sample.overviews,
             scope_search_maps=sample.search_maps,
             scope_batch_positions=sample.batch_positions,
+            scope_tilt_series=sample.tilt_series,
             failed_tilt_ids=failed_tilt_ids,
         )
         if atlas_block:
@@ -955,6 +958,21 @@ def _data_collection_section(
 # ----------------------------------------------------------------- A. summary
 
 
+def _tilt_outcome_sub_label(summary: Mapping[str, int]) -> str:
+    """Compact, glyph-safe outcome copy that fits the count card."""
+
+    parts = [f"{summary.get(STATUS_COMPLETE, 0)} complete"]
+    for status, label in (
+        (STATUS_INCOMPLETE, "incomplete"),
+        (STATUS_FAILED, "failed"),
+        (STATUS_UNKNOWN, "unavailable"),
+    ):
+        count = summary.get(status, 0)
+        if count:
+            parts.append(f"{count} {label}")
+    return ", ".join(parts)
+
+
 def _sample_graphical_summary(sample: Sample, ctx: _SessionContext) -> list:
     width = PORTRAIT_USABLE_W
 
@@ -983,12 +1001,7 @@ def _sample_graphical_summary(sample: Sample, ctx: _SessionContext) -> list:
             graphics.CountCardData(
                 label="Tilt series",
                 value=len(sample.tilt_series),
-                sub_label=(
-                    f"{summary.get(STATUS_COMPLETE, 0)} ✓ / "
-                    f"{summary.get(STATUS_INCOMPLETE, 0)} ◐ / "
-                    f"{summary.get(STATUS_FAILED, 0)} ✕ / "
-                    f"{summary.get(STATUS_UNKNOWN, 0)} ?"
-                ),
+                sub_label=_tilt_outcome_sub_label(summary),
                 accent="complete" if summary.get(STATUS_FAILED, 0) == 0 else "incomplete",
             ),
             width=width / 4,
@@ -1007,7 +1020,7 @@ def _sample_graphical_summary(sample: Sample, ctx: _SessionContext) -> list:
             graphics.StatusSegment("Complete", summary.get(STATUS_COMPLETE, 0), "complete"),
             graphics.StatusSegment("Incomplete", summary.get(STATUS_INCOMPLETE, 0), "incomplete"),
             graphics.StatusSegment("Failed", summary.get(STATUS_FAILED, 0), "failed"),
-            graphics.StatusSegment("Unknown", summary.get(STATUS_UNKNOWN, 0), "unknown"),
+            graphics.StatusSegment("Unavailable", summary.get(STATUS_UNKNOWN, 0), "unknown"),
         ]
         donut_diameter = 1.4 * inch
         gap = 0.35 * inch  # breathing room between chart and legend
@@ -1159,6 +1172,7 @@ def _atlas_image_block(
     scope_overviews: Sequence[Overview] = (),
     scope_search_maps: Sequence[SearchMap] = (),
     scope_batch_positions: Sequence[BatchPosition] = (),
+    scope_tilt_series: Sequence[TiltSeries] = (),
     failed_tilt_ids: frozenset[str] = frozenset(),
 ) -> list:
     """Embed the atlas image with overlays scoped to one sample."""
@@ -1184,9 +1198,14 @@ def _atlas_image_block(
             overviews=tuple(scope_overviews),
             search_maps=tuple(scope_search_maps),
             batch_positions=tuple(scope_batch_positions),
+            tilt_series=tuple(scope_tilt_series),
             failed_tilt_ids=failed_tilt_ids,
         )
-        raw_markers: list[ImageMarker] = markers_for_object(atlas, context=ctx_markers)
+        raw_markers = atlas_lod_markers(
+            atlas,
+            ctx_markers,
+            include_detail_markers=False,
+        )
     except Exception as exc:  # pragma: no cover — defensive
         LOGGER.debug("Atlas marker computation failed: %s", exc)
         raw_markers = []
@@ -1209,7 +1228,12 @@ def _atlas_image_block(
         f"{len(scope_search_maps)} search map marker(s), "
         f"{len(scope_batch_positions)} batch position marker(s)."
     )
-    return [graphics.keep_with_caption([overlayed], caption)]
+    return [
+        graphics.keep_with_caption(
+            [overlayed, Spacer(1, 6), graphics.AtlasMarkerPrintLegend()],
+            caption,
+        )
+    ]
 
 
 def _fallback_session_atlas(ctx: _SessionContext, sample: Sample) -> Atlas | None:
@@ -1653,13 +1677,18 @@ def _acquisition_settings_table(
     )
 
     rows: list[tuple[str, str]] = [
-        ("Pixel size", _format_pixel_size(pixel_sizes, "Å/pixel")),
-        ("Original pixel", _format_pixel_size(original, "Å/pixel") if original else "n/a"),
-        ("Binning", _format_set(binnings, suffix="x")),
+        ("Pixel size", _format_pixel_size(pixel_sizes, ANGSTROM_PER_PIXEL)),
+        ("Original pixel", _format_pixel_size(original, ANGSTROM_PER_PIXEL) if original else "n/a"),
+        ("Binning", _format_set(binnings, suffix="×")),
         ("Magnification", _format_set([f"{v:g}" for v in magnifications])),
         ("Target defocus", format_target_defocus_values(target_def)),
-        ("Tilt range", f"{tilt_lo:g} to {tilt_hi:g}°" if tilt_lo is not None and tilt_hi is not None else "n/a"),
-        ("Tilt increment", _format_set([f"{v:g}°" for v in increments])),
+        (
+            "Tilt range",
+            f"{tilt_lo:g}{DEGREE} to {tilt_hi:g}{DEGREE}"
+            if tilt_lo is not None and tilt_hi is not None
+            else "n/a",
+        ),
+        ("Tilt increment", _format_set([f"{v:g}{DEGREE}" for v in increments])),
         ("Expected images", _format_count_set(expected)),
         ("Observed images", _format_count_set(observed)),
         ("Exposure time", _format_set([f"{v:g} s" for v in exposures])),
@@ -1762,12 +1791,18 @@ def _tilt_series_table(
 
         tilt_range_text = "n/a"
         if validation and validation.min_tilt is not None and validation.max_tilt is not None:
-            tilt_range_text = f"{validation.min_tilt:g} to {validation.max_tilt:g}"
+            tilt_range_text = (
+                f"{validation.min_tilt:g}{DEGREE} to "
+                f"{validation.max_tilt:g}{DEGREE}"
+            )
         elif tilt.tilt_range is not None:
-            tilt_range_text = f"{tilt.tilt_range[0]:g} to {tilt.tilt_range[1]:g}"
+            tilt_range_text = (
+                f"{tilt.tilt_range[0]:g}{DEGREE} to "
+                f"{tilt.tilt_range[1]:g}{DEGREE}"
+            )
 
         pixel = (
-            f"{tilt.pixel_size:g} Å"
+            f"{tilt.pixel_size:g} {ANGSTROM_PER_PIXEL}"
             if tilt.pixel_size is not None
             else "n/a"
         )
@@ -1907,7 +1942,7 @@ def _status_label(status: str) -> str:
         STATUS_COMPLETE: "Complete",
         STATUS_INCOMPLETE: "Partial",
         STATUS_FAILED: "Failed",
-        STATUS_UNKNOWN: "Unknown",
+        STATUS_UNKNOWN: "Unavailable",
     }.get(status, status.title())
 
 

@@ -65,6 +65,186 @@ def test_atlas_links_multiple_collection_sessions_under_one_group() -> None:
     ]
 
 
+def test_atlas_batch_marker_scope_follows_selected_collection_session() -> None:
+    from tomography_session_browser.services.marker_service import MarkerContext
+    from tomography_session_browser.ui.main_window import MainWindow
+
+    QApplication.instance() or QApplication([])
+    atlas_session = _atlas_session("Atlas_A", "C:/project")
+    atlas_id = "Atlas_A/Sample1/Atlas/Atlas.dm"
+    first = _collection_session(
+        "DataCollection_01",
+        "C:/project",
+        atlas_id,
+    )
+    second = _collection_session(
+        "DataCollection_02",
+        "C:/project",
+        atlas_id,
+    )
+    atlas = atlas_session.samples[0].atlas
+    assert atlas is not None
+    first_batch = first.samples[0].batch_positions[0]
+    second_batch = second.samples[0].batch_positions[0]
+    root = build_project_tree_groups(
+        [atlas_session, first, second]
+    )[0]
+    base = MarkerContext(
+        batch_positions=(first_batch, second_batch),
+    )
+    window = MainWindow()
+    window._sessions = [atlas_session, first, second]
+    window._rebuild_sample_index()
+
+    root_context = window._atlas_marker_context_for_collection_scope(
+        atlas,
+        base,
+        root,
+    )
+    first_context = window._atlas_marker_context_for_collection_scope(
+        atlas,
+        base,
+        first,
+    )
+
+    assert root_context.batch_positions == (
+        first_batch,
+        second_batch,
+    )
+    assert first_context.batch_positions == (first_batch,)
+    options = window._atlas_collection_overlay_options(atlas, root)
+    assert [option.label for option in options] == [
+        "DataCollection_01 (1)",
+        "DataCollection_02 (1)",
+    ]
+
+
+def test_linked_root_collection_toggle_does_not_hide_narrow_node_batches() -> None:
+    from tomography_session_browser.services.marker_service import MarkerContext
+    from tomography_session_browser.ui.main_window import MainWindow
+    from tomography_session_browser.ui.project_model import session_key
+
+    QApplication.instance() or QApplication([])
+    atlas_session = _atlas_session("Atlas_A", "C:/project")
+    atlas_id = "Atlas_A/Sample1/Atlas/Atlas.dm"
+    first = _collection_session(
+        "DataCollection_01",
+        "C:/project",
+        atlas_id,
+    )
+    second = _collection_session(
+        "DataCollection_02",
+        "C:/project",
+        atlas_id,
+    )
+    atlas = atlas_session.samples[0].atlas
+    assert atlas is not None
+    first_batch = first.samples[0].batch_positions[0]
+    second_batch = second.samples[0].batch_positions[0]
+    root = build_project_tree_groups(
+        [atlas_session, first, second]
+    )[0]
+    base = MarkerContext(
+        batch_positions=(first_batch, second_batch),
+    )
+    window = MainWindow()
+    window._sessions = [atlas_session, first, second]
+    window._rebuild_sample_index()
+    window._atlas_collection_visibility[
+        (
+            window._atlas_collection_scope_key(root),
+            session_key(second),
+        )
+    ] = False
+
+    root_context = window._atlas_marker_context_for_collection_scope(
+        atlas,
+        base,
+        root,
+    )
+    second_context = window._atlas_marker_context_for_collection_scope(
+        atlas,
+        base,
+        second,
+    )
+
+    assert root_context.batch_positions == (first_batch,)
+    assert second_context.batch_positions == (second_batch,)
+
+
+def test_session_level_batch_fallback_is_kept_when_scope_is_unambiguous() -> None:
+    from tomography_session_browser.services.marker_service import MarkerContext
+    from tomography_session_browser.ui.main_window import MainWindow
+
+    QApplication.instance() or QApplication([])
+    atlas_session = _atlas_session("Atlas_A", "C:/project")
+    collection = _collection_session(
+        "DataCollection_01",
+        "C:/project",
+        "Atlas_A/Sample1/Atlas/Atlas.dm",
+    )
+    sample_batch = collection.samples[0].batch_positions.pop()
+    collection.batch_positions = [sample_batch]
+    atlas = atlas_session.samples[0].atlas
+    assert atlas is not None
+    window = MainWindow()
+    window._sessions = [atlas_session, collection]
+    window._rebuild_sample_index()
+
+    scoped = window._atlas_marker_context_for_collection_scope(
+        atlas,
+        MarkerContext(batch_positions=(sample_batch,)),
+        collection,
+    )
+
+    assert scoped.batch_positions == (sample_batch,)
+    assert window._atlas_collection_overlay_options(
+        atlas,
+        collection,
+    )[0].label == "DataCollection_01 (1)"
+
+
+def test_rendered_atlas_marker_provider_uses_tree_collection_scope(
+    monkeypatch,
+) -> None:
+    from tomography_session_browser.ui import main_window
+    from tomography_session_browser.ui.main_window import MainWindow
+
+    QApplication.instance() or QApplication([])
+    atlas_session = _atlas_session("Atlas_A", "C:/project")
+    atlas_id = "Atlas_A/Sample1/Atlas/Atlas.dm"
+    first = _collection_session(
+        "DataCollection_01",
+        "C:/project",
+        atlas_id,
+    )
+    second = _collection_session(
+        "DataCollection_02",
+        "C:/project",
+        atlas_id,
+    )
+    atlas = atlas_session.samples[0].atlas
+    assert atlas is not None
+    captured = []
+    monkeypatch.setattr(
+        main_window,
+        "atlas_lod_markers",
+        lambda _atlas, context: captured.append(context) or [],
+    )
+    window = MainWindow()
+    window._sessions = [atlas_session, first, second]
+    window._active_context = first
+    window._rebuild_sample_index()
+    window._render_viewer_tabs()
+
+    window._viewer_tabs["Atlas"]._markers_for(atlas)
+
+    assert len(captured) == 1
+    assert captured[0].batch_positions == tuple(
+        first.samples[0].batch_positions
+    )
+
+
 def test_unrelated_collection_sessions_remain_separate() -> None:
     first = _collection_session("DataCollection_A", "C:/project")
     second = _collection_session("DataCollection_B", "C:/project")
@@ -333,7 +513,7 @@ def test_linked_root_tab_activation_keeps_aggregate_viewer_lists(monkeypatch, tm
     window._update_tab_counts()
 
     assert "Atlas  2" == window.tabs.tabText(main_window.TAB_LABELS.index("Atlas"))
-    assert "Search map  2" == window.tabs.tabText(main_window.TAB_LABELS.index("Search map"))
+    assert "Search maps  2" == window.tabs.tabText(main_window.TAB_LABELS.index("Search map"))
     assert window._viewer_tabs["Atlas"].list.topLevelItemCount() == 2
     assert window._viewer_tabs["Search map"].list.topLevelItemCount() == 2
     assert window._viewer_tabs["Search"].list.topLevelItemCount() == 2

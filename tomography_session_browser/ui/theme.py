@@ -50,8 +50,18 @@ class ThemePalette:
     accent_strong: str
     accent_soft: str
     accent_line: str
+    # Primary-button fill/label. Kept as their own tokens because the right
+    # combination inverts between palettes: dark mode wants the light accent
+    # under dark text, light mode a dark teal under light text. Reusing
+    # ``accent`` for both left the light theme's button label at 3.3:1.
+    primary_fill: str
+    primary_fill_hover: str
+    primary_text: str
     selection: str
     selection_text: str
+    selection_marker: str
+    control_border: str
+    scroll_thumb: str
     canvas: str
     safe_text_dark: str
     safe_text_light: str
@@ -86,6 +96,16 @@ class ThemePalette:
     overlay_status_warning: str
     overlay_status_pending: str
     overlay_status_complete: str
+    overlay_status_unattributed: str
+    overlay_marker_halo: str
+    atlas_marker_collected: str
+    atlas_marker_partial: str
+    atlas_marker_queued: str
+    atlas_marker_failed: str
+    atlas_marker_unattributed: str
+    atlas_marker_ink: str
+    atlas_marker_selected: str
+    atlas_marker_label_text: str
     icon: str  # default monochrome icon stroke colour
 
 
@@ -104,8 +124,14 @@ DARK_PALETTE: Final[ThemePalette] = ThemePalette(
     accent_strong="#4f9388",
     accent_soft="rgba(111, 179, 168, 0.10)",
     accent_line="rgba(111, 179, 168, 0.28)",
-    selection="#1b2b30",
+    primary_fill="#6fb3a8",
+    primary_fill_hover="#4f9388",
+    primary_text="#0c1116",
+    selection="#223c44",
     selection_text="#f0f3f7",
+    selection_marker="#6fb3a8",
+    control_border="#5c6c7e",
+    scroll_thumb="#657386",
     canvas="#04070b",
     safe_text_dark="#0c1116",
     safe_text_light="#f0f3f7",
@@ -113,7 +139,11 @@ DARK_PALETTE: Final[ThemePalette] = ThemePalette(
     chart_green="#7eb287",
     chart_amber="#d2a865",
     chart_red="#cf7a7a",
-    chart_violet="#8997c2",
+    # Distinct from chart_blue. These two were the same hex, so the fifth and
+    # second series of a plot rendered identically — invisible with four
+    # samples, a silent data error with five. Pushed toward magenta rather
+    # than merely lightened so the separation is one of hue, not brightness.
+    chart_violet="#c58ac0",
     chart_grey="#6f7888",
     surface_hi="#1c2532",
     unknown="#4a525d",
@@ -140,6 +170,16 @@ DARK_PALETTE: Final[ThemePalette] = ThemePalette(
     overlay_status_warning="#d29922",
     overlay_status_pending="#38bdf8",
     overlay_status_complete="#3fb950",
+    overlay_status_unattributed="#9ca3af",
+    overlay_marker_halo="#020617",
+    atlas_marker_collected="#48B06C",
+    atlas_marker_partial="#C78B09",
+    atlas_marker_queued="#599FD8",
+    atlas_marker_failed="#FD7468",
+    atlas_marker_unattributed="#8F9AA4",
+    atlas_marker_ink="#090E12",
+    atlas_marker_selected="#EED059",
+    atlas_marker_label_text="#D6DDE6",
     icon="#d6dde6",
 )
 
@@ -159,17 +199,24 @@ LIGHT_PALETTE: Final[ThemePalette] = ThemePalette(
     accent_strong="#3f7a72",
     accent_soft="rgba(79, 147, 136, 0.12)",
     accent_line="rgba(79, 147, 136, 0.30)",
-    selection="#e6f1ee",
+    primary_fill="#33665f",
+    primary_fill_hover="#295450",
+    primary_text="#f0f3f7",
+    selection="#cee3db",
     selection_text="#0f1620",
+    selection_marker="#3f7a72",
+    control_border="#8793a1",
+    scroll_thumb="#8d98a4",
     canvas="#04070b",
     safe_text_dark="#0c1116",
     safe_text_light="#f0f3f7",
     chart_blue="#6e7da9",
-    chart_green="#5c9466",
-    chart_amber="#b88a3e",
+    chart_green="#4f8a5b",
+    chart_amber="#96702f",
     chart_red="#b85d5d",
-    chart_violet="#6e7da9",
-    chart_grey="#a8aeb6",
+    # See the dark palette: chart_violet must not duplicate chart_blue.
+    chart_violet="#94519a",
+    chart_grey="#79818b",
     surface_hi="#e6ebf0",
     unknown="#a8aeb6",
     marker_exposure="#16a34a",
@@ -195,6 +242,16 @@ LIGHT_PALETTE: Final[ThemePalette] = ThemePalette(
     overlay_status_warning="#d29922",
     overlay_status_pending="#38bdf8",
     overlay_status_complete="#3fb950",
+    overlay_status_unattributed="#9ca3af",
+    overlay_marker_halo="#020617",
+    atlas_marker_collected="#137D41",
+    atlas_marker_partial="#8E5E00",
+    atlas_marker_queued="#036EAE",
+    atlas_marker_failed="#C53732",
+    atlas_marker_unattributed="#606A74",
+    atlas_marker_ink="#090E12",
+    atlas_marker_selected="#B98A00",
+    atlas_marker_label_text="#D6DDE6",
     icon="#2a323d",
 )
 
@@ -252,6 +309,47 @@ QToolTip {{
     border: 1px solid {border_strong};
     border-radius: 6px;
     padding: 6px 8px;
+}}
+
+/* Menus must be themed explicitly. Without these rules Qt keeps the native
+   platform menu background while the global ``QWidget`` rule above still
+   forces the app's text colour onto the items — so a light app theme on a
+   dark-mode desktop (or the reverse) renders dark-on-dark text. The project
+   tree's context menu is the only route to rename/remove a group, so this
+   has to work regardless of the desktop theme. */
+QMenu {{
+    background: {surface};
+    color: {text};
+    border: 1px solid {border_strong};
+    border-radius: 8px;
+    padding: 4px;
+}}
+
+QMenu::item {{
+    background: transparent;
+    color: {text};
+    border-radius: 6px;
+    padding: 6px 24px 6px 12px;
+}}
+
+QMenu::item:selected {{
+    background: {selection};
+    color: {selection_text};
+}}
+
+QMenu::item:disabled {{
+    color: {text_muted};
+}}
+
+QMenu::item:disabled:selected {{
+    background: transparent;
+    color: {text_muted};
+}}
+
+QMenu::separator {{
+    background: {border};
+    height: 1px;
+    margin: 4px 8px;
 }}
 
 QWidget#projectPanel,
@@ -387,7 +485,7 @@ QToolButton#metaCopyButton:hover {{
 
 QPushButton {{
     background: {surface};
-    border: 1px solid {border};
+    border: 1px solid {control_border};
     border-radius: 6px;
     color: {text};
     padding: 0 12px;
@@ -417,14 +515,22 @@ QPushButton:disabled {{
 }}
 
 QPushButton#primaryButton {{
-    background: {accent};
-    border-color: {accent};
-    color: {background};
+    background: {primary_fill};
+    border-color: {primary_fill};
+    color: {primary_text};
     font-weight: 600;
 }}
 
 QPushButton#primaryButton:hover {{
-    background: {accent_strong};
+    background: {primary_fill_hover};
+    border-color: {primary_fill_hover};
+    color: {primary_text};
+}}
+
+QPushButton#primaryButton:disabled {{
+    background: {surface};
+    border-color: {border};
+    color: {text_muted};
 }}
 
 QPushButton#viewerToolButton {{
@@ -450,9 +556,15 @@ QPushButton#viewerToolButton:pressed {{
 }}
 
 QPushButton#viewerToolButton:checked {{
-    background: {accent_soft};
-    border-color: {accent_line};
-    color: {accent};
+    background: {primary_fill};
+    border-color: {primary_fill};
+    color: {primary_text};
+}}
+
+QPushButton#viewerToolButton:checked:hover {{
+    background: {primary_fill_hover};
+    border-color: {primary_fill_hover};
+    color: {primary_text};
 }}
 
 QPushButton#viewerZoomButton {{
@@ -489,6 +601,13 @@ QLabel#viewerImageBadge {{
     background: {surface};
     border: 1px solid {border_strong};
     border-radius: 8px;
+}}
+
+QLabel#imageExportPreview {{
+    background: {canvas};
+    border: 1px solid {border_strong};
+    border-radius: 8px;
+    padding: 6px;
 }}
 
 QWidget#viewerOverlayPanel {{
@@ -604,9 +723,62 @@ QTreeWidget::item:hover {{
     background: {surface_alt};
 }}
 
+/* The selection fill alone is a very low-contrast cue in both palettes
+   (~1.2:1 against the panel). An accent marker carries the real signal at
+   >=3:1, but it cannot live here: ``::item`` rules apply per column, so a
+   ``border-left`` paints one arc per column instead of one bar per row.
+   ``ui.list_decorations.paint_selection_marker`` draws it from the item
+   delegates, which can see the column index. */
 QTreeWidget::item:selected {{
     background: {selection};
     color: {selection_text};
+}}
+
+/* Table and tree headers were never styled, so the report-scope dialog and
+   the search-map detail table rendered a platform-grey header bar against
+   themed chrome. */
+QHeaderView {{
+    background: {surface_alt};
+    border: 0;
+}}
+
+QHeaderView::section {{
+    background: {surface_alt};
+    color: {text_muted};
+    border: 0;
+    border-bottom: 1px solid {border};
+    border-right: 1px solid {border};
+    padding: 6px 8px;
+    font-weight: 600;
+}}
+
+QHeaderView::section:last {{
+    border-right: 0;
+}}
+
+QHeaderView::section:hover {{
+    color: {text};
+    background: {surface_hi};
+}}
+
+/* Keyboard focus had no visible indicator anywhere except the two search
+   fields, so tabbing through the app was invisible. */
+QPushButton:focus,
+QToolButton:focus,
+QCheckBox:focus,
+QLineEdit:focus,
+QSlider:focus,
+QGraphicsView:focus,
+QTreeWidget:focus,
+QTableView:focus,
+QPlainTextEdit:focus {{
+    border: 1px solid {accent};
+    outline: 0;
+}}
+
+QTabBar::tab:focus {{
+    background: {accent_soft};
+    color: {text_strong};
 }}
 
 QScrollArea {{
@@ -630,7 +802,7 @@ QScrollBar:horizontal {{
 
 QScrollBar::handle:vertical,
 QScrollBar::handle:horizontal {{
-    background: {surface_hi};
+    background: {scroll_thumb};
     border-radius: 5px;
     min-height: 28px;
     min-width: 28px;
@@ -720,15 +892,25 @@ QLabel#cardSubvalue {{
 }}
 
 QSplitter::handle {{
-    background: {border};
+    background: transparent;
 }}
 
 QSplitter::handle:horizontal {{
-    width: 1px;
+    width: 5px;
+    border-left: 2px solid transparent;
+    border-right: 2px solid transparent;
+    background: {border_strong};
 }}
 
 QSplitter::handle:vertical {{
-    height: 1px;
+    height: 5px;
+    border-top: 2px solid transparent;
+    border-bottom: 2px solid transparent;
+    background: {border_strong};
+}}
+
+QSplitter::handle:hover {{
+    background: {accent};
 }}
 
 QProgressBar {{
@@ -984,6 +1166,45 @@ QTabBar::tab:selected {{
     background: {background};
     color: {text_strong};
     border-bottom: 2px solid {accent};
+}}
+
+QTabBar QToolButton {{
+    background: {surface_alt};
+    color: {text};
+    border: 1px solid {control_border};
+    border-radius: 4px;
+    margin: 2px;
+    padding: 0;
+}}
+
+QTabBar QToolButton:hover {{
+    background: {accent_soft};
+    border-color: {accent};
+}}
+
+QLabel#mutedLabel {{
+    color: {text_muted};
+}}
+
+QPushButton#dashboardFilterButton {{
+    background: {surface_alt};
+    color: {text};
+    border: 1px solid {control_border};
+    border-radius: 6px;
+    min-height: 28px;
+    padding: 0 10px;
+}}
+
+QPushButton#dashboardFilterButton:hover {{
+    background: {surface_hi};
+    border-color: {accent};
+}}
+
+QFrame#dashboardCard:focus,
+QWidget#dashboardInteractiveRow:focus,
+QWidget#statusTileGrid:focus,
+QWidget#acquisitionTimeline:focus {{
+    border: 1px solid {accent};
 }}
 
 QFrame#dashboardCard {{

@@ -7,6 +7,14 @@ from typing import Any, Sequence
 
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.domain.models import BatchPosition, TiltSeries
+from tomography_session_browser.services.atlas_marker_style import (
+    LABEL_FONT_SIZE_DP,
+    LABEL_HEIGHT_DP,
+    LABEL_HORIZONTAL_PADDING_DP,
+    LABEL_MAX_NUDGE_DP,
+    LABEL_OFFSET_DP,
+    LEAF_DIAMETER_DP,
+)
 from tomography_session_browser.services.batch_inference import inferred_batch_label_for_tilt
 
 
@@ -17,6 +25,8 @@ LABEL_GAP_PX = 22.0
 LABEL_STROKE_WIDTH_PX = 3.2
 LABEL_ESTIMATED_CHAR_WIDTH_PX = 18.5
 LABEL_BOUNDS_MARGIN_PX = 4.0
+ATLAS_LABEL_FONT_SIZE_PX = LABEL_FONT_SIZE_DP
+ATLAS_LABEL_COLLISION_PADDING_PX = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +42,15 @@ class _LabelSeed:
 class _LabelCandidate:
     bbox: tuple[float, float, float, float]
     placement: str
+
+
+@dataclass(frozen=True, slots=True)
+class AtlasLabelPlacement:
+    x_offset_px: float
+    y_offset_px: float
+    width_px: float
+    height_px: float = LABEL_HEIGHT_DP
+    leader: bool = False
 
 
 def batch_label_screen_font_size_px(view_scale: float) -> float:
@@ -75,6 +94,96 @@ def compact_batch_label(value: str) -> str:
     if trailing:
         return str(int(trailing.group(1)))
     return text
+
+
+def visible_batch_position_label_ids(
+    markers: Sequence[ImageMarker],
+    *,
+    view_scale: float,
+    marker_radius_px: float = LEAF_DIAMETER_DP / 2.0,
+) -> set[str]:
+    """Return the IDs accepted by :func:`atlas_batch_label_placements`."""
+
+    return set(
+        atlas_batch_label_placements(
+            markers,
+            view_scale=view_scale,
+            marker_radius_px=marker_radius_px,
+        )
+    )
+
+
+def atlas_batch_label_placements(
+    markers: Sequence[ImageMarker],
+    *,
+    view_scale: float,
+    marker_radius_px: float = LEAF_DIAMETER_DP / 2.0,
+) -> dict[str, AtlasLabelPlacement]:
+    """Place short Atlas label plates with bounded vertical nudging.
+
+    The source coordinates are already projected into the displayed image.
+    Collision tests happen in screen space against every marker hit target and
+    every previously accepted chip.  A straight leader is requested whenever a
+    label is nudged; labels that still collide at 18 dp are dropped.
+    """
+
+    scale = max(float(view_scale), 0.01)
+    marker_obstacles = {
+        marker.id: (
+            float(marker.x) * scale - marker_radius_px,
+            float(marker.y) * scale - marker_radius_px,
+            marker_radius_px * 2,
+            marker_radius_px * 2,
+        )
+        for marker in markers
+        if marker.x is not None and marker.y is not None
+    }
+    placed_boxes: list[tuple[float, float, float, float]] = []
+    placements: dict[str, AtlasLabelPlacement] = {}
+    nudge_candidates = (
+        0.0,
+        -6.0,
+        6.0,
+        -12.0,
+        12.0,
+        -LABEL_MAX_NUDGE_DP,
+        LABEL_MAX_NUDGE_DP,
+    )
+    for marker in sorted(markers, key=lambda value: value.id):
+        if marker.x is None or marker.y is None or not marker.label:
+            continue
+        text_width = max(
+            ATLAS_LABEL_FONT_SIZE_PX * 0.62,
+            len(marker.label) * ATLAS_LABEL_FONT_SIZE_PX * 0.63,
+        )
+        plate_width = text_width + LABEL_HORIZONTAL_PADDING_DP * 2
+        center_x = float(marker.x) * scale
+        center_y = float(marker.y) * scale
+        left = center_x + LABEL_OFFSET_DP
+        padding = ATLAS_LABEL_COLLISION_PADDING_PX
+        other_marker_boxes = [
+            box for marker_id, box in marker_obstacles.items() if marker_id != marker.id
+        ]
+        for nudge in nudge_candidates:
+            top = center_y - LABEL_HEIGHT_DP / 2 + nudge
+            bounds = (
+                left - padding,
+                top - padding,
+                plate_width + padding * 2,
+                LABEL_HEIGHT_DP + padding * 2,
+            )
+            obstacles = other_marker_boxes + placed_boxes
+            if any(_intersection_area(bounds, other) > 0 for other in obstacles):
+                continue
+            placements[marker.id] = AtlasLabelPlacement(
+                x_offset_px=LABEL_OFFSET_DP,
+                y_offset_px=-LABEL_HEIGHT_DP / 2 + nudge,
+                width_px=plate_width,
+                leader=abs(nudge) > 1e-9,
+            )
+            placed_boxes.append(bounds)
+            break
+    return placements
 
 
 def exposure_batch_label(marker: ImageMarker) -> str | None:
