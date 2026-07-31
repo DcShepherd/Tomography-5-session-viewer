@@ -23,6 +23,7 @@ from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.models import Sample, Session
 from tomography_session_browser.reports import ProjectReportGroup
 from tomography_session_browser.ui.icons import themed_icon
+from tomography_session_browser.ui.navigation_icons import PROJECT_GROUP_ICONS
 from tomography_session_browser.ui.project_model import ProjectTreeGroup, session_key
 
 
@@ -275,7 +276,10 @@ class ReportScopeDialog(QDialog):
         if group.kind == "linked":
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsAutoTristate)
         item.setCheckState(0, Qt.CheckState.Unchecked)
-        item.setIcon(0, themed_icon("layers" if group.kind == "linked" else "folder-open"))
+        item.setIcon(
+            0,
+            themed_icon(PROJECT_GROUP_ICONS.get(group.kind, "folder-open")),
+        )
         return item
 
     def _session_item(self, session: Session, badge: str) -> QTreeWidgetItem:

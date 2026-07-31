@@ -11,7 +11,7 @@ from typing import Any
 
 from PIL import Image
 from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, QStandardPaths, Qt, QThreadPool, QTimer, Signal, Slot
-from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QImage, QKeyEvent, QKeySequence, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRegion, QShortcut, QWheelEvent
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QIcon, QImage, QKeyEvent, QKeySequence, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRegion, QShortcut, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -120,6 +120,7 @@ MAX_SCALE_BAR_SCREEN_PX = 190.0
 ZOOM_LABEL_MIN_WIDTH_PX = 48
 ZOOM_PANEL_HORIZONTAL_PADDING_PX = 6
 FLOATING_CONTROL_INSET_PX = 18
+VIEWER_LIST_MIN_WIDTH_PX = 268
 # Keep every bottom-floating viewer control on the same baseline so the scale
 # bar and zoom strip feel anchored to one frame edge instead of separate panes.
 FLOATING_CONTROL_BOTTOM_INSET_PX = 24
@@ -2614,6 +2615,20 @@ class _ViewerListDelegate(QStyledItemDelegate):
         painter.drawLine(rect.bottomLeft(), rect.bottomRight())
 
         left = rect.left() + 12
+        decoration = index.data(Qt.ItemDataRole.DecorationRole)
+        if isinstance(decoration, QIcon) and not decoration.isNull():
+            icon_size = 16
+            icon_rect = QRect(
+                left,
+                rect.center().y() - icon_size // 2,
+                icon_size,
+                icon_size,
+            )
+            painter.drawPixmap(
+                icon_rect,
+                decoration.pixmap(QSize(icon_size, icon_size)),
+            )
+            left += icon_size + 8
         right = rect.right() - 12
         top = rect.top() + 7
 
@@ -2964,6 +2979,7 @@ class ViewerTab(QWidget):
         self,
         empty_text: str,
         *,
+        entity_icon: str | None = None,
         show_list: bool = True,
         show_tilt_controls: bool = False,
         on_item_selected: Callable[[Any], None] | None = None,
@@ -2981,6 +2997,7 @@ class ViewerTab(QWidget):
     ) -> None:
         super().__init__()
         self._items: list[Any] = []
+        self._entity_icon = entity_icon
         self._sources_for: Callable[[Any], PreviewSources] = lambda _value: PreviewSources(None)
         self._prepared_sources: dict[str, PreviewSources] = {}
         self._on_item_selected = on_item_selected
@@ -3256,6 +3273,7 @@ class ViewerTab(QWidget):
         self.list.setObjectName("viewerList")
         self.list.setColumnCount(1)
         self.list.setHeaderHidden(True)
+        self.list.setIconSize(QSize(16, 16))
         self.list.setIndentation(12)
         self.list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.list.header().setStretchLastSection(False)
@@ -3442,10 +3460,14 @@ class ViewerTab(QWidget):
             list_layout.addWidget(filter_wrap)
             list_layout.addWidget(self.list, stretch=1)
             splitter.addWidget(list_panel)
-            self.list.setMinimumWidth(220)
-            # Keep the right-side list wide enough for status summaries
-            # while leaving the image viewer with most of the horizontal
-            # space. The user can still drag the splitter handle.
+            # The entity icon consumes 24 px including its text gap. Reserve
+            # enough additional width for the icon and an ordinary entity
+            # name such as ``SearchMap_1`` beside the longest common status
+            # badge, rather than introducing immediate elision.
+            self.list.setMinimumWidth(VIEWER_LIST_MIN_WIDTH_PX)
+            # Keep the right-side list wide enough for status summaries while
+            # leaving the image viewer with most of the horizontal space. The
+            # user can still drag or collapse the splitter handle.
             splitter.setSizes([1180, 300])
             splitter.setStretchFactor(0, 6)
             splitter.setStretchFactor(1, 1)
@@ -3596,6 +3618,12 @@ class ViewerTab(QWidget):
         self.fit_button.setIcon(themed_icon("maximize", size=16))
         self.zoom_in_button.setIcon(themed_icon("zoom-in", size=16))
         self.zoom_out_button.setIcon(themed_icon("zoom-out", size=16))
+        if self._entity_icon is not None:
+            for index in range(self.list.topLevelItemCount()):
+                self.list.topLevelItem(index).setIcon(
+                    0,
+                    themed_icon(self._entity_icon, size=16),
+                )
         for button in self._navigation_buttons.values():
             button.setIcon(themed_icon("arrow-right", size=14))
         if self._atlas_lod:
@@ -3762,6 +3790,11 @@ class ViewerTab(QWidget):
                 summary = list_status.summary if list_status is not None else _summary_for_item(item)
                 tooltip = list_status.tooltip if list_status is not None else ""
                 tree_item = QTreeWidgetItem([label])
+                if self._entity_icon is not None:
+                    tree_item.setIcon(
+                        0,
+                        themed_icon(self._entity_icon, size=16),
+                    )
                 tooltip_text = tooltip or (f"{label}\n{summary}" if summary else label)
                 tree_item.setToolTip(0, tooltip_text)
                 tree_item.setData(0, VIEWER_OBJECT_ROLE, item)

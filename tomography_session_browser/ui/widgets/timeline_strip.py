@@ -88,6 +88,9 @@ class TimelineStrip(QWidget):
         self.setMinimumHeight(TIME_CHART_TIMELINE_MIN_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
+        # Match the Defocus and dose plot canvases: the dashboard card owns
+        # the background, while this widget paints only axes, tracks, and data.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setObjectName("acquisitionTimeline")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName("Acquisition timeline")

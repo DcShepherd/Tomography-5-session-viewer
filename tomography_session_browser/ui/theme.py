@@ -970,7 +970,7 @@ QWidget#brandLockup {{
     padding: 0;
 }}
 
-QLabel#sessionPill,
+QFrame#sessionPill,
 QLabel#statusSegment,
 QLabel#smallChip,
 QLabel#viewerChip,
@@ -1000,11 +1000,22 @@ QLabel#viewerChipStatus {{
     font-weight: 700;
 }}
 
-QLabel#sessionPill {{
-    color: {text};
+QFrame#sessionPill {{
     border-radius: 15px;
     min-height: 26px;
-    padding: 2px 13px;
+}}
+
+QLabel#sessionPillText,
+QLabel#sessionPillIcon {{
+    background: transparent;
+    border: 0;
+    color: {text};
+    padding: 0;
+}}
+
+QLabel#sessionPillText {{
+    font-family: {mono_font};
+    font-size: 9pt;
 }}
 
 QLabel#screenEyebrow,

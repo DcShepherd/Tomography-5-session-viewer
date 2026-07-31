@@ -1022,15 +1022,20 @@ def _inferred_failed_tilt_markers(
                 "batch_label": compact_label_for_tilt(tilt),
             },
         )
-        # Apply the same global reflection the batch dot gets on the
-        # SearchMap so the inferred marker lands in the same
-        # coordinate system as the templated overlays.
-        _apply_grouped_overlay_position_correction(
-            [marker],
-            image_size=frame.image_size,
-            corrected_types={MarkerType.TILT_SERIES},
-            panel_name=frame.source,
-        )
+        # SearchMap / Overview overlays use the legacy display-space
+        # reflection applied to their regular batch/template markers. Atlas
+        # frames own their transform separately: a node-table affine already
+        # contains rotation and handedness, while the legacy Atlas path applies
+        # one final 180-degree rotation in ``atlas_lod_markers``. Reflecting
+        # here would therefore mirror node-affine markers or double-rotate
+        # legacy Atlas markers.
+        if not isinstance(source, Atlas):
+            _apply_grouped_overlay_position_correction(
+                [marker],
+                image_size=frame.image_size,
+                corrected_types={MarkerType.TILT_SERIES},
+                panel_name=frame.source,
+            )
         out.append(marker)
         LOGGER.info(
             "inferred-failed tilt marker: source=%s tilt=%s stage=%s image=(%s,%s)",

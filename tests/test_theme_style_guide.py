@@ -114,7 +114,7 @@ def test_checked_viewer_tool_button_uses_solid_theme_contrast() -> None:
 def test_session_pill_keeps_capsule_shape() -> None:
     stylesheet = build_stylesheet(DARK_PALETTE)
 
-    session_pill_blocks = _style_blocks_for_selector(stylesheet, "QLabel#sessionPill")
+    session_pill_blocks = _style_blocks_for_selector(stylesheet, "QFrame#sessionPill")
     assert session_pill_blocks
     assert "border-radius: 15px;" in session_pill_blocks[-1]
     assert "min-height: 26px;" in session_pill_blocks[-1]

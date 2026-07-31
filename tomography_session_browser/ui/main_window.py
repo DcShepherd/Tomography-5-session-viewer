@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDockWidget,
     QFileDialog,
+    QFrame,
     QFormLayout,
     QAbstractItemView,
     QHBoxLayout,
@@ -101,6 +102,11 @@ from tomography_session_browser.ui.animations import fade_in
 from tomography_session_browser.ui.branding import TitleBarLockup, brand_window_icon
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.list_decorations import paint_selection_marker
+from tomography_session_browser.ui.navigation_icons import (
+    PROJECT_GROUP_ICONS,
+    TAB_ICONS,
+    TREE_ENTITY_GROUP_ICONS,
+)
 from tomography_session_browser.ui.project_model import (
     ProjectTreeGroup,
     build_project_tree_groups,
@@ -925,14 +931,26 @@ class MainWindow(QMainWindow):
         toolbar.setFixedHeight(max(50, self.brand_label.height() + 8))
         toolbar.addWidget(self.brand_label)
 
+        self.session_pill_container = QFrame(self)
+        self.session_pill_container.setObjectName("sessionPill")
+        session_pill_layout = QHBoxLayout(self.session_pill_container)
+        session_pill_layout.setContentsMargins(10, 2, 10, 2)
+        session_pill_layout.setSpacing(7)
+        self.session_pill_icon = QLabel(self.session_pill_container)
+        self.session_pill_icon.setObjectName("sessionPillIcon")
+        self.session_pill_icon.setFixedSize(16, 16)
+        self.session_pill_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        session_pill_layout.addWidget(self.session_pill_icon)
         self.session_pill = ElidedLabel(
             "No session loaded",
             mode=Qt.TextElideMode.ElideMiddle,
+            parent=self.session_pill_container,
         )
-        self.session_pill.setObjectName("sessionPill")
-        self.session_pill.setMinimumWidth(90)
-        self.session_pill.setMaximumWidth(300)
-        toolbar.addWidget(self.session_pill)
+        self.session_pill.setObjectName("sessionPillText")
+        session_pill_layout.addWidget(self.session_pill, stretch=1)
+        self.session_pill_container.setMinimumWidth(90)
+        self.session_pill_container.setMaximumWidth(300)
+        toolbar.addWidget(self.session_pill_container)
         toolbar.addSeparator()
 
         # Primary file actions ------------------------------------------------
@@ -1080,6 +1098,21 @@ class MainWindow(QMainWindow):
                 name = "sun" if self.theme_action.isChecked() else "moon"
             if isinstance(name, str):
                 action.setIcon(themed_icon(name))
+        self._refresh_tab_icons()
+        if hasattr(self, "session_pill_icon"):
+            pill_icon_name = self.session_pill_icon.property("iconName")
+            if isinstance(pill_icon_name, str):
+                self.session_pill_icon.setPixmap(
+                    themed_icon(pill_icon_name, size=16).pixmap(QSize(16, 16))
+                )
+
+    def _refresh_tab_icons(self) -> None:
+        """Re-render entity tab icons after the active palette changes."""
+
+        if not hasattr(self, "tabs"):
+            return
+        for index, label in enumerate(TAB_LABELS):
+            self.tabs.setTabIcon(index, themed_icon(TAB_ICONS[label], size=16))
 
     def _refresh_branding(self) -> None:
         if not hasattr(self, "brand_label"):
@@ -1103,7 +1136,8 @@ class MainWindow(QMainWindow):
             )
             self._toolbar_compact = compact
         if hasattr(self, "session_pill"):
-            self.session_pill.setMaximumWidth(300 if width >= 1500 else 220 if width >= 1120 else 150)
+            pill = getattr(self, "session_pill_container", self.session_pill)
+            pill.setMaximumWidth(300 if width >= 1500 else 220 if width >= 1120 else 150)
         if hasattr(self, "status_counts"):
             self._update_status_summary()
 
@@ -1111,25 +1145,44 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "session_pill"):
             return
         if not self._sessions:
-            self.session_pill.setText("● No session loaded")
-            self.session_pill.setToolTip("Open a Tomography 5 session folder to begin review.")
+            self._set_session_pill(
+                "No session loaded",
+                "Open a Tomography 5 session folder to begin review.",
+                "shape-dot",
+            )
             return
         if len(self._sessions) == 1:
             session = self._sessions[0]
             sample_count = len(self._display_samples(session))
-            self.session_pill.setText(f"● {session.name} · {count_phrase(sample_count, 'sample')}")
-            self.session_pill.setToolTip(f"{session.name}\n{session.path}")
+            self._set_session_pill(
+                f"{session.name} · {count_phrase(sample_count, 'sample')}",
+                f"{session.name}\n{session.path}",
+                "session-dashboard",
+            )
             return
         groups = self._project_groups()
-        self.session_pill.setText(
-            f"● Project · {count_phrase(len(groups), 'group')} · "
-            f"{count_phrase(len(self._sessions), 'session')}"
-        )
         linked = "\n".join(
             f"{group.display_name}: {', '.join(session.name for session in group.sessions)}"
             for group in groups
         )
-        self.session_pill.setToolTip(f"Loaded project groups\n{linked}")
+        self._set_session_pill(
+            f"{count_phrase(len(groups), 'group')} · "
+            f"{count_phrase(len(self._sessions), 'session')}",
+            f"Loaded project groups\n{linked}",
+            "link",
+        )
+
+    def _set_session_pill(self, text: str, tooltip: str, icon_name: str) -> None:
+        self.session_pill.setText(text)
+        self.session_pill.setToolTip(tooltip)
+        if hasattr(self, "session_pill_container"):
+            self.session_pill_container.setToolTip(tooltip)
+        if hasattr(self, "session_pill_icon"):
+            self.session_pill_icon.setProperty("iconName", icon_name)
+            self.session_pill_icon.setPixmap(
+                themed_icon(icon_name, size=16).pixmap(QSize(16, 16))
+            )
+            self.session_pill_icon.setAccessibleName(f"{icon_name.replace('-', ' ')} icon")
 
     def _update_tab_counts(self) -> None:
         if not hasattr(self, "tabs"):
@@ -1305,11 +1358,17 @@ class MainWindow(QMainWindow):
         if hasattr(self, "context_panel"):
             self.context_panel.refresh_theme()
         if hasattr(self, "tree"):
-            for index in range(self.tree.topLevelItemCount()):
-                item = self.tree.topLevelItem(index)
+            def refresh_tree_item(item: QTreeWidgetItem) -> None:
                 value = item.data(0, OBJECT_ROLE)
                 if isinstance(value, ProjectTreeGroup):
                     self._style_project_group_item(item, value)
+                else:
+                    self._set_tree_item_icon(item, value)
+                for child_index in range(item.childCount()):
+                    refresh_tree_item(item.child(child_index))
+
+            for index in range(self.tree.topLevelItemCount()):
+                refresh_tree_item(self.tree.topLevelItem(index))
             self.tree.viewport().update()
         if hasattr(self, "session_dashboard"):
             if self._sessions:
@@ -1565,6 +1624,7 @@ class MainWindow(QMainWindow):
     def _build_tabs(self) -> None:
         self.tabs = QTabWidget()
         self.tabs.setObjectName("mainTabs")
+        self.tabs.setIconSize(QSize(16, 16))
         for label in TAB_LABELS:
             tab = QWidget(self.tabs)
             tab.setObjectName("tabPage")
@@ -1599,6 +1659,7 @@ class MainWindow(QMainWindow):
                 display_label = _TAB_DISPLAY_LABELS.get(label, label)
                 viewer_tab = ViewerTab(
                     f"Open a session to browse {display_label.lower()} previews.",
+                    entity_icon=TAB_ICONS[label],
                     show_list=True,
                     show_tilt_controls=label == "Tilt series",
                     on_item_selected=self._viewer_item_selected,
@@ -1621,7 +1682,8 @@ class MainWindow(QMainWindow):
                 )
                 self._viewer_tabs[label] = viewer_tab
                 layout.addWidget(viewer_tab, stretch=1)
-            self.tabs.addTab(tab, _TAB_DISPLAY_LABELS.get(label, label))
+            index = self.tabs.addTab(tab, _TAB_DISPLAY_LABELS.get(label, label))
+            self.tabs.setTabIcon(index, themed_icon(TAB_ICONS[label], size=16))
         container = QWidget(self)
         container.setObjectName("centralShell")
         outer = QHBoxLayout(container)
@@ -2514,7 +2576,7 @@ class MainWindow(QMainWindow):
         item.setForeground(0, QBrush(QColor(palette.text_strong)))
         item.setBackground(0, QBrush(QColor(palette.surface_alt)))
         item.setBackground(1, QBrush(QColor(palette.surface_alt)))
-        icon_name = "layers" if group.kind == "linked" else "folder-open"
+        icon_name = PROJECT_GROUP_ICONS.get(group.kind, "folder-open")
         item.setIcon(0, themed_icon(icon_name))
 
     def _project_group_badge_tooltip(self, group: ProjectTreeGroup) -> str:
@@ -2578,6 +2640,7 @@ class MainWindow(QMainWindow):
         group.setData(0, OBJECT_ROLE, entity_group)
         group.setData(0, EXPANSION_ROLE, self._tree_expansion_id_for(label, entity_group))
         self._style_tree_item(group)
+        self._set_tree_item_icon(group, entity_group)
         parent.addChild(group)
         for value in values:
             group.addChild(self._item(self._label_for(value), value))
@@ -2591,9 +2654,47 @@ class MainWindow(QMainWindow):
         item.setData(0, OBJECT_ROLE, value)
         item.setData(0, EXPANSION_ROLE, self._tree_expansion_id_for(label, value))
         self._style_tree_item(item)
+        self._set_tree_item_icon(item, value)
         if isinstance(value, TiltSeries):
             self._project_tree_tilt_items_by_id.setdefault(value.id, []).append(item)
         return item
+
+    def _set_tree_item_icon(self, item: QTreeWidgetItem, value: Any) -> None:
+        icon_name = self._tree_icon_name_for(value)
+        if icon_name is not None:
+            item.setIcon(0, themed_icon(icon_name))
+
+    @staticmethod
+    def _tree_icon_name_for(value: Any) -> str | None:
+        """Return the restrained entity icon for one project-tree node."""
+
+        if isinstance(value, ProjectTreeGroup):
+            return PROJECT_GROUP_ICONS.get(value.kind, "folder-open")
+        if isinstance(value, Session):
+            return (
+                TAB_ICONS["Atlas"]
+                if value.kind == SessionKind.ATLAS_SCREENING
+                else "folder-open"
+            )
+        if isinstance(value, Sample):
+            return "folder-open"
+        if isinstance(value, LinkedSampleGroup):
+            return "layers"
+        if isinstance(value, EntityGroup):
+            return TREE_ENTITY_GROUP_ICONS.get(value.label)
+        if isinstance(value, Atlas):
+            return TAB_ICONS["Atlas"]
+        if isinstance(value, Overview):
+            return TAB_ICONS["Overview"]
+        if isinstance(value, SearchMap):
+            return TAB_ICONS["Search map"]
+        if isinstance(value, SearchTile):
+            return TAB_ICONS["Search"]
+        if isinstance(value, BatchPosition):
+            return TAB_ICONS["Batch position"]
+        if isinstance(value, TiltSeries):
+            return TAB_ICONS["Tilt series"]
+        return None
 
     def _tree_expansion_id_for(self, label: str, value: Any) -> str:
         if isinstance(value, ProjectTreeGroup):
@@ -4382,6 +4483,21 @@ class MainWindow(QMainWindow):
                     search_resolution.marker,
                     context=marker_context,
                 )
+            elif (
+                key == "overview"
+                and isinstance(target, Overview)
+                and search_resolution.marker is not None
+                and search_resolution.marker.marker_type
+                in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}
+            ):
+                # Preserve the selected exposure across image contexts. The
+                # older whole-Search-map fallback below is correct only when
+                # no exposure is selected.
+                marker_id = self._marker_id_for_exposure_context_navigation(
+                    target,
+                    search_resolution.marker,
+                    context=marker_context,
+                )
             else:
                 marker_id = self._marker_id_for_search_map_navigation(target, value, context=marker_context)
         if tab_label is not None and marker_id:
@@ -4703,6 +4819,108 @@ class MainWindow(QMainWindow):
             if match is not None:
                 return match.id
         return None
+
+    def _marker_id_for_exposure_context_navigation(
+        self,
+        target: Overview | SearchMap,
+        source_marker: ImageMarker,
+        *,
+        context: MarkerContext,
+    ) -> str | None:
+        """Find the same batch exposure on another image context.
+
+        Marker IDs include their source image ID, so an exposure selected on a
+        Search map cannot be selected verbatim on its Overview. Match the
+        display-only exposure identity instead: batch position first, then
+        exposure index, with area name as a conservative fallback.
+        """
+
+        if source_marker.marker_type not in {
+            MarkerType.EXPOSURE_AREA,
+            MarkerType.CAMERA_FOV,
+        }:
+            return None
+        batch = self._batch_for_exposure_marker(source_marker)
+        batch_id = (
+            batch.id
+            if batch is not None
+            else str(
+                source_marker.metadata.get("batch_id")
+                or source_marker.linked_object_id
+                or ""
+            )
+        )
+        if not batch_id:
+            return None
+
+        candidates = [
+            marker
+            for marker in markers_for_object(target, context=context)
+            if marker.marker_type
+            in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}
+            and str(marker.metadata.get("batch_id") or marker.linked_object_id or "")
+            == batch_id
+        ]
+        if not candidates:
+            return None
+
+        source_index = (
+            self._exposure_index_for_marker(source_marker, batch)
+            if batch is not None
+            else self._coerce_exposure_index(
+                source_marker.metadata.get("exposure_index")
+            )
+        )
+        if source_index is not None:
+            indexed = [
+                marker
+                for marker in candidates
+                if (
+                    self._exposure_index_for_marker(marker, batch)
+                    if batch is not None
+                    else self._coerce_exposure_index(
+                        marker.metadata.get("exposure_index")
+                    )
+                )
+                == source_index
+            ]
+            preferred = self._unique_preferred_exposure_marker(indexed)
+            if preferred is not None:
+                return preferred.id
+
+        source_key = self._marker_exposure_match_key(source_marker)
+        if source_key:
+            named = [
+                marker
+                for marker in candidates
+                if self._marker_exposure_match_key(marker) == source_key
+            ]
+            preferred = self._unique_preferred_exposure_marker(named)
+            if preferred is not None:
+                return preferred.id
+        return None
+
+    @staticmethod
+    def _coerce_exposure_index(value: Any) -> int | None:
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _unique_preferred_exposure_marker(
+        markers: list[ImageMarker],
+    ) -> ImageMarker | None:
+        exposure_markers = [
+            marker
+            for marker in markers
+            if marker.marker_type == MarkerType.EXPOSURE_AREA
+        ]
+        if len(exposure_markers) == 1:
+            return exposure_markers[0]
+        if len(exposure_markers) > 1:
+            return None
+        return markers[0] if len(markers) == 1 else None
 
     def _preferred_batch_marker(
         self,

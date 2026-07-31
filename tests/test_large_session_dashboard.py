@@ -82,6 +82,29 @@ def test_dashboard_header_omits_redundant_complete_pill(tmp_path: Path) -> None:
     assert "Complete" not in _label_texts(header)
 
 
+def test_dashboard_header_uses_semantic_metadata_icons(tmp_path: Path) -> None:
+    app = _app()
+    model = session_dashboard_model(
+        _large_session(tmp_path, search_maps=2, batch_positions=2, tilt_series=4)
+    )
+    model.kind = "linked sessions"
+    model.microscope = "Titan Krios"
+    model.acquisition_start = "2026-01-15 10:00"
+    model.acquisition_end = "2026-01-15 11:29"
+    model.acquisition_duration = "1h 29m"
+    dashboard = SessionDashboard()
+
+    dashboard.set_model(model)
+    app.processEvents()
+
+    header = dashboard._content_layout.itemAt(0).widget()
+    assert header is not None
+    icons = header.findChildren(QLabel, "metaIcon")
+    icon_names = {str(icon.property("iconName")) for icon in icons}
+    assert {"link", "microscope", "clock", "folder-open"} <= icon_names
+    assert all(icon.pixmap() is not None and not icon.pixmap().isNull() for icon in icons)
+
+
 def test_dashboard_count_cards_reflow_at_narrow_widths() -> None:
     app = _app()
     cards = [QFrame() for _ in range(5)]
@@ -1001,6 +1024,15 @@ def test_timeline_strip_defaults_to_density_for_large_timeline() -> None:
     strip.set_timeline(SessionTimeline(segments=segments, pauses=()))
 
     assert strip._use_density_view(strip._timeline)  # density strip, not 72 lanes
+
+
+def test_timeline_plot_canvas_matches_defocus_translucent_background() -> None:
+    _app()
+    timeline = TimelineStrip()
+    defocus = DefocusScatterPlot()
+
+    assert timeline.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    assert defocus.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
 
 def test_session_dashboard_preserves_timeline_mode_across_rebuild(tmp_path: Path) -> None:

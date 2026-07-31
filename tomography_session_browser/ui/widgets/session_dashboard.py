@@ -895,11 +895,28 @@ class SessionDashboard(QWidget):
         meta_grid.setVerticalSpacing(6)
         column = 0
         if model.kind:
-            meta_grid.addWidget(self._meta_pair("Kind", model.kind), 0, column)
+            kind_icon = (
+                "link"
+                if "linked" in model.kind.casefold()
+                else "session-dashboard"
+            )
+            meta_grid.addWidget(
+                self._meta_pair("Kind", model.kind, icon_name=kind_icon),
+                0,
+                column,
+            )
             meta_grid.setColumnStretch(column, 1)
             column += 1
         if model.microscope:
-            meta_grid.addWidget(self._meta_pair("Microscope", model.microscope), 0, column)
+            meta_grid.addWidget(
+                self._meta_pair(
+                    "Microscope",
+                    model.microscope,
+                    icon_name="microscope",
+                ),
+                0,
+                column,
+            )
             meta_grid.setColumnStretch(column, 1)
             column += 1
         if model.acquisition_start and model.acquisition_end:
@@ -907,12 +924,27 @@ class SessionDashboard(QWidget):
             if model.acquisition_duration:
                 window_text += f"  ({model.acquisition_duration})"
             span = max(column, 1)
-            meta_grid.addWidget(self._meta_pair("Acquisition", window_text, wrap=True), 1, 0, 1, span)
+            meta_grid.addWidget(
+                self._meta_pair(
+                    "Acquisition",
+                    window_text,
+                    icon_name="clock",
+                    wrap=True,
+                ),
+                1,
+                0,
+                1,
+                span,
+            )
         layout.addWidget(meta_wrap)
 
         # Path strip: middle-elided + copy button.
         path_row = QHBoxLayout()
         path_row.setSpacing(6)
+        path_row.addWidget(
+            self._metadata_icon_label("folder-open", "Session folder"),
+            alignment=Qt.AlignmentFlag.AlignVCenter,
+        )
         path_label = QLabel("Path:")
         path_label.setObjectName("metaKey")
         path_row.addWidget(path_label)
@@ -935,7 +967,14 @@ class SessionDashboard(QWidget):
         layout.addLayout(path_row)
         return wrap
 
-    def _meta_pair(self, label: str, value: str, *, wrap: bool = False) -> QWidget:
+    def _meta_pair(
+        self,
+        label: str,
+        value: str,
+        *,
+        icon_name: str | None = None,
+        wrap: bool = False,
+    ) -> QWidget:
         container = QWidget()
         v = QVBoxLayout(container)
         v.setContentsMargins(0, 0, 0, 0)
@@ -943,6 +982,14 @@ class SessionDashboard(QWidget):
         l = QLabel(label.upper())
         l.setObjectName("cardTitle")
         v.addWidget(l)
+        value_row = QHBoxLayout()
+        value_row.setContentsMargins(0, 0, 0, 0)
+        value_row.setSpacing(6)
+        if icon_name is not None:
+            value_row.addWidget(
+                self._metadata_icon_label(icon_name, label),
+                alignment=Qt.AlignmentFlag.AlignTop,
+            )
         if wrap:
             val = QLabel(value)
             val.setWordWrap(True)
@@ -951,8 +998,20 @@ class SessionDashboard(QWidget):
         else:
             val = ElidedLabel(value)
         val.setObjectName("metaValue")
-        v.addWidget(val)
+        value_row.addWidget(val, stretch=1)
+        v.addLayout(value_row)
         return container
+
+    @staticmethod
+    def _metadata_icon_label(icon_name: str, accessible_name: str) -> QLabel:
+        icon = QLabel()
+        icon.setObjectName("metaIcon")
+        icon.setProperty("iconName", icon_name)
+        icon.setPixmap(themed_icon(icon_name, size=14).pixmap(QSize(14, 14)))
+        icon.setFixedSize(14, 16)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setAccessibleName(f"{accessible_name} icon")
+        return icon
 
     def _build_collection_health_card(
         self,

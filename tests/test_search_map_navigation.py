@@ -118,6 +118,106 @@ def test_search_map_navigation_request_opens_linked_overview(tmp_path: Path) -> 
     assert overview.name in window.statusBar().currentMessage()
 
 
+def test_search_map_overview_jump_transfers_selected_exposure_marker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """The Overview jump keeps the selected exposure, not the Search-map tile."""
+
+    _app()
+    session, overview, search_map, batch, _search_tile = _make_exposure_link_session(
+        tmp_path
+    )
+    source_exposure = _exposure_marker(
+        search_map.id,
+        batch.id,
+        area_name="Exposure 2",
+        exposure_index=1,
+    )
+    destination_primary = _exposure_marker(overview.id, batch.id)
+    destination_exposure = _exposure_marker(
+        overview.id,
+        batch.id,
+        area_name="Exposure 2",
+        exposure_index=1,
+    )
+    search_map_region = ImageMarker(
+        id=f"{overview.id}:search-map:{search_map.id}",
+        marker_type=MarkerType.SEARCH_MAP,
+        linked_object_id=search_map.id,
+        source_object_id=overview.id,
+    )
+    markers_by_source = {
+        search_map.id: [source_exposure],
+        overview.id: [
+            search_map_region,
+            destination_primary,
+            destination_exposure,
+        ],
+    }
+
+    window = MainWindow()
+    window._sessions = [session]
+    window._session = session
+    window._active_context = session
+    window._rebuild_sample_index()
+    window._viewer_tabs["Search map"].select_marker(source_exposure.id)
+    monkeypatch.setattr(
+        main_window,
+        "markers_for_object",
+        lambda value, **_kwargs: markers_by_source.get(value.id, []),
+    )
+
+    window._viewer_navigation_requested(search_map, "overview")
+
+    selected_marker_id = window._viewer_tabs["Overview"].selected_marker_id()
+    assert selected_marker_id == destination_exposure.id
+    assert selected_marker_id != search_map_region.id
+    selected_markers = [
+        marker
+        for marker in window._viewer_tabs["Overview"].viewer._markers
+        if marker.selected
+    ]
+    assert [marker.id for marker in selected_markers] == [destination_exposure.id]
+
+
+def test_search_map_overview_jump_without_exposure_keeps_region_highlight(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """With no selected exposure, retain the established whole-map highlight."""
+
+    _app()
+    session, overview, search_map, _batch, _search_tile = (
+        _make_exposure_link_session(tmp_path)
+    )
+    search_map_region = ImageMarker(
+        id=f"{overview.id}:search-map:{search_map.id}",
+        marker_type=MarkerType.SEARCH_MAP,
+        linked_object_id=search_map.id,
+        source_object_id=overview.id,
+    )
+    window = MainWindow()
+    window._sessions = [session]
+    window._session = session
+    window._active_context = session
+    window._rebuild_sample_index()
+    monkeypatch.setattr(
+        main_window,
+        "markers_for_object",
+        lambda value, **_kwargs: [search_map_region]
+        if value.id == overview.id
+        else [],
+    )
+
+    window._viewer_navigation_requested(search_map, "overview")
+
+    assert (
+        window._viewer_tabs["Overview"].selected_marker_id()
+        == search_map_region.id
+    )
+
+
 def _make_exposure_link_session(tmp_path: Path) -> tuple[Session, Overview, SearchMap, BatchPosition, SearchTile]:
     overview = Overview(id="ov-1", name="Overview_001", image_path=tmp_path / "ov.jpg")
     search_map = SearchMap(
@@ -156,13 +256,23 @@ def _make_exposure_link_session(tmp_path: Path) -> tuple[Session, Overview, Sear
     return session, overview, search_map, batch, search_tile
 
 
-def _exposure_marker(source_id: str, batch_id: str) -> ImageMarker:
+def _exposure_marker(
+    source_id: str,
+    batch_id: str,
+    *,
+    area_name: str = "Exposure",
+    exposure_index: int = 0,
+) -> ImageMarker:
     return ImageMarker(
-        id=f"{source_id}:batch:{batch_id}:exposure_area:Exposure",
+        id=f"{source_id}:batch:{batch_id}:exposure_area:{area_name}",
         marker_type=MarkerType.EXPOSURE_AREA,
         linked_object_id=batch_id,
         source_object_id=source_id,
-        metadata={"batch_id": batch_id, "area_name": "Exposure", "exposure_index": 0},
+        metadata={
+            "batch_id": batch_id,
+            "area_name": area_name,
+            "exposure_index": exposure_index,
+        },
     )
 
 

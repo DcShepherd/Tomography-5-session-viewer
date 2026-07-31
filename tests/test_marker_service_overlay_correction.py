@@ -6,7 +6,15 @@ from pathlib import Path
 import pytest
 
 from tomography_session_browser.domain.markers import MarkerType
-from tomography_session_browser.domain.models import Atlas, BatchPosition, MrcMetadata, Overview, SearchMap, SearchTile
+from tomography_session_browser.domain.models import (
+    Atlas,
+    BatchPosition,
+    MrcMetadata,
+    Overview,
+    SearchMap,
+    SearchTile,
+    TiltSeries,
+)
 from tomography_session_browser.parsers.search_tile_parser import (
     _ExposureTarget,
     _TileCandidate,
@@ -16,7 +24,9 @@ from tomography_session_browser.services.marker_service import (
     MarkerContext,
     _image_frame,
     _mrc_pixel_size,
+    atlas_lod_markers,
     atlas_markers,
+    overview_markers,
     search_map_markers,
     search_tile_markers,
 )
@@ -462,6 +472,145 @@ def test_search_map_keeps_exposure_visible_after_grouped_correction() -> None:
     assert 0 <= edge_exposure.x <= 100
     assert 0 <= edge_exposure.y <= 100
     assert "batch_99" not in exposure_by_name
+
+
+def test_search_map_inferred_failed_tilt_keeps_legacy_reflection() -> None:
+    failed = TiltSeries(
+        id="failed-tilt",
+        name="failed_1",
+        mrc_path=Path("failed_1.mrc"),
+        mrc_metadata=_mrc_metadata(
+            "failed_1.mrc",
+            size=(1, 1),
+            stage_position=(10.0, 0.0),
+        ),
+    )
+
+    marker = next(
+        marker
+        for marker in search_map_markers(
+            _search_map(),
+            [],
+            failed_tilt_ids=frozenset({failed.id}),
+            tilt_series=(failed,),
+        )
+        if marker.metadata.get("inferred_from_stage")
+    )
+
+    assert (marker.x, marker.y) == pytest.approx((39.0, 49.0))
+    assert marker.metadata["legacy_overlay_transform"] == "global_reflection"
+
+
+def test_legacy_atlas_inferred_failed_tilt_receives_one_atlas_rotation() -> None:
+    failed = TiltSeries(
+        id="failed-tilt",
+        name="failed_1",
+        mrc_path=Path("failed_1.mrc"),
+        mrc_metadata=_mrc_metadata(
+            "failed_1.mrc",
+            size=(1, 1),
+            stage_position=(10.0, 0.0),
+        ),
+    )
+
+    marker = next(
+        marker
+        for marker in atlas_lod_markers(
+            _atlas(),
+            MarkerContext(
+                tilt_series=(failed,),
+                failed_tilt_ids=frozenset({failed.id}),
+            ),
+        )
+        if marker.metadata.get("atlas_lod_role") == "unattributed"
+    )
+
+    assert (marker.x, marker.y) == pytest.approx((40.0, 50.0))
+    assert marker.metadata["atlas_overlay_transform"] == (
+        "rotate_180_about_image_center"
+    )
+    assert "legacy_overlay_transform" not in marker.metadata
+
+
+def test_search_map_focus_and_tracking_keep_same_recorded_relative_position() -> None:
+    batch = _batch()
+    batch.metadata["TrackingTemplateAreaParameters"] = {
+        "Name": "Tracking",
+        "PositionX": -10.0,
+        "PositionY": 3.0,
+    }
+    batch.metadata["FocusTemplateAreaParameters"] = {
+        "Name": "Focus",
+        "PositionX": -10.0,
+        "PositionY": 3.0,
+    }
+
+    markers = search_map_markers(_search_map(), [batch])
+    by_type = {
+        marker.marker_type: marker
+        for marker in markers
+        if marker.marker_type
+        in {
+            MarkerType.EXPOSURE_AREA,
+            MarkerType.TRACKING_AREA,
+            MarkerType.FOCUS_AREA,
+        }
+        and marker.metadata.get("area_name") in {"Exposure", "Tracking", "Focus"}
+    }
+    exposure = by_type[MarkerType.EXPOSURE_AREA]
+    tracking = by_type[MarkerType.TRACKING_AREA]
+    focus = by_type[MarkerType.FOCUS_AREA]
+
+    assert (tracking.x, tracking.y) == pytest.approx((focus.x, focus.y))
+    raw_delta = (
+        tracking.metadata["raw_image_position"][0]
+        - exposure.metadata["raw_image_position"][0],
+        tracking.metadata["raw_image_position"][1]
+        - exposure.metadata["raw_image_position"][1],
+    )
+    displayed_delta = (
+        tracking.x - exposure.x,
+        tracking.y - exposure.y,
+    )
+    assert displayed_delta == pytest.approx((-raw_delta[0], -raw_delta[1]))
+    assert "local_rotation_anchor" not in tracking.metadata
+    assert "local_rotation_anchor" not in focus.metadata
+
+
+def test_overview_focus_and_tracking_at_same_offset_stay_coincident() -> None:
+    batch = _batch()
+    batch.linked_overview_id = "overview"
+    batch.metadata["TrackingTemplateAreaParameters"] = {
+        "Name": "Tracking",
+        "PositionX": -10.0,
+        "PositionY": 3.0,
+    }
+    batch.metadata["FocusTemplateAreaParameters"] = {
+        "Name": "Focus",
+        "PositionX": -10.0,
+        "PositionY": 3.0,
+    }
+
+    markers = overview_markers(
+        Overview(
+            id="overview",
+            name="Overview",
+            image_path=Path("overview.mrc"),
+            mrc_metadata=_mrc_metadata(
+                "overview.mrc",
+                size=(100, 100),
+                stage_position=(0.0, 0.0),
+            ),
+        ),
+        MarkerContext(batch_positions=(batch,)),
+    )
+    by_type = {marker.marker_type: marker for marker in markers}
+    tracking = by_type[MarkerType.TRACKING_AREA]
+    focus = by_type[MarkerType.FOCUS_AREA]
+
+    assert (tracking.x, tracking.y) == pytest.approx((focus.x, focus.y))
+    assert tracking.metadata["legacy_overlay_transform"] == "global_reflection"
+    assert focus.metadata["legacy_overlay_transform"] == "global_reflection"
 
 
 def test_search_tile_projection_includes_corrected_edge_exposure() -> None:

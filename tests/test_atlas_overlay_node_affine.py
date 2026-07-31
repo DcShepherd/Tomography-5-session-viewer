@@ -27,7 +27,14 @@ from pathlib import Path
 
 import pytest
 
-from tomography_session_browser.domain.models import Atlas, MrcMetadata, Overview, SearchMap
+from tomography_session_browser.domain.models import (
+    Atlas,
+    BatchPosition,
+    MrcMetadata,
+    Overview,
+    SearchMap,
+    TiltSeries,
+)
 from tomography_session_browser.parsers.atlas_parser import parse_atlas_folder
 from tomography_session_browser.parsers.searchmap_parser import parse_search_map_folder
 from tomography_session_browser.services import marker_service as ms
@@ -41,6 +48,8 @@ from tomography_session_browser.services.marker_service import (
     _fit_affine_least_squares,
     _image_frame,
     _stage_to_image,
+    _template_markers_in_frame,
+    atlas_lod_markers,
     atlas_markers,
 )
 from tomography_session_browser.domain.markers import MarkerType
@@ -251,6 +260,102 @@ def test_atlas_markers_apply_alignment_before_affine() -> None:
     assert frame.atlas_pixel_affine.apply(0.0, 0.0) == pytest.approx((1000.0, 800.0))
     # No legacy reflection metadata when the affine path is used.
     assert "legacy_overlay_transform" not in ov_marker.metadata
+
+
+def test_inferred_failed_tilt_uses_atlas_affine_without_search_map_reflection() -> None:
+    coeffs = (1e6, 0.0, 1000.0, 0.0, -1e6, 800.0)
+    stage_pts = [
+        (0.0, 0.0),
+        (100e-6, 0.0),
+        (0.0, 100e-6),
+        (100e-6, 100e-6),
+    ]
+    atlas = _atlas_with_nodes(
+        _nodes_from_affine(coeffs, stage_pts, tile_w=200, tile_h=200)
+    )
+    failed = TiltSeries(
+        id="vellio-1",
+        name="vellio_1",
+        mrc_path=Path("vellio_1.mrc"),
+        mrc_metadata=MrcMetadata(
+            path=Path("vellio_1.mrc"),
+            size_bytes=0,
+            nx=1,
+            ny=1,
+            frame_metadata=[{"stage_x": 25e-6, "stage_y": 50e-6}],
+        ),
+    )
+
+    marker = next(
+        marker
+        for marker in atlas_lod_markers(
+            atlas,
+            MarkerContext(
+                tilt_series=(failed,),
+                failed_tilt_ids=frozenset({failed.id}),
+            ),
+        )
+        if marker.metadata.get("atlas_lod_role") == "unattributed"
+    )
+
+    frame = _image_frame(atlas)
+    assert frame is not None and frame.atlas_pixel_affine is not None
+    expected = frame.atlas_pixel_affine.apply(25e-6, 50e-6)
+    assert (marker.x, marker.y) == pytest.approx(expected)
+    assert "legacy_overlay_transform" not in marker.metadata
+
+
+def test_atlas_affine_preserves_focus_and_tracking_offsets_from_exposure() -> None:
+    coeffs = (1e6, 0.0, 1000.0, 0.0, -1e6, 800.0)
+    stage_pts = [
+        (0.0, 0.0),
+        (100e-6, 0.0),
+        (0.0, 100e-6),
+        (100e-6, 100e-6),
+    ]
+    atlas = _atlas_with_nodes(
+        _nodes_from_affine(coeffs, stage_pts, tile_w=200, tile_h=200)
+    )
+    batch = BatchPosition(
+        id="batch-1",
+        name="batch_1",
+        metadata={
+            "ExposureTemplateAreaParameters": {
+                "PositionX": 0.0,
+                "PositionY": 0.0,
+            },
+            "TrackingTemplateAreaParameters": {
+                "PositionX": 10e-6,
+                "PositionY": -5e-6,
+            },
+            "FocusTemplateAreaParameters": {
+                "PositionX": 10e-6,
+                "PositionY": -5e-6,
+            },
+        },
+    )
+    frame = _image_frame(atlas)
+    assert frame is not None
+
+    markers = _template_markers_in_frame(
+        atlas.id,
+        frame,
+        batch,
+        (0.0, 0.0),
+    )
+    by_type = {marker.marker_type: marker for marker in markers}
+    exposure = by_type[MarkerType.EXPOSURE_AREA]
+    tracking = by_type[MarkerType.TRACKING_AREA]
+    focus = by_type[MarkerType.FOCUS_AREA]
+
+    assert (exposure.x, exposure.y) == pytest.approx(
+        frame.atlas_pixel_affine.apply(0.0, 0.0)
+    )
+    expected_offset_position = frame.atlas_pixel_affine.apply(10e-6, -5e-6)
+    assert (tracking.x, tracking.y) == pytest.approx(expected_offset_position)
+    assert (focus.x, focus.y) == pytest.approx(expected_offset_position)
+    assert "legacy_overlay_transform" not in tracking.metadata
+    assert "legacy_overlay_transform" not in focus.metadata
 
 
 # --- documented fallbacks --------------------------------------------------

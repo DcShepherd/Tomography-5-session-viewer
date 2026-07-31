@@ -4,7 +4,7 @@ Layout (top to bottom):
 
     LABEL                   ← small uppercase title
     VALUE                   ← large count (e.g. ``21``)
-    ✓ N complete · ⚠ N warnings    ← status chip strip
+    ● N complete · ● N warnings    ← status chip strip
     [tile][tile][tile][...]        ← StatusTileGrid, OR grouped fallback
 """
 
@@ -30,6 +30,7 @@ from tomography_session_browser.ui.session_presenter import (
     StatCardModel,
     StatusTileModel,
 )
+from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.widgets.dashboard_card import (
     DASHBOARD_CARD_MARGINS,
     DASHBOARD_CARD_SPACING,
@@ -47,18 +48,6 @@ _STATUS_CHIP_ORDER = (
     TILE_STATUS_MISSING,
     TILE_STATUS_NEUTRAL,
 )
-# U+FE0E (VARIATION SELECTOR-15) forces text presentation. Without it Windows
-# resolves U+26A0 through Segoe UI Emoji, so the warning chip rendered as a
-# full-colour emoji triangle beside monochrome, theme-tinted check and cross
-# glyphs — and ignored the status colour applied to it.
-_TEXT_PRESENTATION = "︎"
-_STATUS_GLYPHS = {
-    TILE_STATUS_COMPLETE: "✓",
-    TILE_STATUS_WARNING: f"⚠{_TEXT_PRESENTATION}",
-    TILE_STATUS_FAILED: "✕",
-    TILE_STATUS_MISSING: "✕",
-    TILE_STATUS_NEUTRAL: "•",
-}
 #: What each count card actually measures. The Search maps card and the
 #: "Search maps overview" panel lower down the dashboard classify the same
 #: maps by different questions — one asks whether the map's own tiles were
@@ -164,7 +153,7 @@ class StatCard(QFrame):
     # ----- chip strip --------------------------------------------------------
 
     def _build_chip_strip(self, model: StatCardModel) -> QWidget:
-        """Return a horizontal strip of "✓ 21 complete · ⚠ 0 warnings" chips."""
+        """Return a horizontal strip of coloured-dot status summaries."""
 
         wrap = QWidget()
         row = QHBoxLayout(wrap)
@@ -183,7 +172,7 @@ class StatCard(QFrame):
             TILE_STATUS_WARNING: theme.chart_amber,
             TILE_STATUS_FAILED: theme.chart_red,
             TILE_STATUS_MISSING: theme.chart_red,
-            TILE_STATUS_NEUTRAL: self._accent,
+            TILE_STATUS_NEUTRAL: theme.unknown,
         }
         for status in _STATUS_CHIP_ORDER:
             count = status_summary.get(status, 0)
@@ -196,13 +185,25 @@ class StatCard(QFrame):
                 # chip below. Otherwise skip.
                 continue
             any_chip = True
-            chip = QLabel(
-                f'<span style="color: {color_map[status]}">'
-                f"{_STATUS_GLYPHS[status]}</span> "
-                f'<span style="color: {theme.text}">{count} {_STATUS_LABELS[status]}</span>'
+            # A zero count is not a finding, so its dot stays neutral even
+            # when the status category would normally carry a semantic colour.
+            dot_colour = theme.unknown if count == 0 else color_map[status]
+            chip = QWidget(wrap)
+            chip_layout = QHBoxLayout(chip)
+            chip_layout.setContentsMargins(0, 0, 0, 0)
+            chip_layout.setSpacing(4)
+            dot = QLabel(chip)
+            dot.setObjectName("statStatusDot")
+            dot.setFixedSize(10, 10)
+            dot.setPixmap(
+                themed_icon("shape-dot", color=dot_colour, size=10).pixmap(10, 10)
             )
-            chip.setTextFormat(Qt.TextFormat.RichText)
-            chip.setStyleSheet("font-size: 9pt;")
+            dot.setAccessibleName("")
+            chip_layout.addWidget(dot)
+            text = QLabel(f"{count} {_STATUS_LABELS[status]}", chip)
+            text.setObjectName("statStatusText")
+            text.setStyleSheet(f"color: {theme.text}; font-size: 9pt;")
+            chip_layout.addWidget(text)
             row.addWidget(chip)
 
         if not any_chip:
