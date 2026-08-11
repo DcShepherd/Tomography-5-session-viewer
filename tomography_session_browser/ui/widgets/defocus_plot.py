@@ -637,12 +637,28 @@ class DefocusScatterPlot(QWidget):
             self.update()
             event.accept()
             return
-        if key in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space}:
+        # Space selects, Enter opens — mirroring single click and double click.
+        #
+        # Before this, Enter, Return and Space all emitted ``pointClicked``, so
+        # a keyboard user could highlight a point but had **no way to open it
+        # at all**: nothing reached ``pointDoubleClicked``. Worse, that emission
+        # was consumed by the receiver's mouse double-click timer, so keyboard
+        # activation was delayed and could be cancelled by a following press.
+        #
+        # This widget has a distinct highlight state, which is why Space and
+        # Enter differ here while a plain StatCard treats them alike.
+        if key in {Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter}:
             index = self._keyboard_point_index if self._keyboard_point_index >= 0 else 0
             point = points[index]
             tilt_series_id = getattr(point, "tilt_series_id", None)
             if isinstance(tilt_series_id, str) and tilt_series_id:
-                self.pointClicked.emit(tilt_series_id, getattr(point, "frame_index", None))
+                frame_index = getattr(point, "frame_index", None)
+                if key == Qt.Key.Key_Space:
+                    self.pointClicked.emit(tilt_series_id, frame_index)
+                else:
+                    self.pointDoubleClicked.emit(tilt_series_id, frame_index)
+            self._keyboard_point_index = index
+            self.update()
             event.accept()
             return
         super().keyPressEvent(event)

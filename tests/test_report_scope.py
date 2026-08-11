@@ -14,6 +14,7 @@ from tomography_session_browser.ui.project_model import build_project_tree_group
 from tomography_session_browser.ui.report_scope import (
     ReportScopeDialog,
     ReportScopeRequest,
+    describe_report_scope,
     normalise_report_scope,
     sample_key,
 )
@@ -54,6 +55,7 @@ def test_report_scope_collection_selection_adds_linked_atlas_once() -> None:
     assert scope.sessions == (atlas, first, second)
     assert scope.project_title == "Report: Selected sessions"
     assert [group.display_name for group in scope.project_groups] == [first.name, second.name]
+    assert describe_report_scope(scope).endswith("1 supporting Atlas session")
 
 
 def test_report_scope_atlas_only_does_not_add_collections() -> None:
@@ -69,6 +71,7 @@ def test_report_scope_atlas_only_does_not_add_collections() -> None:
     assert scope.sessions == (atlas,)
     assert scope.project_title == f"Report: {atlas.name}"
     assert scope.project_groups[0].kind == "AT"
+    assert describe_report_scope(scope) == "Report will include 1 Atlas session"
 
 
 def test_report_scope_can_filter_multigrid_session_to_selected_samples() -> None:
@@ -336,3 +339,111 @@ def _multigrid_session(
         kind=SessionKind.MULTIGRID,
         samples=samples,
     )
+
+
+# --- P1: the preview must describe what the generator will produce ---------
+
+
+def _app_instance() -> QApplication:
+    return QApplication.instance() or QApplication([])
+
+
+def test_the_preview_names_supporting_atlas_sessions_the_user_never_ticked() -> None:
+    """Normalisation pulls in Atlas context; the preview has to say so.
+
+    A summary built from the checkboxes would report only the collection the
+    user selected, and under-report what the PDF is about to contain.
+    """
+
+    atlas, first, _second, _standalone = _project_sessions()
+    sessions = [atlas, first]
+    groups = build_project_tree_groups(sessions)
+    request = ReportScopeRequest(
+        group_keys=frozenset(),
+        session_keys=frozenset({session_key(first)}),
+    )
+
+    scope = normalise_report_scope(sessions, groups, request)
+    text = describe_report_scope(scope)
+
+    assert atlas in scope.sessions, "normalisation should add the supporting Atlas"
+    assert "supporting Atlas session" in text
+    assert text.startswith("Report will include")
+
+
+def test_the_dialog_preview_comes_from_normalise_report_scope() -> None:
+    """Pinning the wiring: preview and generation share one source of truth."""
+
+    _app_instance()
+    atlas, first, _second, _standalone = _project_sessions()
+    sessions = [atlas, first]
+    groups = build_project_tree_groups(sessions)
+    dialog = ReportScopeDialog(groups, sessions=sessions)
+    request = ReportScopeRequest(
+        group_keys=frozenset(),
+        session_keys=frozenset({session_key(first)}),
+    )
+
+    preview = dialog.scope_preview_text(request)
+    expected = describe_report_scope(normalise_report_scope(sessions, groups, request))
+
+    assert preview == expected
+    dialog.deleteLater()
+
+
+def test_an_empty_selection_previews_as_nothing() -> None:
+    _app_instance()
+    atlas, first, _second, _standalone = _project_sessions()
+    groups = build_project_tree_groups([atlas, first])
+    dialog = ReportScopeDialog(groups, sessions=[atlas, first])
+
+    assert dialog.scope_preview_text(
+        ReportScopeRequest(group_keys=frozenset(), session_keys=frozenset())
+    ) == "Nothing selected"
+    dialog.deleteLater()
+
+
+def test_the_primary_action_names_the_scope_under_review() -> None:
+    """"Select current view" described the widget, not the science."""
+
+    _app_instance()
+    atlas, first, _second, _standalone = _project_sessions()
+    groups = build_project_tree_groups([atlas, first])
+    dialog = ReportScopeDialog(groups, current_scope=first, sessions=[atlas, first])
+
+    label = dialog.select_current_button.text()
+
+    assert "Select current review scope" in label
+    assert "Collection_A" in label
+    assert "current view" not in label.lower()
+    dialog.deleteLater()
+
+
+def test_the_primary_action_degrades_when_there_is_no_current_scope() -> None:
+    _app_instance()
+    atlas, first, _second, _standalone = _project_sessions()
+    groups = build_project_tree_groups([atlas, first])
+    dialog = ReportScopeDialog(groups, current_scope=None, sessions=[atlas, first])
+
+    assert dialog.select_current_button.text() == "Select current review scope"
+    assert dialog.select_current_button.isEnabled() is False
+    dialog.deleteLater()
+
+
+def test_a_custom_group_name_changes_presentation_not_membership() -> None:
+    """The rename contract, asserted against the normalised scope."""
+
+    atlas, first, second, _standalone = _project_sessions()
+    sessions = [atlas, first, second]
+    plain = build_project_tree_groups(sessions)
+    renamed = build_project_tree_groups(sessions, {plain[0].key: "Renamed for the report"})
+    request = ReportScopeRequest(
+        group_keys=frozenset({plain[0].key}), session_keys=frozenset()
+    )
+
+    before = normalise_report_scope(sessions, plain, request)
+    after = normalise_report_scope(sessions, renamed, request)
+
+    assert [s.name for s in before.sessions] == [s.name for s in after.sessions]
+    assert describe_report_scope(before) == describe_report_scope(after)
+    assert after.project_groups[0].display_name == "Renamed for the report"

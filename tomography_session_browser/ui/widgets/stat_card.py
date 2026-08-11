@@ -31,6 +31,11 @@ from tomography_session_browser.ui.session_presenter import (
     StatusTileModel,
 )
 from tomography_session_browser.ui.icons import themed_icon
+from tomography_session_browser.ui.theme import (
+    TIER_PRIMARY,
+    TIER_SUPPORTING,
+    apply_tier,
+)
 from tomography_session_browser.ui.widgets.dashboard_card import (
     DASHBOARD_CARD_MARGINS,
     DASHBOARD_CARD_SPACING,
@@ -73,6 +78,20 @@ _STATUS_LABELS = {
 }
 
 
+def _is_zero_value(value: object) -> bool:
+    """Whether a card's headline value means "there is nothing here".
+
+    Tolerant of the string values some callers pass ("0", "—", "").
+    """
+
+    if value is None:
+        return True
+    if isinstance(value, (int, float)):
+        return value == 0
+    text = str(value).strip()
+    return text in {"", "0", "-", "—", "–", "n/a", "N/A"}
+
+
 class StatCard(QFrame):
     """One block in the dashboard's "counts" row.
 
@@ -97,16 +116,33 @@ class StatCard(QFrame):
         super().__init__(parent)
         self._model = model
         self._destination = model.destination or model.label
+        self._is_empty = False
         from tomography_session_browser.ui.theme import current_palette
 
         self._accent = accent or current_palette().accent
         self.setObjectName("dashboardCard")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAccessibleName(f"Open {model.label}")
-        self.setAccessibleDescription(
-            f"{model.value} {model.label.lower()} in this scope. Press Enter or Space to open the list."
+        # A card with nothing in it has no list to open. Claiming otherwise —
+        # a pointer cursor and "Press Enter or Space to open the list" — sent
+        # the reviewer to an empty tab and told a screen reader the same lie.
+        self._is_empty = _is_zero_value(model.value)
+        self.setCursor(
+            Qt.CursorShape.ArrowCursor if self._is_empty else Qt.CursorShape.PointingHandCursor
         )
+        self.setFocusPolicy(
+            Qt.FocusPolicy.NoFocus if self._is_empty else Qt.FocusPolicy.StrongFocus
+        )
+        self.setProperty("cardEmpty", self._is_empty)
+        if self._is_empty:
+            self.setAccessibleName(f"{model.label}, none in this scope")
+            self.setAccessibleDescription(
+                f"No {model.label.lower()} in this scope, so there is nothing to open."
+            )
+        else:
+            self.setAccessibleName(f"Open {model.label}")
+            self.setAccessibleDescription(
+                f"{model.value} {model.label.lower()} in this scope. "
+                "Press Enter or Space to open the list."
+            )
         # Stable footprint: we deliberately do NOT grow taller for cards with
         # many items — the tile grid manages its own internal sizing and
         # falls back to grouped chips when needed.
@@ -119,6 +155,7 @@ class StatCard(QFrame):
 
         title = QLabel(model.label.upper())
         title.setObjectName("cardTitle")
+        apply_tier(title, TIER_SUPPORTING)
         title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         help_text = _CARD_HELP.get(model.label)
         if help_text:
@@ -128,6 +165,9 @@ class StatCard(QFrame):
 
         value_label = QLabel(str(model.value))
         value_label.setObjectName("cardValue")
+        # Primary content, at the card's own size step — see the tier comment
+        # in theme.py on why an id rule may refine the size within a tier.
+        apply_tier(value_label, TIER_PRIMARY)
         layout.addWidget(value_label)
 
         chip_strip = self._build_chip_strip(model)
@@ -201,8 +241,11 @@ class StatCard(QFrame):
             dot.setAccessibleName("")
             chip_layout.addWidget(dot)
             text = QLabel(f"{count} {_STATUS_LABELS[status]}", chip)
+            # Styled from the sheet, not inline: an inline rule baked the
+            # palette in at construction, so a theme switch left the chip text
+            # in the old theme's colour until the card was rebuilt.
             text.setObjectName("statStatusText")
-            text.setStyleSheet(f"color: {theme.text}; font-size: 9pt;")
+            apply_tier(text, TIER_SUPPORTING)
             chip_layout.addWidget(text)
             row.addWidget(chip)
 
@@ -218,15 +261,18 @@ class StatCard(QFrame):
     # ----- click handling ----------------------------------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802 — Qt signature
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton and not self._is_empty:
             # Only fire the card-level signal when the click missed the tile
             # grid; the grid emits its own ``tile_clicked`` for in-grid hits.
             self.clicked.emit(self._destination)
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 — Qt signature
+        # Enter and Space are one activation gesture here: a stat card has no
+        # selection state to separate them, unlike the defocus plot.
         if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space}:
-            self.clicked.emit(self._destination)
+            if not self._is_empty:
+                self.clicked.emit(self._destination)
             event.accept()
             return
         super().keyPressEvent(event)

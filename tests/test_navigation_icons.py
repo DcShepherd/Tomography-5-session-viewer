@@ -27,6 +27,7 @@ from tomography_session_browser.ui.image_viewer import (
     PreviewSources,
     ViewerTab,
 )
+from tomography_session_browser.ui.context_stack import ENTITY_DISPLAY_LABELS
 from tomography_session_browser.ui.main_window import MainWindow, TAB_LABELS
 from tomography_session_browser.ui.navigation_icons import (
     PROJECT_GROUP_ICONS,
@@ -70,7 +71,7 @@ def test_navigation_icon_mappings_are_complete_and_resolve_to_svg_assets() -> No
     assert set(TREE_ENTITY_GROUP_ICONS) == {
         "Overviews",
         "Search maps",
-        "Search",
+        "Search tiles",
         "Batch positions",
         "Tilt series",
     }
@@ -134,11 +135,10 @@ def test_main_tabs_keep_labels_and_refresh_icons_for_both_palettes() -> None:
     try:
         dark_colours: list[str] = []
         for index, label in enumerate(TAB_LABELS):
-            assert window.tabs.tabText(index) == (
-                "Search maps" if label == "Search map"
-                else "Search tiles" if label == "Search"
-                else label
-            )
+            # C1 standardised every entity section on a plural display name,
+            # matching what the project tree already showed. The internal tab
+            # keys in TAB_LABELS are unchanged; only the text differs.
+            assert window.tabs.tabText(index) == ENTITY_DISPLAY_LABELS[label]
             icon = window.tabs.tabIcon(index)
             assert not icon.isNull()
             dark_colours.append(_opaque_centre_colour(icon))
@@ -157,15 +157,19 @@ def test_main_tabs_keep_labels_and_refresh_icons_for_both_palettes() -> None:
 
         window.resize(960, 640)
         app.processEvents()
-        assert window.tabs.tabBar().usesScrollButtons()
-        assert all(
-            window.tabs.tabText(index)
-            for index in range(len(TAB_LABELS))
-        )
+        # R1 replaced "rely on the tab bar's scroll arrows" with an explicit
+        # overflow strategy: in a narrow workspace the text is dropped so all
+        # seven tabs stay visible, and the name moves to the tooltip rather
+        # than disappearing. Icons are what identifies a tab at this width.
         assert all(
             not window.tabs.tabIcon(index).isNull()
             for index in range(len(TAB_LABELS))
         )
+        assert all(
+            window.tabs.tabToolTip(index)
+            for index in range(len(TAB_LABELS))
+        )
+        assert window.tabs.count() == len(TAB_LABELS)
     finally:
         window.close()
         app.processEvents()

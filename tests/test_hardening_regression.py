@@ -214,5 +214,40 @@ def test_tilt_angle_warnings_are_grouped_for_ui_and_reports() -> None:
     ui_groups = grouped_warnings(warnings)
     report_rows = summarise_warnings(warnings)
 
-    assert ui_groups["Tilt-angle metadata warnings"] == warnings
+    # D2 migrated the dashboard onto the report's classifier. This test used to
+    # accept two *different* names for the same finding — "Tilt-angle metadata
+    # warnings" on screen, "Tilt-angle metadata fallback" in the PDF — which is
+    # the divergence T1 and D2 exist to remove. Now they must agree.
+    assert ui_groups["Tilt-angle metadata fallback"] == warnings
     assert any(row.category == "Tilt-angle metadata fallback" and row.count == 2 for row in report_rows)
+    assert set(ui_groups) == {row.category for row in report_rows}
+
+
+def test_the_dashboard_and_the_report_count_the_same_things() -> None:
+    """Names agreed; the numbers did not.
+
+    The dashboard counted raw warning strings while the report cover counted
+    affected objects — on real data 2,805 against 85 for one finding, which
+    made the two surfaces look like they were describing different sessions.
+    """
+
+    from tomography_session_browser.ui.session_presenter import (
+        _dashboard_warning_groups,
+    )
+
+    # Three messages, two distinct affected objects.
+    warnings = [
+        "vellio_1: NaN values found in frame-dose metadata.",
+        "vellio_1: NaN values found in frame-dose metadata.",
+        "vellio_2: NaN values found in frame-dose metadata.",
+    ]
+
+    rows = _dashboard_warning_groups(warnings)
+    report_rows = {row.category: row for row in summarise_warnings(warnings)}
+
+    assert rows
+    for row in rows:
+        assert row.count == report_rows[row.label].affected_items
+        # The raw strings are still available for the expanded view.
+        assert len(row.items) == report_rows[row.label].count
+        assert row.severity == report_rows[row.label].severity

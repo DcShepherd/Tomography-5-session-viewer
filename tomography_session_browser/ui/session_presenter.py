@@ -41,6 +41,16 @@ from tomography_session_browser.services.batch_inference import (
     inferred_batch_label_for_tilt,
 )
 from tomography_session_browser.services.marker_service import inferred_failed_tilt_ids_for_search_map
+from tomography_session_browser.services.status_taxonomy import (
+    WarningPresentation,
+    build_warning_presentation,
+    severity_for_attention,
+    sort_presentations,
+)
+# NOTE: ``reports.warning_summary`` is imported lazily at every use below, not
+# here. The module itself is a leaf, but importing it runs ``reports/__init__``,
+# which imports ``report_generator``, which imports *this* module — so a
+# module-level import is a cycle.
 from tomography_session_browser.services.acquisition_metadata import (
     ACQUISITION_SPOT_LABEL,
     LEGACY_SPOT_LABEL,
@@ -502,40 +512,95 @@ def session_summary_lines(session: Session) -> list[str]:
         blocks.append("")
     blocks.append("Warnings:")
     if warnings:
-        warning_groups = grouped_warnings(warnings)
-        blocks.extend(f"  {label} ({len(items)})" for label, items in warning_groups.items())
+        # Affected objects, matching the dashboard and the report cover.
+        blocks.extend(
+            f"  {presentation.condition} ({presentation.affected_count})"
+            for presentation in warning_presentations(warnings)
+        )
     else:
         blocks.append("  None")
     return blocks
 
 
+def warning_presentations(
+    warnings: Iterable[str],
+    *,
+    affected_scope: str = "",
+) -> list[WarningPresentation]:
+    """Classify warnings once, for the dashboard and the PDF alike.
+
+    The two surfaces previously disagreed: this presenter grouped warnings with
+    ``grouped_warnings()``'s seven substring buckets while the report cover used
+    ``reports.warning_summary``'s regex rules with severities and explanations.
+    Same warnings, two answers. This routes both through the report classifier,
+    which is the richer of the two, and shapes the result into the shared
+    ``WarningPresentation`` from ``services/status_taxonomy.py``.
+
+    ``grouped_warnings()`` is retained for the callers that want the raw
+    strings grouped by category — the warning tree and the report body. Both
+    now take their *counts* and their severity from here, so the two surfaces
+    agree on the name, the number and the ordering of a finding.
+    """
+
+    from tomography_session_browser.reports.warning_summary import summarise_warnings
+
+    return sort_presentations(
+        [
+            build_warning_presentation(
+                condition=row.category,
+                severity=row.severity,
+                affected_count=row.affected_items or row.count,
+                affected_scope=affected_scope,
+                explanation=row.explanation,
+                examples=tuple(row.examples),
+            )
+            for row in summarise_warnings(warnings)
+        ]
+    )
+
+
+def warning_severity(warning: str) -> str:
+    """Severity for one raw warning, from the shared classifier.
+
+    The single entry point for "how bad is this one line?". A private
+    substring rule in this module used to answer it separately, so the same
+    finding could be coloured ``info`` on a row while being ordered as a
+    ``warning`` in the group directly above it.
+    """
+
+    from tomography_session_browser.reports.warning_summary import _classify_one
+
+    return _classify_one(warning).severity
+
+
 def grouped_warnings(warnings: Iterable[str]) -> dict[str, list[str]]:
-    groups = {
-        "NaN warnings": [],
-        "Atlas files not found": [],
-        "Missing metadata files": [],
-        "Tilt-angle metadata warnings": [],
-        "Missing image files": [],
-        "Unrecognized or incorrect folder type": [],
-        "Other": [],
-    }
+    """Group warnings by the shared classifier's categories.
+
+    D2 migrated this off its own seven substring buckets and onto the same
+    rules the report cover uses, so the dashboard and the PDF now name a
+    warning identically. The signature is unchanged — callers still get an
+    ordered mapping of heading to raw warning strings — but the headings are
+    the shared category names and empty categories are omitted.
+    """
+
+    from tomography_session_browser.reports.warning_summary import _classify_one
+
+    ordered: dict[str, list[str]] = {}
     for warning in warnings:
-        lowered = warning.lower()
-        if "nan" in lowered or "non-finite" in lowered:
-            groups["NaN warnings"].append(warning)
-        elif "atlas" in lowered and any(token in lowered for token in ("no ", "not found", "missing")):
-            groups["Atlas files not found"].append(warning)
-        elif any(token in lowered for token in ("tilt-angle", "tilt angle", "tlt file")):
-            groups["Tilt-angle metadata warnings"].append(warning)
-        elif any(token in lowered for token in ("no matching mdoc", "missing .mdoc", "missing metadata", "no .xml", "metadata")):
-            groups["Missing metadata files"].append(warning)
-        elif any(token in lowered for token in ("no search image", "no tracking image", "no exposure image", "no searchmap.jpg", "no searchmap.mrc", "image")):
-            groups["Missing image files"].append(warning)
-        elif any(token in lowered for token in ("did not match", "unsupported", "incorrect", "not a folder")):
-            groups["Unrecognized or incorrect folder type"].append(warning)
-        else:
-            groups["Other"].append(warning)
-    return {label: items for label, items in groups.items() if items}
+        ordered.setdefault(_classify_one(warning).category, []).append(warning)
+    # Errors first, then warnings, then information, matching the dashboard
+    # and report ordering from T1.
+    severity_rank = {"error": 0, "warning": 1, "info": 2}
+    return dict(
+        sorted(
+            ordered.items(),
+            key=lambda item: (
+                severity_rank.get(_classify_one(item[1][0]).severity, 1),
+                -len(item[1]),
+                item[0],
+            ),
+        )
+    )
 
 
 def describe_object(
@@ -2278,7 +2343,10 @@ def session_dashboard_model(value: Any) -> DashboardModel:
             if head and len(head) < 60:
                 sample_name = head.strip().split("/")[0].strip() or None
                 message = tail.strip()
-        severity = _classify_warning(message)
+        # The shared classifier decides severity here too. A local substring
+        # rule used to, so one warning could be coloured "info" on this row and
+        # ordered as a "warning" in the group above it.
+        severity = warning_severity(raw)
         warning_rows.append(WarningRowModel(severity=severity, sample=sample_name, message=message))
 
     unresolved_failed_groups = _unresolved_inferred_failed_batch_groups(
@@ -2413,26 +2481,30 @@ def session_dashboard_model(value: Any) -> DashboardModel:
 
 
 def _dashboard_warning_groups(warnings: list[str]) -> list[WarningGroupModel]:
-    """Group raw warning text into compact dashboard rows."""
+    """Group raw warning text into compact dashboard rows.
 
-    rows: list[WarningGroupModel] = []
-    for label, items in grouped_warnings(warnings).items():
-        severities = [_classify_warning(item) for item in items]
-        if "error" in severities:
-            severity = "error"
-        elif "warning" in severities:
-            severity = "warning"
-        else:
-            severity = "info"
-        rows.append(
-            WarningGroupModel(
-                label=label,
-                count=len(items),
-                severity=severity,
-                items=list(items),
-            )
+    ``count`` is the number of **affected objects**, not the number of warning
+    strings — the same number the report cover prints. The two surfaces used to
+    disagree by an order of magnitude on real data ("85 tilt series have NaN
+    dose fields" against "2,805 warnings"), which made the dashboard and the
+    PDF look like they were describing different sessions. The raw strings
+    remain in ``items`` for the expanded view.
+
+    Severity comes from the shared classifier for the same reason: a private
+    substring rule here was a third opinion about a finding the report and the
+    ordering had already classified.
+    """
+
+    raw_by_category = grouped_warnings(warnings)
+    return [
+        WarningGroupModel(
+            label=presentation.condition,
+            count=presentation.affected_count,
+            severity=severity_for_attention(presentation.attention),
+            items=list(raw_by_category.get(presentation.condition, ())),
         )
-    return rows
+        for presentation in warning_presentations(warnings)
+    ]
 
 
 def _sample_progress_rows(
@@ -5039,15 +5111,6 @@ def _all_tilt_series(session: Session) -> list[TiltSeries]:
     for sample in session.samples:
         items.extend(sample.tilt_series)
     return dedupe_entities(items)
-
-
-def _classify_warning(message: str) -> str:
-    lower = message.lower()
-    if any(word in lower for word in ("missing", "could not", "failed", "no mdoc", "no metadata", "corrupt")):
-        return "error"
-    if any(word in lower for word in ("partial", "approximate", "incomplete", "skipped", "unresolved")):
-        return "warning"
-    return "info"
 
 
 def _session_microscope_name(session: Session) -> str | None:

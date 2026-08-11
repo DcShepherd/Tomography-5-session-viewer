@@ -577,6 +577,43 @@ def test_search_map_focus_and_tracking_keep_same_recorded_relative_position() ->
     assert "local_rotation_anchor" not in focus.metadata
 
 
+def test_search_map_distinct_focus_is_rotated_about_primary_exposure() -> None:
+    batch = _batch()
+    batch.metadata["TrackingTemplateAreaParameters"] = {
+        "Name": "Tracking",
+        "PositionX": -10.0,
+        "PositionY": 3.0,
+    }
+    batch.metadata["FocusTemplateAreaParameters"] = {
+        "Name": "Focus",
+        "PositionX": 8.0,
+        "PositionY": -4.0,
+    }
+
+    markers = search_map_markers(_search_map(), [batch])
+    exposure = next(
+        marker
+        for marker in markers
+        if marker.marker_type == MarkerType.EXPOSURE_AREA
+        and marker.metadata.get("exposure_index") == 0
+    )
+    focus = next(
+        marker for marker in markers if marker.marker_type == MarkerType.FOCUS_AREA
+    )
+    tracking = next(
+        marker for marker in markers if marker.marker_type == MarkerType.TRACKING_AREA
+    )
+
+    before = focus.metadata["focus_orientation_before"]
+    assert (focus.x, focus.y) == pytest.approx(
+        (2 * exposure.x - before[0], 2 * exposure.y - before[1])
+    )
+    assert focus.metadata["focus_orientation_transform"] == (
+        "local_180_about_primary_exposure"
+    )
+    assert "focus_orientation_transform" not in tracking.metadata
+
+
 def test_overview_focus_and_tracking_at_same_offset_stay_coincident() -> None:
     batch = _batch()
     batch.linked_overview_id = "overview"

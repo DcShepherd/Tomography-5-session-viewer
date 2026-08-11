@@ -48,6 +48,7 @@ from tomography_session_browser.domain.display_names import count_phrase as _cou
 from tomography_session_browser.services.timeline_service import SessionTimeline
 from tomography_session_browser.ui.animations import fade_in_layout_children
 from tomography_session_browser.ui.icons import themed_icon
+from tomography_session_browser.ui.context_stack import ContextStack
 from tomography_session_browser.ui.session_presenter import (
     AtlasRowModel,
     AtlasSummaryModel,
@@ -73,6 +74,12 @@ from tomography_session_browser.ui.widgets.dashboard_card import (
     DASHBOARD_HEADER_SPACING,
 )
 from tomography_session_browser.ui.widgets.dose_information_plot import DoseInformationScatterPlot
+from tomography_session_browser.ui.theme import (
+    TIER_LANDMARK,
+    TIER_PRIMARY,
+    TIER_SUPPORTING,
+    apply_tier,
+)
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 from tomography_session_browser.ui.widgets.stat_card import StatCard
 from tomography_session_browser.ui.widgets.time_chart import (
@@ -149,6 +156,34 @@ def _status_colors() -> dict[str, str]:
         "missing": theme.chart_red,
         "neutral": theme.unknown,
     }
+
+
+def _status_dot(color: str, *, compact: bool = False, width: int = 12) -> QLabel:
+    """A status glyph whose colour is data and whose size is style.
+
+    The colour genuinely varies per row, so it stays inline. The size does
+    not, and setting it inline put type decisions in a place neither the
+    stylesheet nor the tier system could see.
+    """
+
+    dot = QLabel("●")
+    dot.setObjectName("statusDot")
+    dot.setProperty("compact", bool(compact))
+    dot.setStyleSheet(f"color: {color};")
+    dot.setFixedWidth(width)
+    return dot
+
+
+def _progress_row_name(text: str, *, compact: bool) -> ElidedLabel:
+    """The entity name on a dashboard progress row: primary content."""
+
+    name = ElidedLabel(text)
+    name.setObjectName("progressRowName")
+    name.setProperty("compact", bool(compact))
+    apply_tier(name, TIER_PRIMARY)
+    name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+    name.setMinimumWidth(_ROW_LABEL_MIN_WIDTH_COMPACT if compact else _ROW_LABEL_MIN_WIDTH)
+    return name
 
 
 def _status_color(key: str | None, fallback: str | None = None) -> str:
@@ -594,6 +629,7 @@ def _card_with_title(title: str) -> tuple[_CardBox, QVBoxLayout]:
     layout.setSpacing(DASHBOARD_CARD_SPACING)
     title_label = QLabel(title.upper())
     title_label.setObjectName("cardTitle")
+    apply_tier(title_label, TIER_SUPPORTING)
     title_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
     layout.addWidget(title_label)
     return card, layout
@@ -701,7 +737,7 @@ class SessionDashboard(QWidget):
     navigate_requested = Signal(str)
     search_map_clicked = Signal(str)
     sample_clicked = Signal(str)
-    filter_requested = Signal(str, str)  # (destination tab, query)
+    filter_requested = Signal(str, str, str)  # (destination tab, query, reason)
     point_clicked = Signal(str, object)  # tilt_series_id, 1-based frame_index | None
     point_double_clicked = Signal(str, object)  # tilt_series_id, 1-based frame_index | None
     timeline_tilt_series_requested = Signal(str, object)  # tilt_series_id, 1-based frame_index | None
@@ -715,6 +751,7 @@ class SessionDashboard(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("sessionDashboard")
+        self._context_stack: ContextStack | None = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -867,6 +904,32 @@ class SessionDashboard(QWidget):
             if widget is not None and widget is not self._placeholder:
                 widget.deleteLater()
 
+    def set_context_stack(self, stack: ContextStack | None) -> None:
+        """Supply the review scope shown above the dashboard title."""
+
+        self._context_stack = stack
+
+    def _context_eyebrow_text(self, title: str = "") -> str:
+        """The review scope, unless the title below already says it.
+
+        The context header sits above every page including this one, and the
+        dashboard title is usually the scope's own name — so on a session-scope
+        dashboard an eyebrow repeating it made the same words appear three
+        times within two lines. It earns its place when the title is something
+        narrower than the scope (a sample inside a linked group), and stays out
+        of the way when it is not.
+        """
+
+        stack = getattr(self, "_context_stack", None)
+        if stack is None or not stack.scope_label:
+            return ""
+        # Compare the bare scope name, not the badged label: the badge is
+        # already on the context header and in the project tree, so it is not
+        # on its own a reason to repeat the name.
+        if title and stack.scope.casefold() == title.casefold():
+            return ""
+        return stack.scope_label.upper()
+
     def _build_header(self, model: DashboardModel) -> QWidget:
         wrap = QWidget()
         layout = QVBoxLayout(wrap)
@@ -878,11 +941,19 @@ class SessionDashboard(QWidget):
         left = QVBoxLayout()
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(3)
-        eyebrow = QLabel("PROJECT · SESSION")
+        # The eyebrow used to read a hard-coded "PROJECT · SESSION" on every
+        # screen, which told the reviewer nothing about where they were. It
+        # now shows the real review scope supplied by the context stack.
+        eyebrow_text = self._context_eyebrow_text(model.title)
+        eyebrow = QLabel(eyebrow_text)
         eyebrow.setObjectName("screenEyebrow")
+        apply_tier(eyebrow, TIER_SUPPORTING)
+        eyebrow.setToolTip(eyebrow_text)
+        eyebrow.setVisible(bool(eyebrow_text))
         left.addWidget(eyebrow)
         title = ElidedLabel(model.title)
         title.setObjectName("screenTitle")
+        apply_tier(title, TIER_LANDMARK)
         title.setToolTip(model.title)
         left.addWidget(title)
         title_row.addLayout(left, stretch=1)
@@ -1055,7 +1126,10 @@ class SessionDashboard(QWidget):
             button.setEnabled(filter_model.count > 0 or not filter_model.query)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(
-                lambda _checked=False, tab=filter_model.tab, query=filter_model.query: self.filter_requested.emit(tab, query)
+                lambda _checked=False,
+                tab=filter_model.tab,
+                query=filter_model.query,
+                reason=filter_model.tooltip: self.filter_requested.emit(tab, query, reason)
             )
             filter_row.addWidget(button)
         filter_row.addStretch(1)
@@ -1450,12 +1524,11 @@ class SessionDashboard(QWidget):
         layout = QHBoxLayout(wrap)
         layout.setContentsMargins(0, 2, 0, 2)
         layout.setSpacing(8)
-        dot = QLabel("●")
-        dot.setFixedWidth(12)
-        dot.setStyleSheet(f"color: {_status_color(row.status)}; font-size: 10pt;")
+        dot = _status_dot(_status_color(row.status), compact=True)
         layout.addWidget(dot)
         label = ElidedLabel(row.label)
         label.setObjectName("metaValue")
+        apply_tier(label, TIER_PRIMARY)
         label.setToolTip(row.label)
         layout.addWidget(label, stretch=1)
         status_text = {
@@ -1537,7 +1610,6 @@ class SessionDashboard(QWidget):
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(7)
-        dot = QLabel("●")
         color = (
             _status_color("failed")
             if row_model.failed
@@ -1547,15 +1619,10 @@ class SessionDashboard(QWidget):
             if row_model.complete
             else _status_color("neutral")
         )
-        dot.setStyleSheet(f"color: {color}; font-size: {'10' if compact else '11'}pt;")
-        dot.setFixedWidth(12)
+        dot = _status_dot(color, compact=compact)
         top.addWidget(dot)
 
-        name = ElidedLabel(row_model.label)
-        name.setObjectName("metaValue")
-        name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        name.setMinimumWidth(_ROW_LABEL_MIN_WIDTH_COMPACT if compact else _ROW_LABEL_MIN_WIDTH)
-        name.setStyleSheet(f"font-weight: 600; font-size: {'9.2' if compact else '10'}pt;")
+        name = _progress_row_name(row_model.label, compact=compact)
         top.addWidget(name, stretch=1)
 
         chip_parts = [
@@ -1666,7 +1733,6 @@ class SessionDashboard(QWidget):
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(7)
-        dot = QLabel("●")
         color = (
             _status_color("failed")
             if row_model.status == "failed"
@@ -1676,16 +1742,11 @@ class SessionDashboard(QWidget):
             if row_model.status == "complete"
             else _status_color("neutral")
         )
-        dot.setStyleSheet(f"color: {color}; font-size: {'10' if compact else '11'}pt;")
-        dot.setFixedWidth(12)
+        dot = _status_dot(color, compact=compact)
         top.addWidget(dot)
 
-        name = ElidedLabel(row_model.label)
-        name.setObjectName("metaValue")
+        name = _progress_row_name(row_model.label, compact=compact)
         name.setToolTip(row_model.tooltip)
-        name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        name.setMinimumWidth(_ROW_LABEL_MIN_WIDTH_COMPACT if compact else _ROW_LABEL_MIN_WIDTH)
-        name.setStyleSheet(f"font-weight: 600; font-size: {'9.2' if compact else '10'}pt;")
         top.addWidget(name, stretch=1)
 
         # Zero-valued outcomes are dropped so the chip stays narrow enough to
@@ -1986,17 +2047,17 @@ class SessionDashboard(QWidget):
         layout = QHBoxLayout(wrap)
         layout.setContentsMargins(0, 2, 0, 2)
         layout.setSpacing(8)
-        dot = QLabel("●")
-        dot.setStyleSheet(f"color: {_status_color(row.severity)}; font-size: 11pt;")
-        dot.setFixedWidth(14)
+        dot = _status_dot(_status_color(row.severity), width=14)
         layout.addWidget(dot)
         if row.sample:
             sample = ElidedLabel(row.sample)
             sample.setObjectName("metaKey")
+            apply_tier(sample, TIER_SUPPORTING)
             sample.setFixedWidth(90)
             layout.addWidget(sample)
         msg = ElidedLabel(row.message)
         msg.setObjectName("metaPlain")
+        apply_tier(msg, TIER_PRIMARY)
         msg.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(msg, stretch=1)
         return wrap
@@ -2021,16 +2082,20 @@ class SessionDashboard(QWidget):
         layout.addWidget(count)
 
         label = QLabel(group.label)
-        label.setObjectName("metaValue")
-        label.setStyleSheet("font-weight: 600;")
+        label.setObjectName("warningGroupLabel")
+        apply_tier(label, TIER_PRIMARY)
         label.setWordWrap(True)
         label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        # The count is affected objects; the raw messages are what the tooltip
+        # carries, so say which is which rather than leaving a bare number.
+        count.setToolTip(
+            f"{group.count:,} affected · {len(group.items):,} warning messages"
+        )
         label.setToolTip("\n".join(group.items[:8]))
         layout.addWidget(label, stretch=1)
 
-        arrow = QLabel("›")
-        arrow.setObjectName("metaKey")
-        layout.addWidget(arrow)
+        # No chevron here. It navigated nowhere and expanded nothing, which is
+        # a promise the row cannot keep. Warning groups are summary-only.
         return wrap
 
     # ----- helpers

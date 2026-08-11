@@ -11,10 +11,12 @@ the icon-loader's default colour so freshly-built actions match the theme.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final
 
+from PySide6.QtCore import QStandardPaths
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 
 # Qt stylesheets do not handle CSS-style fallback stacks reliably on Windows.
@@ -646,9 +648,13 @@ QCheckBox::indicator {{
     background: {surface};
 }}
 
+/* Checked state carries a tick, not just a fill. Colour alone left "checked"
+   and "unchecked" differing only in lightness, which is indistinguishable in
+   grayscale and unreliable for colour-vision deficiency. */
 QCheckBox::indicator:checked {{
     background: {accent};
     border-color: {accent};
+    image: url("{check_icon}");
 }}
 
 QCheckBox::indicator:disabled {{
@@ -1028,6 +1034,217 @@ QLabel#viewerPanelHeader {{
     text-transform: uppercase;
 }}
 
+/* ---------------------------------------------------------------------
+   Three visual tiers (V1).
+
+   1. Page landmark  — where am I: the context header's scope, an empty
+      state's heading.
+   2. Primary scientific content — the thing under review: card values,
+      row names, detail text.
+   3. Supporting metadata — everything that qualifies it: card titles,
+      counts, evidence, the context header's notes row.
+
+   Expressed as type weight and colour only. The plan forbids gradients,
+   oversized cards and added whitespace; density is the point of this app.
+
+   These are **dynamic properties**, not object names. An earlier version used
+   ``QLabel#tierLandmark``, which asked every widget to give up the semantic
+   object name its own rule already needed — so no widget ever carried a tier
+   and the whole block was unreachable. A property sits alongside the object
+   name, so a widget can say both what it is and which tier it belongs to.
+
+   A widget's own ``#objectName`` rule has higher specificity and may refine
+   the size within its tier where a surface genuinely needs a different step
+   (a 22pt card value and a 9.5pt crumb are both primary content). The tier is
+   the declared classification and the default; the id rule is the exception.
+   Use ``apply_tier()`` rather than setting the property by hand.
+   --------------------------------------------------------------------- */
+
+QLabel[tier="landmark"] {{
+    color: {text_strong};
+    font-size: 11pt;
+    font-weight: 600;
+}}
+
+QLabel[tier="primary"] {{
+    color: {text};
+    font-size: 10pt;
+    font-weight: 500;
+}}
+
+QLabel[tier="supporting"] {{
+    color: {text_muted};
+    font-size: 8.5pt;
+}}
+
+/* Dashboard row typography. Previously set with inline style sheets, which
+   put type decisions in a fourth place and baked the palette in at
+   construction so a theme switch left them stale. */
+QLabel#statusDot {{
+    font-size: 11pt;
+}}
+
+QLabel#statusDot[compact="true"] {{
+    font-size: 10pt;
+}}
+
+QLabel#progressRowName {{
+    font-size: 10pt;
+    font-weight: 600;
+}}
+
+QLabel#progressRowName[compact="true"] {{
+    font-size: 9.2pt;
+}}
+
+QLabel#warningGroupLabel {{
+    font-weight: 600;
+}}
+
+QLabel#statStatusText {{
+    color: {text};
+    font-size: 9pt;
+}}
+
+/* One visually primary action per screen; related context is subordinate.
+   The pair reads as a hierarchy rather than two equal buttons. */
+QPushButton#primaryAction {{
+    background: {accent};
+    color: {primary_text};
+    border: 1px solid {accent};
+    border-radius: 5px;
+    padding: 5px 14px;
+    font-weight: 600;
+}}
+
+QPushButton#primaryAction:hover {{
+    background: {accent_strong};
+    border-color: {accent_strong};
+}}
+
+QPushButton#primaryAction:pressed {{
+    background: {accent_line};
+    border-color: {accent_line};
+}}
+
+QPushButton#primaryAction:disabled {{
+    background: {surface_alt};
+    color: {text_muted};
+    border-color: {border};
+}}
+
+QPushButton#secondaryAction {{
+    background: transparent;
+    color: {accent};
+    border: none;
+    padding: 5px 8px;
+    font-weight: 500;
+}}
+
+QPushButton#secondaryAction:hover {{
+    color: {accent_strong};
+    text-decoration: underline;
+}}
+
+/* Empty-state panel. Restrained: no illustration, no oversized chrome. */
+QWidget#emptyStatePanel {{
+    background: transparent;
+}}
+
+QLabel#emptyStateTitle {{
+    color: {text_strong};
+    font-size: 11pt;
+    font-weight: 600;
+}}
+
+QLabel#emptyStateDetail {{
+    color: {text};
+    font-size: 9.5pt;
+}}
+
+QLabel#emptyStateEvidence {{
+    color: {text_muted};
+    font-size: 8.5pt;
+}}
+
+/* Status chips. Completing available/queued/pending/selected so a chip's
+   state is never carried by colour alone — each keeps a readable border and
+   its own text. */
+QLabel[chipState="available"] {{
+    color: {overlay_status_complete};
+    border: 1px solid {overlay_status_complete};
+    border-radius: 4px;
+    padding: 0 5px;
+    font-size: 8pt;
+}}
+
+QLabel[chipState="queued"], QLabel[chipState="pending"] {{
+    color: {overlay_status_pending};
+    border: 1px solid {overlay_status_pending};
+    border-radius: 4px;
+    padding: 0 5px;
+    font-size: 8pt;
+}}
+
+QLabel[chipState="selected"] {{
+    color: {primary_text};
+    background: {accent};
+    border: 1px solid {accent};
+    border-radius: 4px;
+    padding: 0 5px;
+    font-size: 8pt;
+    font-weight: 600;
+}}
+
+/* Interactive cards get a restrained, visible response. A card with nothing
+   in it is inert and must not react — see StatCard's cardEmpty property. */
+QFrame#dashboardCard[cardEmpty="false"]:hover {{
+    border-color: {accent_line};
+}}
+
+QFrame#dashboardCard[cardEmpty="true"] {{
+    color: {text_muted};
+}}
+
+QLabel#projectBadgeLegend {{
+    color: {text_muted};
+    font-size: 8pt;
+}}
+
+QWidget#contextHeader {{
+    background: {surface};
+    border-bottom: 1px solid {border};
+}}
+
+QLabel#contextScope {{
+    color: {text_strong};
+    font-size: 9.5pt;
+    font-weight: 600;
+}}
+
+QLabel#contextCrumbs {{
+    color: {text};
+    font-size: 9.5pt;
+}}
+
+QLabel#contextNotes {{
+    color: {text_muted};
+    font-size: 8.5pt;
+}}
+
+QPushButton#contextClearFilter {{
+    color: {accent};
+    font-size: 8.5pt;
+    font-weight: 600;
+    border: none;
+    padding: 0 4px;
+}}
+
+QPushButton#contextClearFilter:hover {{
+    color: {accent_strong};
+    text-decoration: underline;
+}}
+
 QLabel#screenTitle {{
     color: {text_strong};
     font-size: 21pt;
@@ -1279,7 +1496,41 @@ def build_stylesheet(palette: ThemePalette) -> str:
         **palette.__dict__,
         sans_font=SANS_FONT_FAMILY,
         mono_font=MONO_FONT_FAMILY,
+        check_icon=_check_indicator_path(palette),
     )
+
+
+def _check_indicator_path(palette: ThemePalette) -> str:
+    """Absolute POSIX path to a tick recoloured for ``palette``.
+
+    Written once per palette into the user's cache directory: Qt style sheets
+    can only reference an image by URL, so this one icon has to exist on disk
+    rather than being recoloured in memory like every other icon.
+
+    Deliberately self-contained. ``APP_QSS`` is built at import time, so
+    reaching into ``ui.icons`` here — which imports this module — produced a
+    circular import depending on which was loaded first.
+    """
+
+    source = Path(__file__).resolve().parent.parent / "assets" / "icons" / "check.svg"
+    colour = palette.primary_text
+    try:
+        cache_root = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.CacheLocation
+        )
+        cache_dir = Path(cache_root) if cache_root else source.parent
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        target = cache_dir / f"check-{colour.lstrip('#').lower()}.svg"
+        if not target.exists():
+            target.write_text(
+                source.read_text(encoding="utf-8").replace("currentColor", colour),
+                encoding="utf-8",
+            )
+        return target.as_posix()
+    except OSError:
+        # A read-only cache location must never break theming; the uncoloured
+        # tick still reads as a tick.
+        return source.as_posix()
 
 
 # Backwards-compat: ``APP_QSS`` was a module-level constant in the previous
@@ -1290,6 +1541,32 @@ APP_QSS = build_stylesheet(DARK_PALETTE)
 
 
 _active_palette: ThemePalette = DARK_PALETTE
+
+# The three visual tiers from V1, as dynamic-property values. Import these
+# rather than spelling the strings at call sites, so a widget cannot silently
+# claim a tier that has no rule behind it.
+TIER_LANDMARK = "landmark"
+TIER_PRIMARY = "primary"
+TIER_SUPPORTING = "supporting"
+VISUAL_TIERS: tuple[str, ...] = (TIER_LANDMARK, TIER_PRIMARY, TIER_SUPPORTING)
+
+
+def apply_tier(widget: QWidget, tier: str) -> QWidget:
+    """Classify ``widget`` into one of the three visual tiers.
+
+    Returns the widget so it can be used inline where one is being built.
+    Setting the property after the stylesheet is installed needs an explicit
+    repolish, which is done here so callers cannot forget it.
+    """
+
+    if tier not in VISUAL_TIERS:
+        raise ValueError(f"Unknown visual tier: {tier!r}")
+    widget.setProperty("tier", tier)
+    style = widget.style()
+    if style is not None:
+        style.unpolish(widget)
+        style.polish(widget)
+    return widget
 
 
 def current_palette() -> ThemePalette:

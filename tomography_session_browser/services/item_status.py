@@ -146,10 +146,38 @@ def batch_position_status_counts(
     )
 
 
+def batch_positions_for_search_map(
+    search_map: SearchMap,
+    context: ItemStatusContext,
+) -> list[BatchPosition]:
+    """Batches linked to ``search_map`` in either metadata direction.
+
+    Tomography 5 records the relationship on whichever side happened to be
+    written, so a row that reads only ``BatchPosition.linked_search_map_id``
+    disagrees with navigation, which also honours
+    ``SearchMap.linked_batch_position_ids``. Both directions are accepted here
+    and deduplicated by batch ID, so metadata written on both sides counts
+    once.
+
+    Only explicit metadata participates. Inferred failed-batch labels stay out:
+    an orphaned failed tilt series must not make a Search map claim a batch
+    that no metadata links to it.
+    """
+
+    reciprocal_ids = set(search_map.linked_batch_position_ids or [])
+    linked: list[BatchPosition] = []
+    seen: set[str] = set()
+    for batch in context.batch_positions:
+        if batch.id in seen:
+            continue
+        if batch.linked_search_map_id == search_map.id or batch.id in reciprocal_ids:
+            linked.append(batch)
+            seen.add(batch.id)
+    return linked
+
+
 def _search_map_status(search_map: SearchMap, context: ItemStatusContext) -> ItemListStatus:
-    linked_batches = [
-        batch for batch in context.batch_positions if batch.linked_search_map_id == search_map.id
-    ]
+    linked_batches = batch_positions_for_search_map(search_map, context)
     counts = _StatusCounts()
     planned = 0
     for batch in linked_batches:

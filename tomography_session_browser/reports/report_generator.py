@@ -97,7 +97,6 @@ from tomography_session_browser.ui.session_presenter import (
     DashboardModel,
     compute_atlas_counts,
     dedupe_entities,
-    grouped_warnings,
     search_map_acquisition_rollup,
     search_map_batch_positions,
     session_dashboard_model,
@@ -2200,4 +2199,4 @@ __all__ = ["ProjectReportGroup", "ReportResult", "build_session_report"]
 
 
 # Imports retained for type clarity / grep targets.
-_ = (Sample, BatchPosition, Overview, SearchMap, MarkerType, defaultdict, re, grouped_warnings, HARD_FAILURE_THRESHOLD, colors)
+_ = (Sample, BatchPosition, Overview, SearchMap, MarkerType, defaultdict, re, HARD_FAILURE_THRESHOLD, colors)

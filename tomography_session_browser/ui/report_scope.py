@@ -49,6 +49,7 @@ class ReportScope:
     project_title: str
     project_groups: tuple[ProjectReportGroup, ...]
     default_filename: str
+    supporting_session_keys: frozenset[str] = frozenset()
 
 
 def _repolish(widget: QWidget) -> None:
@@ -62,11 +63,7 @@ def _repolish(widget: QWidget) -> None:
 
 
 def _selection_summary_text(request: ReportScopeRequest) -> str:
-    """Describe the current selection above the confirm button.
-
-    The dialog previously gave no feedback about what a click on "Generate
-    report" would actually include.
-    """
+    """Describe what was *clicked* — the fallback when no scope is resolvable."""
 
     if not request.has_selection:
         return "Nothing selected"
@@ -79,6 +76,64 @@ def _selection_summary_text(request: ReportScopeRequest) -> str:
     return "Selected: " + ", ".join(chosen)
 
 
+def describe_report_scope(scope: "ReportScope") -> str:
+    """Describe what the report will actually contain.
+
+    Built from the *normalised* scope rather than from the checkboxes, because
+    normalisation adds supporting Atlas sessions the user never ticked. A
+    preview derived from the selection would quietly under-report what the PDF
+    is about to include.
+    """
+
+    if not scope.sessions:
+        return "Nothing selected"
+
+    atlas_sessions = [
+        session for session in scope.sessions if session.kind == SessionKind.ATLAS_SCREENING
+    ]
+    supporting_atlas_sessions = [
+        session
+        for session in atlas_sessions
+        if session_key(session) in scope.supporting_session_keys
+    ]
+    selected_atlas_sessions = [
+        session
+        for session in atlas_sessions
+        if session_key(session) not in scope.supporting_session_keys
+    ]
+    collection_sessions = [
+        session for session in scope.sessions if session.kind != SessionKind.ATLAS_SCREENING
+    ]
+    samples = sum(len(session.samples) for session in collection_sessions)
+
+    parts: list[str] = []
+    if samples:
+        parts.append(count_phrase(samples, "collection sample"))
+    if collection_sessions and not samples:
+        parts.append(count_phrase(len(collection_sessions), "collection session"))
+    if selected_atlas_sessions:
+        parts.append(count_phrase(len(selected_atlas_sessions), "Atlas session"))
+    if supporting_atlas_sessions:
+        # Named explicitly: these are pulled in by normalisation, so a reader
+        # who did not tick them should still see them coming.
+        parts.append(count_phrase(len(supporting_atlas_sessions), "supporting Atlas session"))
+    if not parts:
+        parts.append(count_phrase(len(scope.sessions), "session"))
+    return "Report will include " + " and ".join(parts)
+
+
+def _describe_current_scope(value: Any | None) -> str:
+    """Name the scope under review, for the dialog's primary action."""
+
+    if value is None:
+        return ""
+    for attribute in ("display_name", "name", "label"):
+        candidate = getattr(value, attribute, None)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
 class ReportScopeDialog(QDialog):
     """Checkbox tree for choosing the sessions included in a PDF report."""
 
@@ -87,10 +142,23 @@ class ReportScopeDialog(QDialog):
         groups: Iterable[ProjectTreeGroup],
         *,
         current_scope: Any | None = None,
+        sessions: Iterable[Session] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._groups = list(groups)
+        # Needed to preview the *normalised* scope rather than the raw
+        # selection. Falls back to the groups' own sessions so an existing
+        # caller that does not pass them still gets a usable preview.
+        self._sessions = (
+            list(sessions)
+            if sessions is not None
+            else [
+                session
+                for group in self._groups
+                for session in group.sessions
+            ]
+        )
         self._item_updates_blocked = False
         self._group_items: dict[str, QTreeWidgetItem] = {}
         self._session_items: dict[str, QTreeWidgetItem] = {}
@@ -133,11 +201,19 @@ class ReportScopeDialog(QDialog):
 
         controls = QHBoxLayout()
         controls.setSpacing(8)
-        self.select_current_button = QPushButton("Select current view", self)
+        # "view" described the widget; this is about the scientific scope being
+        # reviewed, and now names it.
+        scope_name = _describe_current_scope(current_scope)
+        self.select_current_button = QPushButton(
+            f"Select current review scope: {scope_name}"
+            if scope_name
+            else "Select current review scope",
+            self,
+        )
         self.select_current_button.setEnabled(current_scope is not None)
         self.select_current_button.setToolTip(
-            "Select the scope currently shown in the application"
-            if current_scope is not None
+            f"Select {scope_name}, the scope currently under review"
+            if scope_name
             else "No current reportable scope is available"
         )
         self.select_all_button = QPushButton("Select all", self)
@@ -187,6 +263,24 @@ class ReportScopeDialog(QDialog):
         if current_scope is not None:
             self.select_scope(current_scope)
         self._update_generate_enabled()
+
+    def scope_preview_text(self, request: ReportScopeRequest | None = None) -> str:
+        """What the report will contain, from the same function that decides it.
+
+        Routing the preview through ``normalise_report_scope`` is the point: a
+        summary derived from the checkboxes could describe a scope the
+        generator never produces, and would miss the supporting Atlas sessions
+        normalisation adds.
+        """
+
+        request = request if request is not None else self.selected_request()
+        if not request.has_selection:
+            return "Nothing selected"
+        try:
+            scope = normalise_report_scope(self._sessions, self._groups, request)
+        except Exception:  # pragma: no cover - a preview must never block the dialog
+            return _selection_summary_text(request)
+        return describe_report_scope(scope)
 
     def selected_request(self) -> ReportScopeRequest:
         group_keys: set[str] = set()
@@ -346,7 +440,7 @@ class ReportScopeDialog(QDialog):
     def _update_generate_enabled(self) -> None:
         request = self.selected_request()
         self.generate_button.setEnabled(request.has_selection)
-        self.selection_summary.setText(_selection_summary_text(request))
+        self.selection_summary.setText(self.scope_preview_text(request))
 
     def _set_checked(self, item: QTreeWidgetItem, checked: bool) -> None:
         item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
@@ -485,6 +579,11 @@ def normalise_report_scope(
         project_title=title,
         project_groups=tuple(_dedupe_project_report_groups(report_groups)),
         default_filename=f"{_safe_filename(filename_label)}_report.pdf",
+        supporting_session_keys=frozenset(
+            session_key(session)
+            for session in loaded_sessions
+            if id(session) in supporting_session_ids
+        ),
     )
 
 

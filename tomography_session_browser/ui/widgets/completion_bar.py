@@ -143,7 +143,9 @@ class CompletionBar(QWidget):
                 f'<span style="color: {failed_color.name()}">● {failed_count} failed {exposure_noun}{batch_suffix}</span>'
             )
             failed_chip.setTextFormat(Qt.TextFormat.RichText)
-            failed_chip.setStyleSheet("font-size: 9pt;")
+            # Size from the sheet; the colour stays inline because it is a
+            # per-row status value, not a type decision.
+            failed_chip.setObjectName("statStatusText")
             failed_chip.setToolTip(
                 f"{failed_count} exposure area{'s' if failed_count != 1 else ''} associated with this search map "
                 "failed validation"

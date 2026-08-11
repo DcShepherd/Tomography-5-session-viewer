@@ -4,6 +4,8 @@ import logging
 import re
 import sys
 import time
+from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
@@ -11,7 +13,7 @@ LOGGER = logging.getLogger(__name__)
 
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QEventLoop, QObject, QElapsedTimer, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QObject, QElapsedTimer, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -64,8 +66,14 @@ from tomography_session_browser.services.marker_service import MarkerContext, at
 from tomography_session_browser.services.item_status import ItemListStatus, build_item_status_context, item_list_status
 from tomography_session_browser.services.loading_profiler import LoadingProfiler
 from tomography_session_browser.services.navigation_service import (
+    NavigationResolution,
+    navigation_resolution_from_candidates,
     resolve_batch_position_overview,
     resolve_batch_position_search_map,
+    resolve_search_map_overview,
+    resolve_search_tile_batch_position,
+    resolve_search_tile_search_map,
+    resolve_search_tile_tilt_series,
     resolve_tilt_series_navigation_targets,
     tab_label_for_object,
 )
@@ -84,6 +92,7 @@ from tomography_session_browser.ui.image_viewer import (
     PreviewSources,
     ViewerNavigationAction,
     ViewerTab,
+    ViewerViewState,
     atlas_preview_path,
     batch_position_preview_path,
     clear_preview_cache,
@@ -107,6 +116,31 @@ from tomography_session_browser.ui.navigation_icons import (
     TAB_ICONS,
     TREE_ENTITY_GROUP_ICONS,
 )
+from tomography_session_browser.ui.context_stack import (
+    ENTITY_DISPLAY_LABELS,
+    ContextStack,
+    borrowed_atlas_note,
+    build_context_stack,
+    describe_scope_value,
+    entity_display_label,
+    entity_display_label_singular,
+    tab_key_for_display_label,
+)
+from tomography_session_browser.ui.empty_states import (
+    COMMAND_CHOOSE_ANOTHER as EMPTY_COMMAND_CHOOSE_ANOTHER,
+    COMMAND_CLEAR_FILTER as EMPTY_COMMAND_CLEAR_FILTER,
+    COMMAND_COPY_DETAILS as EMPTY_COMMAND_COPY_DETAILS,
+    COMMAND_OPEN_SESSION as EMPTY_COMMAND_OPEN_SESSION,
+    COMMAND_RETRY as EMPTY_COMMAND_RETRY,
+    COMMAND_RETURN_TO_SCOPE as EMPTY_COMMAND_RETURN_TO_SCOPE,
+    COMMAND_SHOW_METADATA as EMPTY_COMMAND_SHOW_METADATA,
+    load_failed_state,
+    unresolved_relationship_state,
+)
+from tomography_session_browser.ui.navigation_history import (
+    HistoryLocation,
+    NavigationHistory,
+)
 from tomography_session_browser.ui.project_model import (
     ProjectTreeGroup,
     build_project_tree_groups,
@@ -116,6 +150,7 @@ from tomography_session_browser.ui.project_model import (
 from tomography_session_browser.ui.report_scope import ReportScopeDialog, normalise_report_scope
 from tomography_session_browser.ui.session_linking import linked_sample_groups, sample_sort_key_for_group
 from tomography_session_browser.ui.theme import apply_theme, current_palette, palette_for
+from tomography_session_browser.ui.widgets.context_header import ContextHeader
 from tomography_session_browser.ui.widgets.metadata_panel import MetadataPanel
 from tomography_session_browser.ui.widgets.loading_overlay import LoadingOverlay
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
@@ -135,17 +170,57 @@ from tomography_session_browser.ui.session_presenter import (
     session_summary_lines,
     session_summary_sections,
     session_warnings,
+    warning_presentations,
 )
 
 
-TAB_LABELS = ["Session", "Atlas", "Overview", "Search map", "Search", "Batch position", "Tilt series"]
-_TAB_DISPLAY_LABELS = {
-    "Search map": "Search maps",
-    "Search": "Search tiles",
+# Upper bound on remembered per-(scope, tab) viewer state. Six tabs across a
+# realistic number of scopes; oldest scopes are evicted first.
+VIEWER_STATE_CACHE_LIMIT = 96
+
+# Workspace-width breakpoints. These describe the *central* area, not the
+# window: the docks are user-resizable, so a wide window can still leave a
+# cramped reviewing area. All three are transient observations recomputed on
+# resize — none is ever written to settings. See ``_derived_narrow_chrome``.
+WORKSPACE_NARROW_CHROME_PX = 1420
+WORKSPACE_MEDIUM_PILL_PX = 1120
+WORKSPACE_WIDE_PILL_PX = 1500
+# Project-totals strip: full labels, abbreviations, then nothing. These were
+# the last width thresholds still measured against the *window*, so widening
+# the docks compacted every other piece of chrome and left this one alone.
+WORKSPACE_FULL_TOTALS_PX = 1500
+WORKSPACE_ABBREVIATED_TOTALS_PX = 1120
+WORKSPACE_RUNTIME_LABEL_PX = 1040
+# Floor for the derived workspace width. Dragging the docks out until they meet
+# leaves nothing in the middle; reporting the *window* width there said "wide"
+# at the precise moment the reviewing area was at its narrowest.
+WORKSPACE_MIN_PX = 1
+
+# Badge meanings, shown under the project filter. Kept in one place so the
+# legend, the per-row accessible names and the tooltips cannot disagree.
+PROJECT_BADGE_MEANINGS: dict[str, str] = {
+    "LS": "Linked session",
+    "AT": "Atlas-only session",
+    "DC": "Data collection session",
+    "!": "Unresolved or ambiguous atlas link",
 }
+PROJECT_BADGE_LEGEND_TEXT = " · ".join(
+    f"{badge} {meaning.split()[0].lower()}" for badge, meaning in PROJECT_BADGE_MEANINGS.items()
+)
+PROJECT_BADGE_LEGEND_TOOLTIP = "\n".join(
+    f"{badge} — {meaning}" for badge, meaning in PROJECT_BADGE_MEANINGS.items()
+)
+
+TAB_LABELS = ["Session", "Atlas", "Overview", "Search map", "Search", "Batch position", "Tilt series"]
+# Display text lives in ui/context_stack.py so there is exactly one place an
+# internal tab key becomes something a person reads. The keys themselves are
+# dictionary keys used across this window and must not be renamed.
+_TAB_DISPLAY_LABELS = ENTITY_DISPLAY_LABELS
 OBJECT_ROLE = int(Qt.ItemDataRole.UserRole)
 EXPANSION_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 HIGHLIGHT_ROLE = int(Qt.ItemDataRole.UserRole) + 2
+#: Absolute path carried by a "Recent sessions" row so it can be reopened.
+RECENT_PATH_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 _ACTIVE_CONTEXT = object()
 SESSION_FOLDER_HELP_TEXT = (
     "Select the folder for your atlas and/or data collection session"
@@ -785,6 +860,7 @@ class MainWindow(QMainWindow):
         self._session: Session | None = None
         self._sessions: list[Session] = []
         self._current_path: str | None = None
+        self._failed_session_path: str | None = None
         self._viewer_tabs: dict[str, ViewerTab] = {}
         self._active_context: Session | Sample | LinkedSampleGroup | EntityGroup | ProjectTreeGroup | None = None
         self._dashboard_focus_value: Any | None = None
@@ -809,6 +885,19 @@ class MainWindow(QMainWindow):
         self._theme_actions: list[QAction] = []  # actions whose icon needs refreshing on theme change
         self._theme_refresh_generation = 0
         self._failed_tilt_ids_cache: frozenset[str] | None = None
+        # Bounded LRU of per-(scope, tab) viewer state. Holds only IDs and
+        # scalars, so it can never keep a removed session's entities alive.
+        self._viewer_states: OrderedDict[tuple[str, str], ViewerViewState] = OrderedDict()
+        self._pending_filter_notice: str | None = None
+        self._history = NavigationHistory()
+        # Applying a history entry must not itself be recorded, or Back would
+        # push a new step every time it was pressed.
+        self._suppress_history_record = False
+        # Set for one event turn so a double-click, which Qt reports through
+        # both itemDoubleClicked and itemActivated, only acts once.
+        self._project_tree_activation_guard: int | None = None
+        # Why the current filter was applied from a dashboard drill-down.
+        self._dashboard_filter_reason = ""
         # Status-bar project totals, keyed by a cheap fingerprint of the
         # loaded session list. Computing them means six full traversals plus
         # a dedupe that builds a Path per entity, which is far too expensive
@@ -909,6 +998,15 @@ class MainWindow(QMainWindow):
             self.loading_overlay.setGeometry(self.rect())
         self._update_responsive_chrome()
 
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt signature
+        if watched is self.centralWidget() and event.type() == QEvent.Type.Resize:
+            # Dragging either dock changes the central workspace without
+            # resizing the main window. A central-widget Resize event already
+            # carries the committed geometry, so update in the same event turn
+            # and avoid leaving stale chrome until another input arrives.
+            self._update_responsive_chrome()
+        return super().eventFilter(watched, event)
+
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main")
         toolbar.setObjectName("mainToolbar")
@@ -917,7 +1015,8 @@ class MainWindow(QMainWindow):
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         toolbar.setFixedHeight(50)
         self.main_toolbar = toolbar
-        self._toolbar_compact: bool | None = None
+        self._toolbar_narrow: bool | None = None
+        self._tabs_icon_only = False
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
         self.brand_label = TitleBarLockup(self)
@@ -978,6 +1077,31 @@ class MainWindow(QMainWindow):
         self.refresh_action.triggered.connect(self.refresh_session)
         self.refresh_action.setEnabled(False)
         toolbar.addAction(self.refresh_action)
+
+        toolbar.addSeparator()
+
+        # Back / Forward ------------------------------------------------------
+        # Only explicit jumps are recorded, so Back returns to somewhere the
+        # reviewer chose to be rather than replaying passive selections.
+        self.back_action = self._action(
+            "chevron-left",
+            "Back",
+            "Return to the previous navigation step.",
+            "Alt+Left",
+        )
+        self.back_action.triggered.connect(self.navigate_history_back)
+        self.back_action.setEnabled(False)
+        toolbar.addAction(self.back_action)
+
+        self.forward_action = self._action(
+            "chevron-right",
+            "Forward",
+            "Move forward again after going back.",
+            "Alt+Right",
+        )
+        self.forward_action.triggered.connect(self.navigate_history_forward)
+        self.forward_action.setEnabled(False)
+        toolbar.addAction(self.forward_action)
 
         toolbar.addSeparator()
 
@@ -1114,32 +1238,94 @@ class MainWindow(QMainWindow):
         for index, label in enumerate(TAB_LABELS):
             self.tabs.setTabIcon(index, themed_icon(TAB_ICONS[label], size=16))
 
+    def workspace_width(self) -> int:
+        """Width of the central workspace, not of the whole window.
+
+        The docks are user-resizable, so a wide window with a wide project tree
+        and a wide metadata panel can leave the reviewing area as cramped as a
+        small window. Chrome that serves the workspace should follow the
+        workspace.
+        """
+
+        # Derived by subtracting the visible docks rather than reading the
+        # central widget directly: before the window is laid out the central
+        # widget's width is meaningless, and trusting it made an unshown window
+        # report itself as cramped.
+        width = self.width()
+        for attribute in ("project_dock", "context_dock"):
+            dock = getattr(self, attribute, None)
+            # A floating dock is visible but no longer takes space out of the
+            # centre, so subtracting it would under-report the workspace.
+            if dock is not None and dock.isVisible() and not dock.isFloating():
+                width -= dock.width()
+        # Clamp rather than falling back to the window width: the fallback
+        # inverted the answer exactly when the workspace was most cramped.
+        return max(width, WORKSPACE_MIN_PX)
+
+    def _derived_narrow_chrome(self) -> bool:
+        """Transient, recomputed on every resize — never a saved preference.
+
+        Named apart from ``Settings.compact`` on purpose. Both concepts were
+        called "compact", which is precisely how a breakpoint ends up
+        overwriting something the user chose. ``Settings.compact`` is a
+        persisted user toggle (currently an inert, hidden action); this is a
+        width observation and is never written to settings.
+        """
+
+        return self.workspace_width() < WORKSPACE_NARROW_CHROME_PX
+
     def _refresh_branding(self) -> None:
         if not hasattr(self, "brand_label"):
             return
         palette = current_palette()
-        compact = self.width() < 1420
         self.brand_label.set_theme(palette.name)
-        self.brand_label.set_compact(compact)
+        # ``TitleBarLockup.set_compact`` is that widget's own vocabulary; the
+        # value we pass it is the derived observation, not the preference.
+        self.brand_label.set_compact(self._derived_narrow_chrome())
 
     def _update_responsive_chrome(self) -> None:
-        """Keep the toolbar and status strip useful at supported window widths."""
+        """Keep the toolbar and status strip useful at supported widths."""
 
         self._refresh_branding()
-        width = self.width()
-        compact = width < 1420
-        if hasattr(self, "main_toolbar") and compact != self._toolbar_compact:
+        width = self.workspace_width()
+        narrow = self._derived_narrow_chrome()
+        if hasattr(self, "main_toolbar") and narrow != self._toolbar_narrow:
             self.main_toolbar.setToolButtonStyle(
                 Qt.ToolButtonStyle.ToolButtonIconOnly
-                if compact
+                if narrow
                 else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
             )
-            self._toolbar_compact = compact
+            self._toolbar_narrow = narrow
         if hasattr(self, "session_pill"):
             pill = getattr(self, "session_pill_container", self.session_pill)
-            pill.setMaximumWidth(300 if width >= 1500 else 220 if width >= 1120 else 150)
+            pill.setMaximumWidth(
+                300
+                if width >= WORKSPACE_WIDE_PILL_PX
+                else 220
+                if width >= WORKSPACE_MEDIUM_PILL_PX
+                else 150
+            )
+        if hasattr(self, "context_header"):
+            self.context_header.set_narrow(narrow)
+        if hasattr(self, "tabs"):
+            self._update_tab_overflow_strategy(narrow)
         if hasattr(self, "status_counts"):
             self._update_status_summary()
+
+    def _update_tab_overflow_strategy(self, narrow: bool) -> None:
+        """Drop tab text before relying on the tab bar's scroll arrows.
+
+        Seven tabs with icon and text do not fit a narrow workspace, and Qt's
+        fallback is a pair of small arrows that hide whole entity types behind
+        a scroll gesture. Icons alone keep every tab reachable; the name moves
+        to the tooltip rather than vanishing.
+        """
+
+        if narrow == self._tabs_icon_only:
+            return
+        self._tabs_icon_only = narrow
+        self.tabs.tabBar().setExpanding(False)
+        self._update_tab_counts()
 
     def _update_session_pill(self) -> None:
         if not hasattr(self, "session_pill"):
@@ -1197,11 +1383,17 @@ class MainWindow(QMainWindow):
             "Tilt series": len(self._context_tilt_series(context)) if self._sessions else 0,
         }
         for index, label in enumerate(TAB_LABELS):
-            if label == "Session":
-                self.tabs.setTabText(index, "Session")
-            else:
-                display_label = _TAB_DISPLAY_LABELS.get(label, label)
-                self.tabs.setTabText(index, f"{display_label}  {counts.get(label, 0)}")
+            display_label = _TAB_DISPLAY_LABELS.get(label, label)
+            full_text = (
+                "Session"
+                if label == "Session"
+                else f"{display_label}  {counts.get(label, 0)}"
+            )
+            # In a narrow workspace the label is dropped to the tooltip so all
+            # seven tabs stay visible; Qt's fallback would hide whole entity
+            # types behind small scroll arrows instead.
+            self.tabs.setTabText(index, "" if self._tabs_icon_only else full_text)
+            self.tabs.setTabToolTip(index, full_text)
 
     def _tab_count_context(self) -> Any:
         """Return the broad scope that should drive top-tab counts.
@@ -1297,20 +1489,26 @@ class MainWindow(QMainWindow):
         totals = self._project_entity_totals()
         # Atlas was the only tab missing from this strip and from its tooltip,
         # even though the tab bar counts it.
+        # Section names are plural throughout the interface (C1 settled this and
+        # DOC1 records it). A count next to a singular noun was the last place
+        # the strip disagreed with its own tooltip.
         counts = (
-            ("Atlas", "atlas", "atlases", totals["Atlas"]),
-            ("Overview", "overview", None, totals["Overview"]),
-            ("Search map", "search map", None, totals["Search map"]),
-            ("Search tile", "search tile", None, totals["Search tile"]),
-            ("Batch position", "batch position", None, totals["Batch position"]),
+            ("Atlases", "atlas", "atlases", totals["Atlas"]),
+            ("Overviews", "overview", None, totals["Overview"]),
+            ("Search maps", "search map", None, totals["Search map"]),
+            ("Search tiles", "search tile", None, totals["Search tile"]),
+            ("Batch positions", "batch position", None, totals["Batch position"]),
             ("Tilt series", "tilt series", "tilt series", totals["Tilt series"]),
         )
-        width = self.width()
-        if width >= 1500:
+        # The workspace, not the window — the same rule the toolbar, branding,
+        # session pill, tabs and context header follow. Widening the docks used
+        # to compact all of those and leave this strip claiming it had room.
+        width = self.workspace_width()
+        if width >= WORKSPACE_FULL_TOTALS_PX:
             text = "Project totals · " + " · ".join(
                 f"{count_label} {value}" for count_label, _, _, value in counts
             )
-        elif width >= 1120:
+        elif width >= WORKSPACE_ABBREVIATED_TOTALS_PX:
             abbreviations = ("AT", "OV", "SM", "ST", "BP", "TS")
             text = "Project totals · " + " · ".join(
                 f"{abbreviation} {entry[3]}"
@@ -1320,7 +1518,7 @@ class MainWindow(QMainWindow):
             text = ""
         self.status_counts.setText(text)
         self.status_counts.setVisible(bool(text))
-        self.status_runtime.setVisible(width >= 1040)
+        self.status_runtime.setVisible(width >= WORKSPACE_RUNTIME_LABEL_PX)
         self.status_counts.setToolTip(
             "Project totals: "
             + ", ".join(count_phrase(value, singular, plural) for _, singular, plural, value in counts)
@@ -1447,6 +1645,7 @@ class MainWindow(QMainWindow):
                         first_turn=True,
                     ),
                 )
+            self._refresh_context_header()
 
     def _defer_session_context_sync_until_repaint(
         self,
@@ -1573,6 +1772,22 @@ class MainWindow(QMainWindow):
         filter_layout.addWidget(self.project_filter)
         layout.addWidget(filter_wrap)
 
+        # The LS / AT / DC / ! badges previously had no in-app explanation at
+        # all — their meaning lived only in the handover documents.
+        # Wrapped, not elided: the project panel is narrow, and a legend that
+        # truncates to "LS Lin…" explains nothing.
+        self.project_badge_legend = QLabel(PROJECT_BADGE_LEGEND_TEXT, panel)
+        self.project_badge_legend.setWordWrap(True)
+        self.project_badge_legend.setObjectName("projectBadgeLegend")
+        self.project_badge_legend.setToolTip(PROJECT_BADGE_LEGEND_TOOLTIP)
+        self.project_badge_legend.setAccessibleName("Project badge legend")
+        self.project_badge_legend.setAccessibleDescription(PROJECT_BADGE_LEGEND_TOOLTIP)
+        legend_wrap = QWidget(panel)
+        legend_layout = QVBoxLayout(legend_wrap)
+        legend_layout.setContentsMargins(10, 0, 10, 6)
+        legend_layout.addWidget(self.project_badge_legend)
+        layout.addWidget(legend_wrap)
+
         self.tree = QTreeWidget()
         self.tree.setObjectName("projectTree")
         self.tree.setColumnCount(2)
@@ -1594,6 +1809,8 @@ class MainWindow(QMainWindow):
         self.tree.currentItemChanged.connect(self._tree_selection_changed)
         self.tree.itemPressed.connect(self._project_tree_item_pressed)
         self.tree.itemDoubleClicked.connect(self._project_tree_item_double_clicked)
+        # Enter previously did nothing on any tree row, for any entity type.
+        self.tree.itemActivated.connect(self._project_tree_item_activated)
         root = QTreeWidgetItem(["No session loaded", ""])
         root.setToolTip(0, "No session loaded")
         self._style_tree_item(root)
@@ -1681,15 +1898,32 @@ class MainWindow(QMainWindow):
                     else None,
                 )
                 self._viewer_tabs[label] = viewer_tab
+                # Keep the header's filter summary and Clear action in step
+                # with what the reviewer types.
+                viewer_tab.list_filter.textChanged.connect(
+                    lambda _text: self._refresh_context_header()
+                )
+                viewer_tab.empty_state_action_requested.connect(
+                    self._on_empty_state_action
+                )
                 layout.addWidget(viewer_tab, stretch=1)
             index = self.tabs.addTab(tab, _TAB_DISPLAY_LABELS.get(label, label))
             self.tabs.setTabIcon(index, themed_icon(TAB_ICONS[label], size=16))
         container = QWidget(self)
         container.setObjectName("centralShell")
-        outer = QHBoxLayout(container)
+        outer = QVBoxLayout(container)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(self.tabs)
+        outer.setSpacing(0)
+        # One header above every page, so scope, section, selection, filters
+        # and borrowed Atlas context are stated on all of them rather than
+        # only on the dashboard.
+        self.context_header = ContextHeader(container)
+        self.context_header.filter_clear_requested.connect(self._clear_active_tab_filter)
+        outer.addWidget(self.context_header)
+        outer.addWidget(self.tabs, stretch=1)
         self.setCentralWidget(container)
+        container.installEventFilter(self)
+        self._refresh_context_header()
 
     def open_session(self) -> None:
         dialog = OpenSessionsDialog(self._loader, self._current_path or "", self)
@@ -1851,6 +2085,7 @@ class MainWindow(QMainWindow):
         if not isinstance(session, Session):
             self._on_session_load_failed(path, replace, quiet, animate, "Loader returned an unexpected session object.")
             return
+        self._failed_session_path = None
         if not replace and self._session_for_path(session.path) is not None:
             if not quiet:
                 self.statusBar().showMessage(f"{session.name} is already loaded.", 4000)
@@ -1873,6 +2108,12 @@ class MainWindow(QMainWindow):
         self._detach_stall_monitor()
         self._unbind_main_thread_profile()
         self._finish_loading("Loading failed", fade=False)
+        self._failed_session_path = path
+        if not self._sessions:
+            state = load_failed_state(path=path, error=error)
+            for viewer_tab in self._viewer_tabs.values():
+                viewer_tab.show_empty_state(state)
+            self.tabs.setCurrentIndex(TAB_LABELS.index("Overview"))
         QMessageBox.critical(self, "Could not load session", f"{error}\n\nPath: {path}")
 
     def _on_session_ui_prepare_failed(self, error: str) -> None:
@@ -2027,6 +2268,8 @@ class MainWindow(QMainWindow):
         else:
             self._sessions.append(session)
         self._failed_tilt_ids_cache = None
+        self.clear_viewer_states()
+        self._prune_history()
         self._viewer_tilt_validations.clear()
         self._dashboard_model_cache.clear()
         self._session = self._sessions[0]
@@ -2291,6 +2534,9 @@ class MainWindow(QMainWindow):
         dialog = ReportScopeDialog(
             groups,
             current_scope=self._report_default_scope_value(),
+            # Passed so the dialog can preview the *normalised* scope, which is
+            # what the generator will actually produce.
+            sessions=self._sessions,
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -2354,7 +2600,7 @@ class MainWindow(QMainWindow):
             )
             box.setDetailedText("\n".join(warnings))
         open_report_button = box.addButton("Open report", QMessageBox.ButtonRole.AcceptRole)
-        open_folder_button = box.addButton("Open folder", QMessageBox.ButtonRole.ActionRole)
+        open_folder_button = box.addButton("Show in folder", QMessageBox.ButtonRole.ActionRole)
         box.addButton(QMessageBox.StandardButton.Close)
         box.exec()
         if box.clickedButton() is open_report_button:
@@ -2524,9 +2770,18 @@ class MainWindow(QMainWindow):
             visit(self.tree.topLevelItem(index))
 
     def _project_group_item(self, group: ProjectTreeGroup) -> QTreeWidgetItem:
-        item = QTreeWidgetItem([group.display_name, self._project_group_tag(group)])
+        badge = self._project_group_tag(group)
+        item = QTreeWidgetItem([group.display_name, badge])
         item.setToolTip(0, self._project_group_tooltip(group))
         item.setToolTip(1, self._project_group_badge_tooltip(group))
+        # Spell the badge out rather than leaving a screen reader to announce
+        # two letters. Unresolved groups also state why, inline.
+        meaning = PROJECT_BADGE_MEANINGS.get(badge, badge)
+        accessible = f"{group.display_name}, {meaning}"
+        if group.warnings:
+            accessible = f"{accessible}. {group.warnings[0]}"
+        item.setData(0, Qt.ItemDataRole.AccessibleTextRole, accessible)
+        item.setData(1, Qt.ItemDataRole.AccessibleTextRole, meaning)
         item.setData(0, OBJECT_ROLE, group)
         item.setData(0, EXPANSION_ROLE, f"project:{group.key}")
         self._style_tree_item(item)
@@ -2602,7 +2857,7 @@ class MainWindow(QMainWindow):
                 item.addChild(self._item("Atlas", atlases[0]))
             self._add_group(item, "Overviews", [value for sample in samples for value in sample.overviews])
             self._add_group(item, "Search maps", [value for sample in samples for value in sample.search_maps])
-            self._add_group(item, "Search", [value for sample in samples for value in sample.search_tiles])
+            self._add_group(item, "Search tiles", [value for sample in samples for value in sample.search_tiles])
             self._add_group(item, "Batch positions", [value for sample in samples for value in sample.batch_positions])
             self._add_group(item, "Tilt series", [value for sample in samples for value in sample.tilt_series])
             items.append(item)
@@ -2620,14 +2875,14 @@ class MainWindow(QMainWindow):
             parent.addChild(self._item("Atlas", session.atlas))
         self._add_group(parent, "Overviews", session.overviews)
         self._add_group(parent, "Search maps", session.search_maps)
-        self._add_group(parent, "Search", session.search_tiles)
+        self._add_group(parent, "Search tiles", session.search_tiles)
         self._add_group(parent, "Batch positions", session.batch_positions)
         self._add_group(parent, "Tilt series", session.tilt_series)
 
     def _add_collection_groups(self, parent: QTreeWidgetItem, sample: Sample) -> None:
         self._add_group(parent, "Overviews", sample.overviews)
         self._add_group(parent, "Search maps", sample.search_maps)
-        self._add_group(parent, "Search", sample.search_tiles)
+        self._add_group(parent, "Search tiles", sample.search_tiles)
         self._add_group(parent, "Batch positions", sample.batch_positions)
         self._add_group(parent, "Tilt series", sample.tilt_series)
 
@@ -2767,9 +3022,18 @@ class MainWindow(QMainWindow):
         for path in recent:
             label = Path(path).name or path
             child = QTreeWidgetItem([label, "closed"])
-            child.setToolTip(0, path)
+            child.setToolTip(0, f"{path}\nActivate to reopen this session")
             child.setToolTip(1, "Recently opened session")
             child.setData(0, EXPANSION_ROLE, f"recent:{self._path_key(Path(path))}")
+            # These rows previously carried no data at all, so both clicking
+            # and pressing Enter did nothing — they advertised a session the
+            # app would not open.
+            child.setData(0, RECENT_PATH_ROLE, path)
+            child.setData(
+                0,
+                Qt.ItemDataRole.AccessibleTextRole,
+                f"{label}, recently opened session, activate to reopen",
+            )
             self._style_tree_item(child)
             section.addChild(child)
 
@@ -2867,6 +3131,7 @@ class MainWindow(QMainWindow):
             self.session_summary.clear()
             self.session_summary.addTopLevelItem(QTreeWidgetItem(["Open a Tomography session folder to view parsed session details."]))
             self.warning_tree.clear()
+            self.session_dashboard.set_context_stack(self.current_context_stack())
             self.session_dashboard.set_model(None)
             return []
         self.session_summary.setUpdatesEnabled(False)
@@ -2968,6 +3233,7 @@ class MainWindow(QMainWindow):
             render_timer = QElapsedTimer()
             render_timer.start()
             display_model = self._dashboard_display_model(model, scope_value)
+            self.session_dashboard.set_context_stack(self.current_context_stack())
             self.session_dashboard.set_model(
                 display_model,
                 timeline,
@@ -2990,6 +3256,7 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:  # pragma: no cover — defensive fallback
             LOGGER.warning("Dashboard model build failed: %s", exc, exc_info=True)
+            self.session_dashboard.set_context_stack(self.current_context_stack())
             self.session_dashboard.set_model(None)
 
     def _dashboard_display_model(self, model: Any, scope_value: Any) -> Any:
@@ -3155,7 +3422,9 @@ class MainWindow(QMainWindow):
 
     def _navigate_to_tab(self, target: str) -> None:
         if target in TAB_LABELS:
+            departure = self._current_history_location()
             self.tabs.setCurrentIndex(TAB_LABELS.index(target))
+            self._record_history(departure)
 
     def _on_dashboard_search_map_clicked(self, search_map_id: str) -> None:
         self._on_dashboard_tile_clicked("Search map", search_map_id)
@@ -3184,6 +3453,7 @@ class MainWindow(QMainWindow):
             self.navigate_to_tilt_series(target.id, source="dashboard tile")
             return
 
+        departure = self._current_history_location()
         # Make sure the destination tab's list actually contains this entity
         # — switch active context to the right scope first if needed. The
         # existing helper handles all four entity types.
@@ -3194,6 +3464,7 @@ class MainWindow(QMainWindow):
         # ``_select_viewer_object`` already switches to the right tab AND
         # selects the matching list row when present.
         self._select_viewer_object(target)
+        self._record_history(departure)
 
     def _on_dashboard_plot_point_clicked(self, tilt_series_id: str, frame_index: object = None) -> None:
         if not tilt_series_id:
@@ -3279,6 +3550,7 @@ class MainWindow(QMainWindow):
         if not isinstance(target, TiltSeries):
             self.statusBar().showMessage("No linked tilt series", 2000)
             return
+        departure = self._current_history_location()
         context = self._context_for_object(target)
         self._dashboard_focus_value = None
         self._dashboard_scope_prefers_tree = False
@@ -3299,7 +3571,8 @@ class MainWindow(QMainWindow):
         frame = self._zero_based_frame_index(frame_index)
         if frame is not None:
             QTimer.singleShot(0, lambda frame=frame: self._select_tilt_series_frame(frame))
-        self.statusBar().showMessage(f"Opened {self._label_for(target)} from {source}.", 2500)
+        self._show_arrival_message(f"Opened {self._label_for(target)} from {source}.", 2500)
+        self._record_history(departure)
 
     def _select_tilt_series_frame(self, frame_index: int) -> None:
         viewer = self._viewer_tabs.get("Tilt series")
@@ -3320,6 +3593,7 @@ class MainWindow(QMainWindow):
         target = self._find_object_by_id(sample_id)
         if target is None:
             return
+        departure = self._current_history_location()
         context = self._context_for_object(target)
         if isinstance(context, LinkedSampleGroup):
             self._dashboard_focus_value = None
@@ -3332,6 +3606,7 @@ class MainWindow(QMainWindow):
             self._update_tab_counts()
             self.tabs.setCurrentIndex(TAB_LABELS.index("Session"))
             self._set_context(context.label, context)
+            self._record_history(departure)
             return
         if isinstance(target, Sample):
             self._dashboard_focus_value = None
@@ -3344,12 +3619,20 @@ class MainWindow(QMainWindow):
             self._update_tab_counts()
             self.tabs.setCurrentIndex(TAB_LABELS.index("Session"))
             self._set_context(target.name, target)
+            self._record_history(departure)
             return
         self.tabs.setCurrentIndex(TAB_LABELS.index("Session"))
+        self._record_history(departure)
 
-    def _on_dashboard_filter_requested(self, destination: str, query: str) -> None:
+    def _on_dashboard_filter_requested(
+        self,
+        destination: str,
+        query: str,
+        reason: str = "",
+    ) -> None:
         if destination not in TAB_LABELS:
             return
+        departure = self._current_history_location()
         self.tabs.setCurrentIndex(TAB_LABELS.index(destination))
         viewer_tab = self._viewer_tabs.get(destination)
         if viewer_tab is not None:
@@ -3358,6 +3641,11 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Filtered {destination.lower()} list: {query}", 3000)
             else:
                 self.statusBar().showMessage(f"Showing all {destination.lower()} entries", 3000)
+        # State *why* at the destination. A filtered list with no explanation
+        # is indistinguishable from a scope that simply has little in it.
+        self._dashboard_filter_reason = reason if query else ""
+        self._record_history(departure)
+        self._refresh_context_header()
 
     def _render_warning_groups(self, warnings: list[str]) -> None:
         self.warning_tree.setUpdatesEnabled(False)
@@ -3366,9 +3654,21 @@ class MainWindow(QMainWindow):
             if not warnings:
                 self.warning_tree.addTopLevelItem(QTreeWidgetItem(["No warnings"]))
                 return
+            # Heading counts are affected objects, matching the dashboard and
+            # the report cover; the children remain the parser's own strings.
+            raw_by_category = grouped_warnings(warnings)
             groups: list[QTreeWidgetItem] = []
-            for label, items in grouped_warnings(warnings).items():
-                group = QTreeWidgetItem([f"{label} ({len(items)})"])
+            for presentation in warning_presentations(warnings):
+                items = raw_by_category.get(presentation.condition, [])
+                group = QTreeWidgetItem(
+                    [f"{presentation.condition} ({presentation.affected_count})"]
+                )
+                group.setToolTip(
+                    0,
+                    f"{presentation.affected_count} affected, "
+                    f"{len(items)} warning messages."
+                    + (f"\n{presentation.why_it_matters}" if presentation.why_it_matters else ""),
+                )
                 group.addChildren([QTreeWidgetItem([warning]) for warning in items])
                 groups.append(group)
             self.warning_tree.addTopLevelItems(groups)
@@ -3415,12 +3715,99 @@ class MainWindow(QMainWindow):
             self._set_dashboard_highlighted_tilt_series_id(None)
 
     def _project_tree_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        self._activate_project_tree_item(item)
+
+    def _project_tree_item_activated(self, item: QTreeWidgetItem, column: int) -> None:
+        """Keyboard activation (Enter) on the project tree.
+
+        Qt emits ``itemActivated`` for Enter *and*, on most platforms, for
+        double-click. Both routes land here, and the guard below stops a
+        double-click firing the action twice.
+        """
+
+        self._activate_project_tree_item(item)
+
+    def _activate_project_tree_item(self, item: QTreeWidgetItem | None) -> bool:
+        """Open the tree item's object in its viewer tab.
+
+        Selection and activation stay distinct: selection re-scopes and
+        describes, activation opens. Only activation is an explicit navigation
+        event, which is what H1 will record in history.
+
+        Returns True when something was opened.
+        """
+
+        if item is None:
+            return False
+        recent_path = item.data(0, RECENT_PATH_ROLE)
+        if isinstance(recent_path, str) and recent_path:
+            return self._activate_recent_session(item, recent_path)
         value = item.data(0, OBJECT_ROLE)
-        if not isinstance(value, TiltSeries):
-            return
+        if value is None:
+            return False
+        if self._project_tree_activation_guard == id(item):
+            return False
+        self._project_tree_activation_guard = id(item)
+        # Release the guard once this event turn finishes, so a deliberate
+        # second activation still works.
+        QTimer.singleShot(0, self._clear_project_tree_activation_guard)
+
         self._project_tree_tilt_click_timer.stop()
         self._pending_project_tree_clear_tilt_id = None
-        self.navigate_to_tilt_series(value.id, source="project panel")
+
+        if isinstance(value, TiltSeries):
+            # navigate_to_tilt_series records history itself.
+            self.navigate_to_tilt_series(value.id, source="project panel")
+            return True
+        if isinstance(value, EntityGroup):
+            departure = self._current_history_location()
+            self._switch_to_group_tab(value.label)
+            first_value = next(iter(value.values), None)
+            if first_value is not None:
+                self._select_viewer_object(first_value)
+            self._record_history(departure)
+            return True
+        if tab_label_for_object(value) is not None:
+            # Atlas, Overview, Search map, Search tile and Batch position all
+            # became keyboard-reachable here; previously only a Tilt series
+            # responded, and only to a double-click.
+            departure = self._current_history_location()
+            self._select_viewer_object(value)
+            self._record_history(departure)
+            return True
+        if isinstance(value, ProjectTreeGroup | Session | Sample | LinkedSampleGroup):
+            # Scope rows have no destination beyond themselves; activating one
+            # expands it, which is what a reviewer means by pressing Enter.
+            item.setExpanded(not item.isExpanded())
+            return True
+        return False
+
+    def _activate_recent_session(self, item: QTreeWidgetItem, path: str) -> bool:
+        """Reopen a recent session, or say why it cannot be reopened.
+
+        A path in the recent list can have been moved or deleted since it was
+        last opened. Reporting that is better than the previous behaviour,
+        which was to do nothing at all and leave the reviewer guessing whether
+        the click registered.
+        """
+
+        if self._project_tree_activation_guard == id(item):
+            return False
+        self._project_tree_activation_guard = id(item)
+        QTimer.singleShot(0, self._clear_project_tree_activation_guard)
+
+        folder = Path(path)
+        if not folder.exists():
+            self.statusBar().showMessage(
+                f"{folder.name} is no longer at {folder}. It may have been moved or removed."
+            )
+            return False
+
+        self._queue_session_loads([(str(folder), not self._sessions, bool(self._sessions), True)])
+        return True
+
+    def _clear_project_tree_activation_guard(self) -> None:
+        self._project_tree_activation_guard = None
 
     def _repaint_project_tree_selection_rows(
         self,
@@ -3583,6 +3970,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_project_state_after_edit(self, *, select_group_key: str | None = None) -> None:
         self._failed_tilt_ids_cache = None
+        self.clear_viewer_states()
+        self._prune_history()
         self._viewer_tilt_validations.clear()
         self._dashboard_model_cache.clear()
         self._session = self._sessions[0] if self._sessions else None
@@ -3674,12 +4063,427 @@ class MainWindow(QMainWindow):
             item.addChild(QTreeWidgetItem([f"{label}: {value}"]))
         return item
 
+    # -- Back / Forward history --------------------------------------------
+
+    def _current_history_location(self) -> HistoryLocation | None:
+        """Snapshot the current destination as identifiers only."""
+
+        if not hasattr(self, "tabs") or not hasattr(self, "_viewer_tabs"):
+            return None
+        tab = TAB_LABELS[self.tabs.currentIndex()]
+        viewer_tab = self._viewer_tabs.get(tab)
+        state = viewer_tab.capture_view_state() if viewer_tab is not None else None
+        current = getattr(viewer_tab, "_current_value", None) if viewer_tab is not None else None
+        return HistoryLocation(
+            scope_key=self._viewer_state_scope_key(),
+            tab=tab,
+            object_type=type(current).__name__ if current is not None else "",
+            object_id=(state.object_id if state is not None else "") or "",
+            marker_id=(state.marker_id if state is not None else "") or "",
+            frame_index=state.frame_index if state is not None else None,
+            filter_text=state.filter_text if state is not None else "",
+            label=self._label_for(current) if current is not None else "",
+        )
+
+    def _record_history(self, departure: HistoryLocation | None = None) -> None:
+        """Record an explicit jump.
+
+        Deliberately *not* called from selection changes, preview loads or
+        ordinary tab switches: those are not navigation, and recording them
+        would bury the steps the reviewer actually chose.
+        """
+
+        if self._suppress_history_record:
+            return
+        if departure is not None:
+            self._history.record(departure)
+        location = self._current_history_location()
+        if location is None:
+            return
+        self._history.record(location)
+        self._update_history_actions()
+
+    def _update_history_actions(self) -> None:
+        if not hasattr(self, "back_action"):
+            return
+        self.back_action.setEnabled(self._history.can_go_back)
+        self.forward_action.setEnabled(self._history.can_go_forward)
+
+    def navigate_history_back(self) -> bool:
+        """Return to the previous explicit navigation step."""
+
+        return self._apply_history_location(self._history.back(), direction="Back")
+
+    def navigate_history_forward(self) -> bool:
+        """Move forward again after going back."""
+
+        return self._apply_history_location(self._history.forward(), direction="Forward")
+
+    def _apply_history_location(
+        self,
+        location: HistoryLocation | None,
+        *,
+        direction: str,
+    ) -> bool:
+        if location is None:
+            return False
+        previous = self._suppress_history_record
+        self._suppress_history_record = True
+        try:
+            scope = self._scope_for_history_key(location.scope_key)
+            if scope is not None and scope is not self._active_context:
+                self._active_context = scope
+                self._render_viewer_tabs()
+            if location.tab in TAB_LABELS:
+                self.tabs.setCurrentIndex(TAB_LABELS.index(location.tab))
+            viewer_tab = self._viewer_tabs.get(location.tab)
+            if viewer_tab is not None:
+                viewer_tab.list_filter.setText(location.filter_text)
+                value = self._object_for_history(viewer_tab, location.object_id)
+                if value is not None:
+                    self._select_viewer_object(value)
+                    if location.marker_id:
+                        viewer_tab.select_marker(location.marker_id)
+                    if location.frame_index is not None:
+                        QTimer.singleShot(
+                            0,
+                            lambda viewer_tab=viewer_tab, frame=location.frame_index: (
+                                viewer_tab.select_frame(frame)
+                            ),
+                        )
+        finally:
+            self._suppress_history_record = previous
+        self._update_history_actions()
+        self._refresh_context_header()
+        self._show_arrival_message(
+            f"{direction} to {location.label}."
+            if location.label
+            else f"{direction} to the {'previous' if direction == 'Back' else 'next'} step."
+        )
+        return True
+
+    @staticmethod
+    def _object_for_history(viewer_tab: ViewerTab, object_id: str) -> Any | None:
+        if not object_id:
+            return None
+        for item in viewer_tab._items:
+            if str(getattr(item, "id", "")) == object_id:
+                return item
+        return None
+
+    def _scope_for_history_key(self, scope_key: str) -> Any | None:
+        """Resolve a stored scope key back to a live scope object.
+
+        Keys are compared by content, so a rebuilt cross-session linked group
+        still matches. Returns None when the scope has gone, which is how a
+        stale entry is detected.
+        """
+
+        if not scope_key or scope_key == "none":
+            return None
+        previous = self._active_context
+        matches: list[Any] = []
+        try:
+            for candidate in self._candidate_history_scopes():
+                self._active_context = candidate
+                if self._viewer_state_scope_key() == scope_key:
+                    matches.append(candidate)
+        finally:
+            self._active_context = previous
+        return matches[0] if len(matches) == 1 else None
+
+    def _candidate_history_scopes(self) -> list[Any]:
+        scopes: list[Any] = list(self._sessions)
+        for session in self._sessions:
+            scopes.extend(session.samples)
+        for samples in linked_sample_groups(self._sessions):
+            if not samples:
+                continue
+            label = self._linked_sample_label(samples)
+            scopes.append(build_linked_sample_group(label, samples))
+        scopes.extend(build_project_tree_groups(self._sessions))
+        return scopes
+
+    def _prune_history(self) -> None:
+        """Drop entries whose scope no longer exists, after a project change."""
+
+        self._history.prune(
+            lambda entry: self._scope_for_history_key(entry.scope_key) is not None
+        )
+        self._update_history_actions()
+
+    def _refresh_context_header(self) -> None:
+        """Restate where the reviewer is, and why anything is unavailable."""
+
+        if not hasattr(self, "context_header"):
+            return
+        # A drill-down's reason lives exactly as long as the filter it explains.
+        # This is the command that owns the reset; ``current_context_stack()``
+        # only reads it.
+        if not self._active_tab_filter_text():
+            self._dashboard_filter_reason = ""
+        self.context_header.set_context_stack(self.current_context_stack())
+        self.context_header.set_unavailable_reasons(self._unavailable_action_reasons())
+
+    def _active_tab_filter_text(self) -> str:
+        """Filter text on the visible entity tab, if there is one."""
+
+        if not hasattr(self, "tabs") or not hasattr(self, "_viewer_tabs"):
+            return ""
+        index = self.tabs.currentIndex()
+        if not 0 <= index < len(TAB_LABELS):
+            return ""
+        tab = self._viewer_tabs.get(TAB_LABELS[index])
+        return tab.list_filter.text().strip() if tab is not None else ""
+
+    def _unavailable_action_reasons(self) -> tuple[str, ...]:
+        """Reasons the current selection's offered jumps are disabled.
+
+        These previously lived only in hover tooltips, which a keyboard user
+        never sees. The header shows them inline instead.
+        """
+
+        if not hasattr(self, "tabs") or not hasattr(self, "_viewer_tabs"):
+            return ()
+        label = TAB_LABELS[self.tabs.currentIndex()]
+        if label == "Session":
+            return ()
+        tab = self._viewer_tabs.get(label)
+        current = getattr(tab, "_current_value", None) if tab is not None else None
+        if current is None:
+            return ()
+        try:
+            actions = self._viewer_navigation_actions(current)
+        except Exception:  # pragma: no cover - header must never break the page
+            LOGGER.warning("Could not derive navigation actions for the context header", exc_info=True)
+            return ()
+        return tuple(
+            action.tooltip
+            for action in actions
+            if not action.enabled and action.tooltip
+        )
+
+    def _on_empty_state_action(self, command: str) -> None:
+        """Run a recovery action offered by an empty-state panel."""
+
+        if command == EMPTY_COMMAND_OPEN_SESSION:
+            self.open_session()
+        elif command == EMPTY_COMMAND_CLEAR_FILTER:
+            self._clear_active_tab_filter()
+        elif command == EMPTY_COMMAND_RETRY:
+            if self._failed_session_path:
+                self.load_session(self._failed_session_path, replace=not self._sessions)
+            else:
+                self.refresh_session()
+        elif command == EMPTY_COMMAND_CHOOSE_ANOTHER:
+            self.open_session()
+        elif command == EMPTY_COMMAND_RETURN_TO_SCOPE:
+            self.tabs.setCurrentIndex(TAB_LABELS.index("Session"))
+        elif command == EMPTY_COMMAND_SHOW_METADATA:
+            self.context_dock.show()
+            self.context_dock.raise_()
+            self.context_panel.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        elif command == EMPTY_COMMAND_COPY_DETAILS:
+            # One owner for the clipboard. The panel used to write the text and
+            # the window announce it, which split a single action across two
+            # files with only a comment holding it together.
+            self._copy_empty_state_details()
+
+    def _copy_empty_state_details(self) -> None:
+        """Copy the visible empty-state panel's details, and say so."""
+
+        # Ordered by intent, not by realised visibility: the active tab first,
+        # then any panel currently holding details. Keying off ``isVisible()``
+        # would report every child of an unshown window as absent — the same
+        # mistake R1 and R2 each had to correct once already.
+        tabs = getattr(self, "_viewer_tabs", {})
+        ordered = [tabs.get(TAB_LABELS[self.tabs.currentIndex()])] if hasattr(self, "tabs") else []
+        ordered.extend(tabs.values())
+        details = ""
+        for tab in ordered:
+            panel = getattr(tab, "empty_state_panel", None)
+            if panel is not None and panel.copyable_details():
+                details = panel.copyable_details()
+                break
+        clipboard = QApplication.clipboard()
+        if not details or clipboard is None:
+            self.statusBar().showMessage("There are no details to copy.", 3000)
+            return
+        clipboard.setText(details)
+        self.statusBar().showMessage("Details copied to the clipboard.", 3000)
+
+    def _clear_active_tab_filter(self) -> None:
+        """Clear the filter on the visible tab, from the header's Clear action."""
+
+        if not hasattr(self, "tabs") or not hasattr(self, "_viewer_tabs"):
+            return
+        label = TAB_LABELS[self.tabs.currentIndex()]
+        tab = self._viewer_tabs.get(label)
+        if tab is None:
+            return
+        tab.list_filter.clear()
+        self._refresh_context_header()
+
+    def current_context_stack(self) -> ContextStack:
+        """Where the reviewer currently is, on every axis.
+
+        The scope comes from the project tree, never from the selected object:
+        presenting a selection as the review scope was the specific confusion
+        C1 exists to remove.
+        """
+
+        scope_value = self._viewer_tab_context()
+        scope_kind = getattr(scope_value, "kind", "")
+        if not isinstance(scope_kind, str):
+            scope_kind = ""
+
+        section_key = TAB_LABELS[self.tabs.currentIndex()] if hasattr(self, "tabs") else None
+        selection_name = ""
+        marker_name = ""
+        filter_text = ""
+        filter_visible: int | None = None
+        filter_total: int | None = None
+        if section_key and section_key != "Session" and hasattr(self, "_viewer_tabs"):
+            tab = self._viewer_tabs.get(section_key)
+            if tab is not None:
+                state = tab.capture_view_state()
+                current = getattr(tab, "_current_value", None)
+                selection_name = self._label_for(current) if current is not None else ""
+                marker_name = self._marker_display_name(tab, state.marker_id)
+                filter_text = state.filter_text
+                if filter_text:
+                    filter_total = tab.list.topLevelItemCount()
+                    filter_visible = sum(
+                        1
+                        for index in range(filter_total)
+                        if not tab.list.topLevelItem(index).isHidden()
+                    )
+
+        # A dashboard drill-down explains its own filter; that reason outranks
+        # the scope's standing relationship note while the filter is applied.
+        #
+        # Reading it is all that happens here. Clearing it used to happen here
+        # too, which made a query method change what the next call returned —
+        # so a second caller (a tooltip, a test) silently discarded the
+        # reason. The filter handlers own the reset now.
+        relationship = self._scope_relationship_note(scope_value)
+        if filter_text and self._dashboard_filter_reason:
+            relationship = self._dashboard_filter_reason
+
+        return build_context_stack(
+            scope_name=describe_scope_value(scope_value),
+            scope_kind=scope_kind,
+            section_key=section_key,
+            selection_name=selection_name,
+            marker_name=marker_name,
+            relationship=relationship,
+            filter_text=filter_text,
+            filter_visible=filter_visible,
+            filter_total=filter_total,
+        )
+
+    @staticmethod
+    def _marker_display_name(tab: ViewerTab, marker_id: str | None) -> str:
+        """Human-readable name for the active marker, if there is one."""
+
+        if not marker_id:
+            return ""
+        for marker in getattr(tab.viewer, "_last_display_markers", ()) or ():
+            if getattr(marker, "id", None) == marker_id:
+                label = getattr(marker, "label", None)
+                if isinstance(label, str) and label.strip():
+                    return label.strip()
+                break
+        # Marker ids are structured "source:type:object"; the tail is the most
+        # meaningful fragment when no label was painted.
+        tail = marker_id.rsplit(":", 1)[-1]
+        return tail if tail and tail != marker_id else ""
+
+    def _scope_relationship_note(self, scope_value: Any) -> str:
+        """Borrowed-Atlas or unresolved-link context for the current scope.
+
+        Every warning is stated, not just the first. A group with two
+        unresolved links had the second silently dropped, and the notes row is
+        already built to carry several items — the label elides and its tooltip
+        keeps the full text.
+        """
+
+        if isinstance(scope_value, ProjectTreeGroup):
+            if scope_value.warnings:
+                return " · ".join(scope_value.warnings)
+            if scope_value.kind == "linked" and scope_value.atlas_session is not None:
+                return borrowed_atlas_note(scope_value.atlas_session.name)
+        return ""
+
+    def _viewer_state_scope_key(self) -> str:
+        """A stable identity for the current review scope.
+
+        Keyed by content rather than object identity because
+        ``_context_for_object`` rebuilds cross-session linked groups on every
+        call, so identity would treat one logical scope as many.
+        """
+
+        context = self._viewer_tab_context()
+        if context is None:
+            return "none"
+        if isinstance(context, LinkedSampleGroup):
+            paths = sorted(self._history_path_key(sample) for sample in context.samples)
+            return "linked:" + "|".join(paths)
+        if isinstance(context, ProjectTreeGroup):
+            return "group:" + context.key
+        if isinstance(context, Session):
+            return "Session:" + session_key(context)
+        if isinstance(context, Sample):
+            return "Sample:" + self._history_path_key(context)
+        identifier = getattr(context, "id", None) or getattr(context, "name", "")
+        return f"{type(context).__name__}:{identifier}:{self._history_path_key(context)}"
+
+    @staticmethod
+    def _history_path_key(value: Any) -> str:
+        path = getattr(value, "path", None)
+        if path is None:
+            return ""
+        return str(path).replace("\\", "/").rstrip("/").casefold()
+
+    def _capture_viewer_states(self) -> None:
+        """Remember each tab's selection before a rebuild discards it."""
+
+        if not hasattr(self, "_viewer_tabs"):
+            return
+        scope_key = self._viewer_state_scope_key()
+        for label, tab in self._viewer_tabs.items():
+            state = tab.capture_view_state()
+            if state.is_empty:
+                continue
+            self._viewer_states[(scope_key, label)] = state
+            self._viewer_states.move_to_end((scope_key, label))
+        while len(self._viewer_states) > VIEWER_STATE_CACHE_LIMIT:
+            self._viewer_states.popitem(last=False)
+
+    def _remembered_viewer_state(self, label: str) -> ViewerViewState | None:
+        return self._viewer_states.get((self._viewer_state_scope_key(), label))
+
+    def clear_viewer_states(self) -> None:
+        """Drop remembered viewer state.
+
+        Called whenever the loaded sessions change, because a remembered
+        object ID could otherwise be matched against a re-parsed entity that
+        merely reuses the identifier. Remembered viewports go with it, for the
+        same reason.
+        """
+
+        self._viewer_states.clear()
+        if hasattr(self, "_viewer_tabs"):
+            for tab in self._viewer_tabs.values():
+                tab.viewer.forget_remembered_views()
+
     def _render_viewer_tabs(
         self,
         *,
         prepared: _PreparedSessionUi | None = None,
         labels: list[str] | None = None,
     ) -> None:
+        self._capture_viewer_states()
         previous = self._suppress_viewer_context
         self._suppress_viewer_context = True
         # Pre-compute the validator-flagged failed tilt-series ids so
@@ -3800,12 +4604,52 @@ class MainWindow(QMainWindow):
 
             return list_status
 
+        preview_path_by_label = {
+            "Atlas": atlas_preview_path,
+            "Overview": overview_preview_path,
+            "Search map": search_map_preview_path,
+            "Search": search_tile_preview_path,
+            "Batch position": batch_position_preview_path,
+            "Tilt series": tilt_series_preview_path,
+        }
+        markers_by_label = {
+            "Atlas": atlas_scoped,
+            "Overview": scoped,
+            "Search map": scoped,
+            "Search": scoped,
+            "Batch position": scoped,
+            # The Tilt series tab renders no overlay markers of its own.
+            "Tilt series": None,
+        }
+
         try:
             labels_to_render = labels or ["Atlas", "Overview", "Search map", "Search", "Batch position", "Tilt series"]
             current_tab_label = TAB_LABELS[self.tabs.currentIndex()] if hasattr(self, "tabs") else "Session"
             for label in labels_to_render:
                 payload = tab_payloads[label]
                 auto_load_preview = label == current_tab_label
+                tab = self._viewer_tabs[label]
+                tab.set_scope_description(
+                    has_sessions=bool(self._sessions),
+                    scope_name=describe_scope_value(scope_context),
+                    entity_label=entity_display_label(label),
+                )
+                if payload.items and tab.has_same_items(payload.items):
+                    # Same rows as before: refresh the marker/status providers
+                    # only. Rebuilding the list here would discard selection,
+                    # filter, frame and scroll for no visible gain.
+                    if label == "Atlas":
+                        tab.set_atlas_collection_overlay_provider(
+                            atlas_collection_options,
+                            atlas_collection_visibility_changed,
+                        )
+                    tab.refresh_providers(
+                        preview_path_by_label[label],
+                        markers_for=markers_by_label[label],
+                        item_status_for=status_from_payload(payload),
+                        prepared_sources=payload.sources,
+                    )
+                    continue
                 if label == "Atlas":
                     self._viewer_tabs[
                         label
@@ -3820,6 +4664,7 @@ class MainWindow(QMainWindow):
                         markers_for=atlas_scoped,
                         prepared_sources=payload.sources,
                         auto_load_preview=auto_load_preview,
+                        restore_state=self._remembered_viewer_state(label),
                     )
                 elif label == "Overview":
                     self._viewer_tabs[label].set_items(
@@ -3829,6 +4674,7 @@ class MainWindow(QMainWindow):
                         markers_for=scoped,
                         prepared_sources=payload.sources,
                         auto_load_preview=auto_load_preview,
+                        restore_state=self._remembered_viewer_state(label),
                     )
                 elif label == "Search map":
                     self._viewer_tabs[label].set_items(
@@ -3839,6 +4685,7 @@ class MainWindow(QMainWindow):
                         item_status_for=status_from_payload(payload),
                         prepared_sources=payload.sources,
                         auto_load_preview=auto_load_preview,
+                        restore_state=self._remembered_viewer_state(label),
                     )
                 elif label == "Search":
                     self._viewer_tabs[label].set_items(
@@ -3849,6 +4696,7 @@ class MainWindow(QMainWindow):
                         item_status_for=status_from_payload(payload),
                         prepared_sources=payload.sources,
                         auto_load_preview=auto_load_preview,
+                        restore_state=self._remembered_viewer_state(label),
                     )
                 elif label == "Batch position":
                     self._viewer_tabs[label].set_items(
@@ -3859,6 +4707,7 @@ class MainWindow(QMainWindow):
                         item_status_for=status_from_payload(payload),
                         prepared_sources=payload.sources,
                         auto_load_preview=auto_load_preview,
+                        restore_state=self._remembered_viewer_state(label),
                     )
                 elif label == "Tilt series":
                     self._viewer_tabs[label].set_items(
@@ -3868,36 +4717,42 @@ class MainWindow(QMainWindow):
                         item_status_for=status_from_payload(payload),
                         prepared_sources=payload.sources,
                         auto_load_preview=auto_load_preview,
+                        restore_state=self._remembered_viewer_state(label),
                     )
         finally:
             self._suppress_viewer_context = previous
+        self._refresh_context_header()
 
     def _select_viewer_object(self, value: Any, *, update_context: bool = True) -> None:
         previous = self._suppress_viewer_context
         self._suppress_viewer_context = previous or not update_context
+        label = tab_label_for_object(value)
+        filter_cleared = False
         try:
-            if isinstance(value, Atlas):
-                self.tabs.setCurrentIndex(TAB_LABELS.index("Atlas"))
-                self._viewer_tabs["Atlas"].select_object(value)
-            elif isinstance(value, Overview):
-                self.tabs.setCurrentIndex(TAB_LABELS.index("Overview"))
-                self._viewer_tabs["Overview"].select_object(value)
-            elif isinstance(value, SearchMap):
-                self.tabs.setCurrentIndex(TAB_LABELS.index("Search map"))
-                self._viewer_tabs["Search map"].select_object(value)
-            elif isinstance(value, SearchTile):
-                self.tabs.setCurrentIndex(TAB_LABELS.index("Search"))
-                self._viewer_tabs["Search"].select_object(value)
-            elif isinstance(value, BatchPosition):
-                self.tabs.setCurrentIndex(TAB_LABELS.index("Batch position"))
-                self._viewer_tabs["Batch position"].select_object(value)
-            elif isinstance(value, TiltSeries):
-                self.tabs.setCurrentIndex(TAB_LABELS.index("Tilt series"))
-                self._viewer_tabs["Tilt series"].select_object(value)
+            if label is not None:
+                self.tabs.setCurrentIndex(TAB_LABELS.index(label))
+                filter_cleared = self._viewer_tabs[label].select_object(value)
         finally:
             self._suppress_viewer_context = previous
+        if label is None:
+            return
+        if filter_cleared:
+            # Hold the notice rather than showing it now: the caller is about
+            # to post its own arrival message, which would overwrite this one
+            # before anybody read it.
+            self._pending_filter_notice = (
+                f"Filter cleared on {_TAB_DISPLAY_LABELS.get(label, label)} "
+                f"to show {self._label_for(value)}."
+            )
         if update_context:
             self._set_context(self._label_for(value), value)
+
+    def _show_arrival_message(self, text: str, timeout: int = 0) -> None:
+        """Post an arrival message, folding in any filter notice it would hide."""
+
+        notice = self._pending_filter_notice
+        self._pending_filter_notice = None
+        self.statusBar().showMessage(f"{text} {notice}" if notice else text, timeout)
 
     def _select_from_left_tree(self, value: Any, label: str) -> None:
         self._dashboard_scope_prefers_tree = False
@@ -4381,6 +5236,10 @@ class MainWindow(QMainWindow):
         ]
 
     def _viewer_navigation_requested(self, value: Any, key: str) -> None:
+        # ``resolution_by_key`` carries the resolver's verdict alongside the
+        # destination so an inert action can say *why* it is inert instead of
+        # falling back on a generic "not found".
+        resolution_by_key: dict[str, NavigationResolution] = {}
         if isinstance(value, TiltSeries):
             targets, marker_context = self._resolve_tilt_navigation(value)
             target_by_key = {
@@ -4389,31 +5248,55 @@ class MainWindow(QMainWindow):
                 "search_map": targets.search_map,
                 "overview": targets.overview,
             }
+            resolution_by_key = {
+                "batch": targets.batch_position_resolution,
+                "search": targets.search_tile_resolution,
+                "search_map": targets.search_map_resolution,
+                "overview": targets.overview_resolution,
+            }
             target = target_by_key.get(key)
         elif isinstance(value, SearchTile):
             marker_context = self._marker_context_for_search_tile(value)
-            batch = self._batch_for_search_tile(value, marker_context)
-            search_map = self._search_map_for_search_tile(value, marker_context)
-            overview = self._overview_for_search_map(search_map, marker_context.overviews) if search_map is not None else None
-            tilt = self._tilt_for_search_tile(value, marker_context)
+            batch_resolution = self._batch_resolution_for_search_tile(value, marker_context)
+            map_resolution = self._search_map_resolution_for_search_tile(value, marker_context)
+            search_map = map_resolution.target
+            overview_resolution = (
+                resolve_search_map_overview(search_map, overviews=marker_context.overviews)
+                if search_map is not None
+                else map_resolution
+            )
+            tilt_resolution = self._tilt_resolution_for_search_tile(value, marker_context)
             targets = None
             target_by_key = {
-                "batch": batch,
+                "batch": batch_resolution.target,
                 "search_map": search_map,
-                "overview": overview,
-                "tilt_series": tilt,
+                "overview": overview_resolution.target,
+                "tilt_series": tilt_resolution.target,
+            }
+            resolution_by_key = {
+                "batch": batch_resolution,
+                "search_map": map_resolution,
+                "overview": overview_resolution,
+                "tilt_series": tilt_resolution,
             }
             target = target_by_key.get(key)
         elif isinstance(value, BatchPosition):
             marker_context = self._marker_context_for_batch_position(value)
-            search_map = self._search_map_for_batch_position(value, marker_context)
-            overview = self._overview_for_batch_position(value, search_map, marker_context)
+            map_resolution = self._search_map_resolution_for_batch_position(value, marker_context)
+            search_map = map_resolution.target
+            overview_resolution = self._overview_resolution_for_batch_position(
+                value, search_map, marker_context
+            )
             tilt_resolution = self._tilt_resolution_for_selected_batch_exposure(value, marker_context=marker_context)
             targets = None
             target_by_key = {
                 "search_map": search_map,
-                "overview": overview,
+                "overview": overview_resolution.target,
                 "tilt_series": tilt_resolution.tilt_series,
+            }
+            resolution_by_key = {
+                "search_map": map_resolution,
+                "overview": overview_resolution,
             }
             target = target_by_key.get(key)
         elif isinstance(value, Overview):
@@ -4429,7 +5312,10 @@ class MainWindow(QMainWindow):
             target = target_by_key.get(key)
         elif isinstance(value, SearchMap):
             marker_context = self._marker_context_for_search_map(value)
-            overview = self._overview_for_search_map(value, marker_context.overviews)
+            overview_resolution = resolve_search_map_overview(
+                value,
+                overviews=marker_context.overviews,
+            )
             search_resolution = self._search_tile_resolution_for_selected_exposure(
                 value,
                 marker_context=marker_context,
@@ -4437,24 +5323,26 @@ class MainWindow(QMainWindow):
             targets = None
             target_by_key = {
                 "search": search_resolution.search_tile,
-                "overview": overview,
+                "overview": overview_resolution.target,
             }
+            resolution_by_key = {"overview": overview_resolution}
             target = target_by_key.get(key)
         else:
             return
         if target is None:
-            self.statusBar().showMessage(f"No linked {key.replace('_', ' ')} found for {value.name}.")
+            resolution = resolution_by_key.get(key)
+            self.statusBar().showMessage(
+                self._inert_navigation_message(value, key, resolution)
+            )
+            self._show_unresolved_relationship_panel(value, key, resolution)
             return
 
+        departure = self._current_history_location()
         if isinstance(value, BatchPosition) and key == "tilt_series" and isinstance(target, TiltSeries):
             self.navigate_to_tilt_series(target.id, source="batch position exposure", set_summary_highlight=False)
             return
 
-        self._preserve_tree_root_context = False
-        context = self._context_for_object(target)
-        if context is not None:
-            self._active_context = context
-            self._render_viewer_tabs()
+        self._enter_navigation_scope(target)
         self._select_viewer_object(target)
 
         tab_label = tab_label_for_object(target)
@@ -4502,7 +5390,78 @@ class MainWindow(QMainWindow):
                 marker_id = self._marker_id_for_search_map_navigation(target, value, context=marker_context)
         if tab_label is not None and marker_id:
             self._viewer_tabs[tab_label].select_marker(marker_id)
-        self.statusBar().showMessage(f"Opened {self._label_for(target)} linked to {value.name}.")
+        self._show_arrival_message(f"Opened {self._label_for(target)} linked to {value.name}.")
+        self._record_history(departure)
+
+    def _inert_navigation_message(
+        self,
+        value: Any,
+        key: str,
+        resolution: NavigationResolution | None,
+    ) -> str:
+        """Explain an action that resolved to nothing.
+
+        An ambiguous link and a missing link both leave the page unchanged, but
+        they are different findings and must read differently: one says the
+        metadata disagrees, the other says there is none.
+        """
+
+        subject = getattr(value, "name", None) or getattr(value, "id", "this item")
+        if resolution is not None and resolution.explanation:
+            return f"{resolution.explanation} No change to {subject}."
+        return f"No linked {key.replace('_', ' ')} found for {subject}."
+
+    def _show_unresolved_relationship_panel(
+        self,
+        value: Any,
+        key: str,
+        resolution: NavigationResolution | None,
+    ) -> None:
+        """Explain a refused jump on the page, not only in the status bar.
+
+        E1 modelled this variant and nothing ever reached it, so the one place
+        the reviewer was told a relationship could not be resolved was a status
+        message that the next action overwrites. It appears only when there is
+        no image to cover — the panel never hides real content.
+        """
+
+        label = TAB_LABELS[self.tabs.currentIndex()]
+        tab = self._viewer_tabs.get(label)
+        if tab is None or tab.viewer.has_image():
+            return
+        explanation = (
+            resolution.explanation
+            if resolution is not None and resolution.explanation
+            else f"No linked {key.replace('_', ' ')} is recorded for this item."
+        )
+        tab.show_empty_state(
+            unresolved_relationship_state(
+                subject=self._label_for(value),
+                explanation=explanation,
+                still_inspectable=(
+                    f"{self._label_for(value)} and its metadata remain readable here.",
+                ),
+            )
+        )
+
+    def _enter_navigation_scope(self, target: Any) -> None:
+        """Switch scope for an arrival.
+
+        ``_render_viewer_tabs()`` is called unconditionally, but it is no
+        longer an unconditional *rebuild*: S1 split the marker refresh out of
+        the tab teardown, so when ``has_same_items()`` reports the rows are
+        unchanged it takes ``ViewerTab.refresh_providers()`` instead and the
+        selection, filter, frame and scroll position all survive. Same-scope
+        navigation therefore costs a provider re-point and an overlay repaint,
+        not a list rebuild.
+        """
+
+        self._preserve_tree_root_context = False
+        context = self._context_for_object(target)
+        if context is None:
+            return
+        self._active_context = context
+        self._render_viewer_tabs()
 
     def _resolve_tilt_navigation(
         self,
@@ -4516,20 +5475,36 @@ class MainWindow(QMainWindow):
             overviews=marker_context.overviews,
             search_tiles=self._context_search_tiles(self._context_for_object(tilt)),
         )
-        search_map = targets.search_map or self._search_map_from_tilt_marker(tilt, marker_context)
-        overview = targets.overview
-        if overview is None and search_map is not None:
-            overview = self._overview_for_search_map(search_map, marker_context.overviews)
-        if overview is None:
-            overview = self._overview_from_tilt_marker(tilt, marker_context)
+        # A marker sweep may only assist a link the metadata never recorded.
+        # When the metadata is ambiguous the action must stay inert, otherwise
+        # the resolver's refusal to guess is simply replaced by a different
+        # guess (plan item N1 -> N2).
+        map_resolution = targets.search_map_resolution
+        if map_resolution.unresolved:
+            map_resolution = self._search_map_resolution_from_tilt_marker(tilt, marker_context)
+        search_map = map_resolution.target
+
+        overview_resolution = targets.overview_resolution
+        if overview_resolution.unresolved and search_map is not None:
+            overview_resolution = resolve_search_map_overview(
+                search_map,
+                overviews=marker_context.overviews,
+            )
+        if overview_resolution.unresolved:
+            overview_resolution = self._overview_resolution_from_tilt_marker(
+                tilt,
+                marker_context,
+            )
+        overview = overview_resolution.target
+
         if search_map is targets.search_map and overview is targets.overview:
             return targets, marker_context
-        return type(targets)(
-            batch_position=targets.batch_position,
-            search_tile=targets.search_tile,
+        return replace(
+            targets,
             search_map=search_map,
             overview=overview,
-            inferred_batch_label=targets.inferred_batch_label,
+            search_map_resolution=map_resolution,
+            overview_resolution=overview_resolution,
         ), marker_context
 
     def _marker_context_for_tilt(self, tilt: TiltSeries) -> MarkerContext:
@@ -4592,59 +5567,78 @@ class MainWindow(QMainWindow):
         search_tile: SearchTile,
         context: MarkerContext,
     ) -> BatchPosition | None:
-        if search_tile.batch_position_id:
-            return next(
-                (batch for batch in context.batch_positions if batch.id == search_tile.batch_position_id),
-                None,
-            )
-        return None
+        return self._batch_resolution_for_search_tile(search_tile, context).target
+
+    def _batch_resolution_for_search_tile(
+        self,
+        search_tile: SearchTile,
+        context: MarkerContext,
+    ) -> NavigationResolution:
+        return resolve_search_tile_batch_position(
+            search_tile,
+            batch_positions=context.batch_positions,
+        )
 
     def _search_map_for_search_tile(
         self,
         search_tile: SearchTile,
         context: MarkerContext,
     ) -> SearchMap | None:
-        if search_tile.search_map_id:
-            return next(
-                (search_map for search_map in context.search_maps if search_map.id == search_tile.search_map_id),
-                None,
-            )
-        return None
+        return self._search_map_resolution_for_search_tile(search_tile, context).target
+
+    def _search_map_resolution_for_search_tile(
+        self,
+        search_tile: SearchTile,
+        context: MarkerContext,
+    ) -> NavigationResolution:
+        return resolve_search_tile_search_map(search_tile, search_maps=context.search_maps)
 
     def _tilt_for_search_tile(
         self,
         search_tile: SearchTile,
         context: MarkerContext,
     ) -> TiltSeries | None:
-        linked_ids = set(search_tile.linked_tilt_series_ids or [])
-        if not linked_ids:
-            return None
-        return next((tilt for tilt in context.tilt_series if tilt.id in linked_ids), None)
+        return self._tilt_resolution_for_search_tile(search_tile, context).target
+
+    def _tilt_resolution_for_search_tile(
+        self,
+        search_tile: SearchTile,
+        context: MarkerContext,
+    ) -> NavigationResolution:
+        return resolve_search_tile_tilt_series(search_tile, tilt_series=context.tilt_series)
 
     def _search_map_for_batch_position(
         self,
         batch_position: BatchPosition,
         context: MarkerContext,
     ) -> SearchMap | None:
-        if batch_position.linked_search_map_id:
-            match = next(
-                (search_map for search_map in context.search_maps if search_map.id == batch_position.linked_search_map_id),
-                None,
+        return self._search_map_resolution_for_batch_position(batch_position, context).target
+
+    def _search_map_resolution_for_batch_position(
+        self,
+        batch_position: BatchPosition,
+        context: MarkerContext,
+    ) -> NavigationResolution:
+        resolution = resolve_batch_position_search_map(
+            batch_position,
+            search_maps=context.search_maps,
+        ).resolution
+        if not resolution.unresolved:
+            # Navigable or ambiguous: the metadata has already decided, and a
+            # marker sweep must not overrule an ambiguity.
+            return resolution
+        return self._marker_fallback_resolution(
+            context.search_maps,
+            context=context,
+            provenance="search_map.batch_marker",
+            navigable_explanation="Resolved from a batch marker painted on the Search map.",
+            ambiguous_prefix="Batch markers appear on more than one Search map",
+            unresolved_explanation=resolution.explanation,
+            predicate=lambda candidate, markers: self._preferred_batch_marker(
+                markers, batch_position
             )
-            if match is not None:
-                return match
-        batch_id = batch_position.id
-        tilt_ids = set(batch_position.linked_tilt_series_ids or [])
-        for search_map in context.search_maps:
-            if batch_id in (search_map.linked_batch_position_ids or []):
-                return search_map
-            if tilt_ids and tilt_ids.intersection(search_map.linked_tilt_series_ids or []):
-                return search_map
-        for search_map in context.search_maps:
-            markers = markers_for_object(search_map, context=context)
-            if self._preferred_batch_marker(markers, batch_position) is not None:
-                return search_map
-        return None
+            is not None,
+        )
 
     def _overview_for_batch_position(
         self,
@@ -4652,22 +5646,76 @@ class MainWindow(QMainWindow):
         search_map: SearchMap | None,
         context: MarkerContext,
     ) -> Overview | None:
-        if batch_position.linked_overview_id:
-            match = next(
-                (overview for overview in context.overviews if overview.id == batch_position.linked_overview_id),
-                None,
-            )
-            if match is not None:
-                return match
+        return self._overview_resolution_for_batch_position(
+            batch_position, search_map, context
+        ).target
+
+    def _overview_resolution_for_batch_position(
+        self,
+        batch_position: BatchPosition,
+        search_map: SearchMap | None,
+        context: MarkerContext,
+    ) -> NavigationResolution:
+        resolution = resolve_batch_position_overview(
+            batch_position,
+            search_maps=context.search_maps,
+            overviews=context.overviews,
+        ).resolution
+        if not resolution.unresolved:
+            return resolution
         if search_map is not None:
-            overview = self._overview_for_search_map(search_map, context.overviews)
-            if overview is not None:
-                return overview
-        for overview in context.overviews:
-            markers = markers_for_object(overview, context=context)
-            if self._preferred_batch_marker(markers, batch_position) is not None:
-                return overview
-        return None
+            via_map = resolve_search_map_overview(search_map, overviews=context.overviews)
+            if not via_map.unresolved:
+                return via_map
+        return self._marker_fallback_resolution(
+            context.overviews,
+            context=context,
+            provenance="overview.batch_marker",
+            navigable_explanation="Resolved from a batch marker painted on the Overview.",
+            ambiguous_prefix="Batch markers appear on more than one Overview",
+            unresolved_explanation=resolution.explanation,
+            predicate=lambda candidate, markers: self._preferred_batch_marker(
+                markers, batch_position
+            )
+            is not None,
+        )
+
+    def _marker_fallback_resolution(
+        self,
+        candidates: Iterable[Any],
+        *,
+        context: MarkerContext,
+        provenance: str,
+        navigable_explanation: str,
+        ambiguous_prefix: str,
+        unresolved_explanation: str,
+        predicate,
+    ) -> NavigationResolution:
+        """Last-resort marker sweep that still refuses to guess.
+
+        Marker geometry lives in the viewer, not the pure service, so this
+        cannot move into ``navigation_service``. It applies the same rule
+        though: it collects *every* candidate carrying a matching marker and
+        only offers a destination when exactly one does.
+        """
+
+        # Proving uniqueness costs more than the old first-match loop, because
+        # a second candidate has to be looked for at all. Two is enough to
+        # decide, so stop there rather than building markers for every
+        # remaining entity in a large session.
+        matched: list[Any] = []
+        for candidate in candidates:
+            if predicate(candidate, markers_for_object(candidate, context=context)):
+                matched.append(candidate)
+                if len(matched) > 1:
+                    break
+        return navigation_resolution_from_candidates(
+            matched,
+            provenance=provenance,
+            navigable_explanation=navigable_explanation,
+            ambiguous_prefix=ambiguous_prefix,
+            unresolved_explanation=unresolved_explanation,
+        )
 
     def _failed_tilt_ids(self) -> frozenset[str]:
         if self._failed_tilt_ids_cache is not None:
@@ -4689,34 +5737,57 @@ class MainWindow(QMainWindow):
         tilt: TiltSeries,
         context: MarkerContext,
     ) -> SearchMap | None:
-        for search_map in context.search_maps:
-            markers = markers_for_object(search_map, context=context)
-            if self._preferred_navigation_marker(markers, tilt, batch=None) is not None:
-                return search_map
-        return None
+        return self._search_map_resolution_from_tilt_marker(tilt, context).target
+
+    def _search_map_resolution_from_tilt_marker(
+        self,
+        tilt: TiltSeries,
+        context: MarkerContext,
+    ) -> NavigationResolution:
+        return self._marker_fallback_resolution(
+            context.search_maps,
+            context=context,
+            provenance="search_map.tilt_marker",
+            navigable_explanation="Resolved from a tilt marker painted on the Search map.",
+            ambiguous_prefix="Tilt markers appear on more than one Search map",
+            unresolved_explanation="No Search map carries a marker for this tilt series.",
+            predicate=lambda candidate, markers: self._preferred_navigation_marker(
+                markers, tilt, batch=None
+            )
+            is not None,
+        )
 
     def _overview_from_tilt_marker(
         self,
         tilt: TiltSeries,
         context: MarkerContext,
     ) -> Overview | None:
-        for overview in context.overviews:
-            markers = markers_for_object(overview, context=context)
-            if self._preferred_navigation_marker(markers, tilt, batch=None) is not None:
-                return overview
-        return None
+        return self._overview_resolution_from_tilt_marker(tilt, context).target
+
+    def _overview_resolution_from_tilt_marker(
+        self,
+        tilt: TiltSeries,
+        context: MarkerContext,
+    ) -> NavigationResolution:
+        return self._marker_fallback_resolution(
+            context.overviews,
+            context=context,
+            provenance="overview.tilt_marker",
+            navigable_explanation="Resolved from a tilt marker painted on the Overview.",
+            ambiguous_prefix="Tilt markers appear on more than one Overview",
+            unresolved_explanation="No Overview carries a marker for this tilt series.",
+            predicate=lambda candidate, markers: self._preferred_navigation_marker(
+                markers, tilt, batch=None
+            )
+            is not None,
+        )
 
     def _overview_for_search_map(
         self,
         search_map: SearchMap,
         overviews: tuple[Overview, ...],
     ) -> Overview | None:
-        if search_map.overview is not None:
-            return search_map.overview
-        return next(
-            (overview for overview in overviews if search_map.id in (overview.linked_search_map_ids or [])),
-            None,
-        )
+        return resolve_search_map_overview(search_map, overviews=overviews).target
 
     def _marker_id_for_tilt_navigation(
         self,
@@ -5471,6 +6542,7 @@ class MainWindow(QMainWindow):
             self._set_context(self._label_for(linked), linked)
             self.statusBar().showMessage(f"Selected {self._label_for(linked)} from marker.")
             return
+        departure = self._current_history_location()
         self._preserve_tree_root_context = False
         self._dashboard_scope_prefers_tree = True
         context = self._context_for_object(linked)
@@ -5478,7 +6550,8 @@ class MainWindow(QMainWindow):
             self._active_context = context
             self._render_viewer_tabs()
         self._select_viewer_object(linked)
-        self.statusBar().showMessage(f"Opened {self._label_for(linked)} from marker.")
+        self._show_arrival_message(f"Opened {self._label_for(linked)} from marker.")
+        self._record_history(departure)
 
     def _open_atlas_batch_overview(self, marker: ImageMarker) -> bool:
         batch = self._find_object_by_id(
@@ -5498,6 +6571,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(target.explanation)
             return True
 
+        departure = self._current_history_location()
         overview = target.overview
         self._selection_state = SelectionState(
             selected_object_type=type(batch).__name__,
@@ -5532,6 +6606,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Opened {self._label_for(overview)} for batch position {self._label_for(batch)}."
         )
+        self._record_history(departure)
         return True
 
     def _viewer_frame_changed(self, value: Any, frame_index: int, frame_count: int) -> None:
@@ -5568,6 +6643,7 @@ class MainWindow(QMainWindow):
         self.context_panel.set_title(label)
         self.context_panel.set_text(self._context_description(value))
         self._update_status_summary(label)
+        self._refresh_context_header()
         elapsed_ms = timer.elapsed()
         LOGGER.debug(
             "context panel update label=%s value_type=%s total_ms=%d",
@@ -5706,15 +6782,15 @@ class MainWindow(QMainWindow):
         return None
 
     def _switch_to_group_tab(self, label: str) -> None:
-        target_by_label = {
-            "Overviews": "Overview",
-            "Search maps": "Search map",
-            "Search": "Search",
-            "Batch positions": "Batch position",
-            "Tilt series": "Tilt series",
-        }
-        target = target_by_label.get(label)
-        if target is not None:
+        """Activate the tab that owns a project-tree entity group.
+
+        Derived from the shared display-label map rather than a second
+        hand-written table, which is what let the tree's group heading and the
+        tab key drift apart.
+        """
+
+        target = tab_key_for_display_label(label)
+        if target is not None and target in TAB_LABELS:
             self.tabs.setCurrentIndex(TAB_LABELS.index(target))
 
     def _select_visible_tab_object(self, value: Any) -> None:

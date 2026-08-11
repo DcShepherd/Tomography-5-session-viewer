@@ -763,13 +763,19 @@ class OverlayedImage(Flowable):
             # tracking, focus, batch dot). Honouring the status here
             # keeps the GUI and the PDF reading the same — failed
             # acquisitions are visually distinct from successful ones.
-            if (marker.status or "").lower() == "failed":
-                color = styles.status_color("failed")
+            if (
+                marker.metadata.get("queued_position")
+                and marker.marker_type
+                in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}
+            ):
+                stroke_color = colors.HexColor(PRINT_STATUS_COLOURS["queued"])
+            elif (marker.status or "").lower() == "failed":
+                stroke_color = styles.status_color("failed").fill
             else:
-                color = styles.status_color(
+                stroke_color = styles.status_color(
                     _MARKER_COLOR.get(marker.marker_type, "neutral")
-                )
-            c.setStrokeColor(color.fill)
+                ).fill
+            c.setStrokeColor(stroke_color)
             c.setLineWidth(0.7)
             # Markers approximated from a failed tilt's stage
             # metadata are drawn with a dashed stroke so the user

@@ -836,6 +836,11 @@ def test_session_dashboard_omits_empty_defocus_and_keeps_timeline_full_width(tmp
         for index in range(dashboard._content_layout.count())
         if (item := dashboard._content_layout.itemAt(index)) is not None and item.widget() is not None
     ]
+    # The dashboard starts with the header and counts row. The former
+    # "What to review next" card was intentionally removed from this surface.
+    assert "WHAT TO REVIEW NEXT" not in " ".join(
+        label for widget in widgets for label in _label_texts(widget)
+    )
     count_cards = widgets[1].findChildren(StatCard)
     timeline_text = _label_texts(widgets[2])
     lower_text = _label_texts(widgets[3])
@@ -1083,7 +1088,14 @@ def test_timeline_navigation_selects_tilt_without_editing_filter(monkeypatch, tm
     app.processEvents()
 
     assert window.tabs.currentIndex() == main_window.TAB_LABELS.index("Tilt series")
-    assert viewer.list_filter.text() == "manual filter"
+    # S1 contract change: "manual filter" matches nothing, so the destination
+    # row is hidden. Navigation used to unhide that single row while the
+    # visible count still read 0. It now clears the incompatible filter
+    # outright and says so, rather than showing a row the filter excludes.
+    assert viewer.list_filter.text() == ""
+    assert not viewer.list.currentItem().isHidden()
+    assert viewer.list_count.text() == str(viewer.list.topLevelItemCount())
+    assert "filter cleared" in window.statusBar().currentMessage().lower()
     assert viewer.list.currentItem().data(0, VIEWER_OBJECT_ROLE) is target
     assert window._tilt_viewer_selected_tilt_series_id == target.id
     assert window._dashboard_highlighted_tilt_series_id is None

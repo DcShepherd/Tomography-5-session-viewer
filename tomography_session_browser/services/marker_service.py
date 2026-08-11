@@ -17,10 +17,15 @@ from tomography_session_browser.services.batch_label_service import (
     compact_label_for_tilt,
 )
 from tomography_session_browser.services.batch_position_status import (
+    STATUS_QUEUED,
     STATUS_UNATTRIBUTED,
     aggregate_batch_position_status,
 )
-from tomography_session_browser.services.item_status import build_item_status_context
+from tomography_session_browser.services.item_status import (
+    ItemStatusContext,
+    batch_position_status_counts,
+    build_item_status_context,
+)
 from tomography_session_browser.services.loading_profiler import record_aggregate_phase
 from tomography_session_browser.services.navigation_service import resolve_batch_position_overview
 
@@ -41,6 +46,12 @@ CORRECTED_AREA_MARKER_TYPES = {
     MarkerType.TRACKING_AREA,
     MarkerType.FOCUS_AREA,
     MarkerType.TEMPLATE_AREA,
+}
+BEAM_AREA_MARKER_TYPES = {
+    MarkerType.EXPOSURE_AREA,
+    MarkerType.TRACKING_AREA,
+    MarkerType.FOCUS_AREA,
+    MarkerType.CONDITION_AREA,
 }
 BEAM_DIAMETER_LOW_DOSE_CONTEXT = "backward_alignment_optics"
 BEAM_DIAMETER_MICROSCOPE_CONTEXT = "microscope_data_optics"
@@ -116,6 +127,26 @@ class AlignmentTransform:
     rotation_rad: float
     translation: tuple[float, float]
     source: str
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedOverlayReference:
+    """Acquisition geometry borrowed from successful positions in one scope.
+
+    A queued batch has no exposure MRC of its own, so its Search XML optics
+    describe the search state rather than the beam that would have acquired a
+    tilt series.  Keep the replacement display-only and provenance-bearing:
+    use a single consistent exposure-state beam/FOV observed on validator-
+    complete positions in the same marker context, otherwise leave that field
+    unresolved.
+    """
+
+    beam_diameter_m: float | None = None
+    beam_source_batch_id: str | None = None
+    beam_source: str | None = None
+    camera_fov_m: tuple[float, float] | None = None
+    camera_source_batch_id: str | None = None
+    camera_source: str | None = None
 
 
 def markers_for_object(
@@ -436,6 +467,15 @@ def overview_markers(overview: Overview, context: MarkerContext) -> list[ImageMa
     if frame is None:
         LOGGER.debug("Skipping Overview overlays without reliable frame metadata overview=%s", overview.id)
         return []
+    status_context = build_item_status_context(
+        search_maps=context.search_maps,
+        batch_positions=context.batch_positions,
+        tilt_series=context.tilt_series,
+    )
+    queued_reference = _queued_overlay_reference(
+        context.batch_positions,
+        status_context,
+    )
     markers: list[ImageMarker] = []
     for search_map in context.search_maps:
         if search_map.overview is not overview and search_map.overview is not None and search_map.overview.id != overview.id:
@@ -453,12 +493,20 @@ def overview_markers(overview: Overview, context: MarkerContext) -> list[ImageMa
             continue
         marker = _batch_marker_in_frame(overview.id, frame, batch)
         if marker is not None:
+            overlay_status = aggregate_batch_position_status(batch, status_context)
             batch_failed = any(tid in failed_set for tid in batch.linked_tilt_series_ids)
             if batch_failed:
                 marker.status = "failed"
+            elif overlay_status.status == STATUS_QUEUED:
+                marker.status = STATUS_QUEUED
             markers.append(marker)
             template_markers = _template_markers_in_frame(
-                overview.id, frame, batch, marker.metadata.get("stage_position")
+                overview.id,
+                frame,
+                batch,
+                marker.metadata.get("stage_position"),
+                queued=overlay_status.status == STATUS_QUEUED,
+                queued_reference=queued_reference,
             )
             if batch_failed:
                 _mark_markers_failed(template_markers)
@@ -488,10 +536,20 @@ def search_map_markers(
     failed_tilt_ids: frozenset[str] | set[str] = frozenset(),
     tilt_series: Iterable[TiltSeries] = (),
 ) -> list[ImageMarker]:
+    batch_positions = tuple(batch_positions)
+    tilt_series = tuple(tilt_series)
     markers: list[ImageMarker] = []
     frame = _image_frame(search_map)
     failed_set = frozenset(failed_tilt_ids)
-    tilt_series = list(tilt_series)
+    status_context = build_item_status_context(
+        search_maps=(search_map,),
+        batch_positions=batch_positions,
+        tilt_series=tilt_series,
+    )
+    queued_reference = _queued_overlay_reference(
+        batch_positions,
+        status_context,
+    )
     for batch in batch_positions:
         if batch.linked_search_map_id != search_map.id:
             continue
@@ -540,11 +598,21 @@ def search_map_markers(
             corrected_types={MarkerType.BATCH_POSITION},
             panel_name=frame.source,
         )
+        overlay_status = aggregate_batch_position_status(batch, status_context)
         batch_failed = any(tid in failed_set for tid in batch.linked_tilt_series_ids)
         if batch_failed:
             batch_marker.status = "failed"
+        elif overlay_status.status == STATUS_QUEUED:
+            batch_marker.status = STATUS_QUEUED
         markers.append(batch_marker)
-        template_markers = _template_markers_in_frame(search_map.id, frame, batch, position)
+        template_markers = _template_markers_in_frame(
+            search_map.id,
+            frame,
+            batch,
+            position,
+            queued=overlay_status.status == STATUS_QUEUED,
+            queued_reference=queued_reference,
+        )
         if batch_failed:
             _mark_markers_failed(template_markers)
         markers.extend(template_markers)
@@ -576,6 +644,9 @@ def search_tile_markers(
     failed_tilt_ids: frozenset[str] | set[str] = frozenset(),
     tilt_series: Iterable[TiltSeries] = (),
 ) -> list[ImageMarker]:
+    batch_positions = tuple(batch_positions)
+    search_maps = tuple(search_maps)
+    tilt_series = tuple(tilt_series)
     projected = _search_map_markers_projected_to_search_tile(
         search_tile,
         batch_positions,
@@ -603,6 +674,14 @@ def search_tile_markers(
         return []
 
     failed_set = frozenset(failed_tilt_ids)
+    status_context = build_item_status_context(
+        search_maps=search_maps,
+        search_tiles=(search_tile,),
+        batch_positions=batch_positions,
+        tilt_series=tilt_series,
+    )
+    overlay_status = aggregate_batch_position_status(batch, status_context)
+    queued_reference = _queued_overlay_reference(batch_positions, status_context)
     batch_failed = any(tid in failed_set for tid in batch.linked_tilt_series_ids)
     x, y = _stage_to_image(frame, position)
     width, height = frame.image_size
@@ -618,7 +697,13 @@ def search_tile_markers(
             radius=10,
             label=batch.name or batch.id,
             tooltip=_batch_tooltip(batch),
-            status="failed" if batch_failed else batch.status,
+            status=(
+                "failed"
+                if batch_failed
+                else STATUS_QUEUED
+                if overlay_status.status == STATUS_QUEUED
+                else batch.status
+            ),
             unresolved=False,
             metadata={
                 "search_tile_name": search_tile.name,
@@ -638,7 +723,14 @@ def search_tile_markers(
             frame.image_size,
         )
 
-    template_markers = _template_markers_in_frame(search_tile.id, frame, batch, position)
+    template_markers = _template_markers_in_frame(
+        search_tile.id,
+        frame,
+        batch,
+        position,
+        queued=overlay_status.status == STATUS_QUEUED,
+        queued_reference=queued_reference,
+    )
     if batch_failed:
         _mark_markers_failed(template_markers)
     markers.extend(template_markers)
@@ -712,6 +804,8 @@ def _camera_fov_markers_from_exposures(
     image_size: tuple[int, int] | None,
     *,
     source_id: str | None = None,
+    queued: bool = False,
+    queued_reference: QueuedOverlayReference | None = None,
 ) -> list[ImageMarker]:
     """Create acquisition camera-FOV rectangles for exposure markers.
 
@@ -725,13 +819,21 @@ def _camera_fov_markers_from_exposures(
 
     if target_pixel_size is None or target_pixel_size <= 0 or image_size is None:
         return []
-    dimensions = _camera_fov_dimensions(batch, target_pixel_size)
+    dimensions = (
+        _queued_camera_fov_dimensions(queued_reference, target_pixel_size)
+        if queued
+        else None
+    ) or _camera_fov_dimensions(batch, target_pixel_size)
     if dimensions is None:
         return []
     width_px, height_px, width_m, height_m, source = dimensions
     if width_px <= 0 or height_px <= 0:
         return []
-    has_beam_diameter = _beam_radius_pixels(batch, target_pixel_size) is not None
+    has_beam_diameter = (
+        _queued_beam_radius_pixels(queued_reference, target_pixel_size) is not None
+        if queued
+        else _beam_radius_pixels(batch, target_pixel_size) is not None
+    )
     out: list[ImageMarker] = []
     for marker in markers:
         if marker.marker_type != MarkerType.EXPOSURE_AREA or marker.x is None or marker.y is None:
@@ -745,7 +847,13 @@ def _camera_fov_markers_from_exposures(
         if not _bbox_intersects(image_size, bbox):
             continue
         area_name = _as_str(marker.metadata.get("area_name")) or marker.label or "Exposure"
-        fallback_note = "" if has_beam_diameter else "\nBeam diameter unavailable; filled camera FOV shown as collected-region fallback."
+        fallback_note = (
+            ""
+            if has_beam_diameter
+            else "\nBeam diameter unavailable; hollow queued camera FOV shown."
+            if queued
+            else "\nBeam diameter unavailable; filled camera FOV shown as collected-region fallback."
+        )
         out.append(
             ImageMarker(
                 id=f"{marker.id}:{MarkerType.CAMERA_FOV}",
@@ -761,7 +869,7 @@ def _camera_fov_markers_from_exposures(
                     f"{width_m * 1e6:.2f} x {height_m * 1e6:.2f} µm"
                     f"{fallback_note}"
                 ),
-                status=marker.status,
+                status=STATUS_QUEUED if queued else marker.status,
                 unresolved=False,
                 metadata={
                     "batch_id": batch.id,
@@ -772,7 +880,14 @@ def _camera_fov_markers_from_exposures(
                     "camera_fov_size_px": (width_px, height_px),
                     "camera_fov_size_m": (width_m, height_m),
                     "has_beam_diameter": has_beam_diameter,
-                    "filled_fallback": not has_beam_diameter,
+                    "filled_fallback": not has_beam_diameter and not queued,
+                    "queued_position": queued,
+                    "queued_fov_fallback": queued and not has_beam_diameter,
+                    "queued_camera_source_batch_id": (
+                        queued_reference.camera_source_batch_id
+                        if queued and queued_reference is not None
+                        else None
+                    ),
                     "exposure_marker_id": marker.id,
                     "exposure_index": marker.metadata.get("exposure_index"),
                     "exposure_type": marker.metadata.get("exposure_type"),
@@ -795,6 +910,29 @@ def _camera_fov_dimensions(
         return None
     width_m = metadata.nx * source_pixel_size
     height_m = metadata.ny * source_pixel_size
+    return (
+        width_m / target_pixel_size,
+        height_m / target_pixel_size,
+        width_m,
+        height_m,
+        source,
+    )
+
+
+def _queued_camera_fov_dimensions(
+    reference: QueuedOverlayReference | None,
+    target_pixel_size: float,
+) -> tuple[float, float, float, float, str] | None:
+    if (
+        reference is None
+        or reference.camera_fov_m is None
+        or target_pixel_size <= 0
+    ):
+        return None
+    width_m, height_m = reference.camera_fov_m
+    if width_m <= 0 or height_m <= 0:
+        return None
+    source = reference.camera_source or "successful tilt-series exposure MRC"
     return (
         width_m / target_pixel_size,
         height_m / target_pixel_size,
@@ -1128,6 +1266,9 @@ def _template_markers_in_frame(
     frame: ImageFrame,
     batch: BatchPosition,
     batch_stage_position: tuple[float, float],
+    *,
+    queued: bool = False,
+    queued_reference: QueuedOverlayReference | None = None,
 ) -> list[ImageMarker]:
     specs = [
         (MarkerType.EXPOSURE_AREA, "ExposureTemplateAreaParameters", "Exposure"),
@@ -1150,6 +1291,8 @@ def _template_markers_in_frame(
             batch_stage_position,
             exposure_index=0 if marker_type == MarkerType.EXPOSURE_AREA else None,
             exposure_type="main" if marker_type == MarkerType.EXPOSURE_AREA else None,
+            queued=queued,
+            queued_reference=queued_reference,
         )
         if marker is not None:
             markers.append(marker)
@@ -1170,6 +1313,8 @@ def _template_markers_in_frame(
                 batch_stage_position,
                 exposure_index=index,
                 exposure_type="additional",
+                queued=queued,
+                queued_reference=queued_reference,
             )
             if marker is not None:
                 markers.append(marker)
@@ -1181,13 +1326,39 @@ def _template_markers_in_frame(
         panel_name=frame.source,
         default_central_name=batch.name or batch.id,
     )
+    _correct_distinct_focus_orientation(
+        markers,
+        frame=frame,
+        batch=batch,
+    )
     _filter_off_image_template_markers(
         markers,
         image_size=frame.image_size,
         source_id=source_id,
         batch=batch,
     )
-    markers.extend(_camera_fov_markers_from_exposures(batch, markers, frame.pixel_size, frame.image_size, source_id=source_id))
+    camera_markers = _camera_fov_markers_from_exposures(
+        batch,
+        markers,
+        frame.pixel_size,
+        frame.image_size,
+        source_id=source_id,
+        queued=queued,
+        queued_reference=queued_reference,
+    )
+    if (
+        queued
+        and _queued_beam_radius_pixels(queued_reference, frame.pixel_size) is None
+        and camera_markers
+    ):
+        # No physical beam diameter exists for this queued target. Keep its
+        # exposure marker as an interaction/label anchor, but draw only the
+        # physically sized hollow camera footprint in the image.
+        for marker in markers:
+            if marker.marker_type in BEAM_AREA_MARKER_TYPES:
+                marker.visible = False
+                marker.metadata["queued_camera_fov_replacement"] = True
+    markers.extend(camera_markers)
     markers.extend(_exposure_link_markers(source_id, batch, markers))
     return markers
 
@@ -1203,6 +1374,8 @@ def _template_marker_in_frame(
     *,
     exposure_index: int | None = None,
     exposure_type: str | None = None,
+    queued: bool = False,
+    queued_reference: QueuedOverlayReference | None = None,
 ) -> ImageMarker | None:
     if not isinstance(raw, dict) or raw.get("_attributes", {}).get("nil") == "true":
         return None
@@ -1219,7 +1392,12 @@ def _template_marker_in_frame(
     if not (0 <= x <= width and 0 <= y <= height) and not defer_bounds_check:
         LOGGER.debug("Skipping off-image template marker source=%s batch=%s type=%s x=%s y=%s", source_id, batch.id, marker_type, x, y)
         return None
-    radius = _beam_radius_pixels(batch, frame.pixel_size) or _area_radius(marker_type)
+    beam_radius = (
+        _queued_beam_radius_pixels(queued_reference, frame.pixel_size)
+        if queued
+        else _beam_radius_pixels(batch, frame.pixel_size)
+    )
+    radius = beam_radius or _area_radius(marker_type)
     LOGGER.debug(
         "Overlay conversion type=%s batch=%s source=%s offset=(%s,%s)m target_image=%s pixel_size=%s position=(%s,%s) radius=%s",
         marker_type,
@@ -1242,9 +1420,33 @@ def _template_marker_in_frame(
         "coordinate_source": f"batch_template_stage_offset_to_{frame.source}",
         "stage_position": (stage_x, stage_y),
         "raw_image_position": (x, y),
-        "radius_source": "BeamDiameter" if _beam_radius_pixels(batch, frame.pixel_size) is not None else "default",
+        "radius_source": (
+            "successful_tilt_series_exposure_mrc"
+            if queued and beam_radius is not None
+            else "default"
+            if queued
+            else "BeamDiameter"
+            if beam_radius is not None
+            else "default"
+        ),
         "area_name": area_name,
     }
+    if queued:
+        marker_metadata.update(
+            {
+                "queued_position": True,
+                "queued_beam_source_batch_id": (
+                    queued_reference.beam_source_batch_id
+                    if queued_reference is not None
+                    else None
+                ),
+                "queued_beam_source": (
+                    queued_reference.beam_source
+                    if queued_reference is not None
+                    else None
+                ),
+            }
+        )
     if marker_type == MarkerType.EXPOSURE_AREA:
         marker_metadata.update(
             {
@@ -1261,8 +1463,18 @@ def _template_marker_in_frame(
         y=y,
         radius=radius,
         label=None,
-        tooltip=f"{area_name} area for {batch.name or batch.id}",
-        status=batch.status,
+        tooltip=(
+            f"{area_name} area for {batch.name or batch.id}\n"
+            + (
+                f"Queued; beam diameter borrowed from successful batch "
+                f"{queued_reference.beam_source_batch_id}."
+                if queued and beam_radius is not None and queued_reference is not None
+                else "Queued; beam diameter unavailable."
+                if queued
+                else ""
+            )
+        ).rstrip(),
+        status=STATUS_QUEUED if queued else batch.status,
         unresolved=False,
         metadata=marker_metadata,
     )
@@ -1477,6 +1689,88 @@ def _apply_grouped_marker_correction(
             local_center[0],
             local_center[1],
         )
+
+
+def _correct_distinct_focus_orientation(
+    markers: list[ImageMarker],
+    *,
+    frame: ImageFrame,
+    batch: BatchPosition,
+) -> None:
+    """Correct the Tomography 5 convention used by distinct Focus targets.
+
+    Coincident Focus/Tracking targets in the reference sessions are already
+    validated in the legacy reflected frame and must stay coincident.  When
+    Focus is recorded at a different template offset from Tracking, however,
+    its offset is in the same target-relative convention as the exposure
+    pattern.  The legacy whole-image reflection leaves that Focus vector 180
+    degrees from the pattern, so rotate only that distinct Focus marker around
+    the primary exposure after the shared frame correction.
+    """
+
+    if frame.source not in {"SearchMap", "Overview"}:
+        return
+    primary = next(
+        (
+            marker
+            for marker in markers
+            if marker.marker_type == MarkerType.EXPOSURE_AREA
+            and marker.metadata.get("exposure_index") == 0
+        ),
+        None,
+    )
+    focus = next(
+        (marker for marker in markers if marker.marker_type == MarkerType.FOCUS_AREA),
+        None,
+    )
+    tracking = next(
+        (marker for marker in markers if marker.marker_type == MarkerType.TRACKING_AREA),
+        None,
+    )
+    if primary is None or focus is None or tracking is None:
+        return
+    focus_raw = focus.metadata.get("raw")
+    tracking_raw = tracking.metadata.get("raw")
+    if not isinstance(focus_raw, dict) or not isinstance(tracking_raw, dict):
+        return
+    focus_offset = (
+        _as_float(focus_raw.get("PositionX")),
+        _as_float(focus_raw.get("PositionY")),
+    )
+    tracking_offset = (
+        _as_float(tracking_raw.get("PositionX")),
+        _as_float(tracking_raw.get("PositionY")),
+    )
+    if None in focus_offset or None in tracking_offset:
+        return
+    if math.isclose(focus_offset[0], tracking_offset[0], rel_tol=1e-9, abs_tol=1e-12) and math.isclose(
+        focus_offset[1], tracking_offset[1], rel_tol=1e-9, abs_tol=1e-12
+    ):
+        return
+    anchor = _marker_center(primary)
+    before = _marker_center(focus)
+    if anchor is None or before is None:
+        return
+    after = rotate_point_180_around_anchor(
+        before[0],
+        before[1],
+        anchor[0],
+        anchor[1],
+    )
+    _move_marker_center(focus, after)
+    focus.metadata["focus_orientation_transform"] = (
+        "local_180_about_primary_exposure"
+    )
+    focus.metadata["focus_orientation_anchor"] = primary.id
+    focus.metadata["focus_orientation_before"] = before
+    LOGGER.debug(
+        "Focus orientation correction panel=%s batch=%s before=%s after=%s anchor=%s",
+        frame.source,
+        batch.id,
+        before,
+        after,
+        anchor,
+    )
 
 
 def _overlay_group_name(marker: ImageMarker, default_central_name: str | None = None) -> str:
@@ -2084,6 +2378,123 @@ def _area_radius(marker_type: str) -> float:
     if marker_type == MarkerType.CONDITION_AREA:
         return 16.0
     return 12.0
+
+
+def _queued_overlay_reference(
+    batch_positions: Iterable[BatchPosition],
+    status_context: ItemStatusContext,
+) -> QueuedOverlayReference:
+    """Resolve one consistent successful-acquisition geometry reference.
+
+    Only explicitly linked, validator-complete tilt series qualify a batch as
+    a source.  If successful batches disagree on beam diameter or physical
+    camera field, the corresponding value remains unresolved rather than
+    choosing the first candidate.
+    """
+
+    successful: list[BatchPosition] = []
+    for batch in batch_positions:
+        counts = batch_position_status_counts(
+            batch,
+            status_context,
+            include_inferred=False,
+        )
+        if counts.complete > 0:
+            successful.append(batch)
+    successful.sort(key=lambda batch: (batch.name or batch.id).casefold())
+
+    beam_candidates: list[tuple[BatchPosition, float]] = []
+    camera_candidates: list[tuple[BatchPosition, float, float]] = []
+    for batch in successful:
+        context = _as_str(batch.metadata.get("BeamDiameterContext"))
+        diameter = _as_float(find_first(batch.metadata, "BeamDiameter"))
+        if (
+            context == BEAM_DIAMETER_EXPOSURE_MRC_CONTEXT
+            and diameter is not None
+            and diameter > 0
+        ):
+            beam_candidates.append((batch, diameter))
+
+        metadata = batch.exposure_mrc_metadata
+        pixel_size = _mrc_pixel_size(metadata)
+        if (
+            metadata is not None
+            and metadata.nx is not None
+            and metadata.ny is not None
+            and metadata.nx > 0
+            and metadata.ny > 0
+            and pixel_size is not None
+            and pixel_size > 0
+        ):
+            camera_candidates.append(
+                (
+                    batch,
+                    metadata.nx * pixel_size,
+                    metadata.ny * pixel_size,
+                )
+            )
+
+    beam_batch: BatchPosition | None = None
+    beam_diameter_m: float | None = None
+    if beam_candidates and _consistent_values(
+        [diameter for _, diameter in beam_candidates]
+    ):
+        beam_batch, beam_diameter_m = beam_candidates[0]
+
+    camera_batch: BatchPosition | None = None
+    camera_fov_m: tuple[float, float] | None = None
+    if camera_candidates and _consistent_values(
+        [width for _, width, _ in camera_candidates]
+    ) and _consistent_values([height for _, _, height in camera_candidates]):
+        camera_batch, width_m, height_m = camera_candidates[0]
+        camera_fov_m = (width_m, height_m)
+
+    return QueuedOverlayReference(
+        beam_diameter_m=beam_diameter_m,
+        beam_source_batch_id=beam_batch.id if beam_batch is not None else None,
+        beam_source=(
+            _as_str(beam_batch.metadata.get("BeamDiameterSource"))
+            if beam_batch is not None
+            else None
+        ),
+        camera_fov_m=camera_fov_m,
+        camera_source_batch_id=(
+            camera_batch.id if camera_batch is not None else None
+        ),
+        camera_source=(
+            f"{camera_batch.exposure_image_path.name} exposure MRC"
+            if camera_batch is not None
+            and camera_batch.exposure_image_path is not None
+            else "successful tilt-series exposure MRC"
+            if camera_batch is not None
+            else None
+        ),
+    )
+
+
+def _consistent_values(values: list[float]) -> bool:
+    if not values:
+        return False
+    reference = values[0]
+    return all(
+        math.isclose(value, reference, rel_tol=1e-4, abs_tol=1e-12)
+        for value in values[1:]
+    )
+
+
+def _queued_beam_radius_pixels(
+    reference: QueuedOverlayReference | None,
+    pixel_size: float | None,
+) -> float | None:
+    if (
+        reference is None
+        or reference.beam_diameter_m is None
+        or reference.beam_diameter_m <= 0
+        or pixel_size is None
+        or pixel_size <= 0
+    ):
+        return None
+    return max(3.0, (reference.beam_diameter_m / 2.0) / pixel_size)
 
 
 def _beam_radius_pixels(batch: BatchPosition, pixel_size: float | None) -> float | None:

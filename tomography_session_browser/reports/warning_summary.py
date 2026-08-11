@@ -112,9 +112,22 @@ _RULES: tuple[_Rule, ...] = (
         explanation="Per-frame tilt-angle metadata was missing, mismatched, or conflicted; "
                     "the viewer used the strongest valid source or frame order.",
         patterns=(
-            r"tilt-?angle",
+            # "tilt angles" with a space is what the MRC parser actually
+            # emits; the hyphen-only form missed it and sent a real category
+            # to "Other".
+            r"tilt[-\s]?angles?",
             r"\btlt\b.*(count|invalid|ignored|disagree)",
             r"frame order without angle",
+        ),
+    ),
+    _Rule(
+        category="Search-tile link used a fallback",
+        severity="info",
+        explanation="The search tile was matched by projection, timestamp or "
+                    "nearest-tile position rather than an explicit link.",
+        patterns=(
+            r"tile association used fallback",
+            r"fallback matching",
         ),
     ),
     _Rule(

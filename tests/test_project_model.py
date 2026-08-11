@@ -11,7 +11,13 @@ from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.models import Atlas, BatchPosition, Overview, Sample, SearchMap, SearchTile, Session, TiltSeries
 from tomography_session_browser.reports import ProjectReportGroup, build_session_report
 from tomography_session_browser.ui.project_model import build_project_tree_groups
-from tomography_session_browser.ui.session_linking import _atlas_lookup, _matching_atlas_sample
+from tomography_session_browser.ui.session_linking import (
+    ATLAS_MATCH_EXACT,
+    ATLAS_MATCH_SUFFIX,
+    _atlas_lookup,
+    matching_atlas_sample,
+    resolve_atlas_for_sample,
+)
 
 
 def _atlas_session(name: str, root: str) -> Session:
@@ -286,6 +292,141 @@ def test_ambiguous_collection_link_stays_unresolved() -> None:
     assert "Ambiguous atlas link" in groups[-1].warnings[0]
 
 
+def test_shared_relative_suffix_across_distinct_atlas_samples_stays_unresolved() -> None:
+    """Two screening sessions reachable by the same relative AtlasId suffix.
+
+    Regression for N3: the resolver used to return whichever candidate the
+    length-sorted lookup happened to yield first, silently producing a linked
+    group bound to an arbitrary atlas.
+    """
+
+    first_atlas = _atlas_session("Atlas_D", "C:/project_a")
+    first_atlas.samples[0].id = "atlas-a-sample"
+    second_atlas = _atlas_session("Atlas_D", "C:/project_b")
+    second_atlas.samples[0].id = "atlas-b-sample"
+    collection = _collection_session(
+        "DataCollection_06",
+        "C:/collection",
+        "Atlas_D/Sample1/Atlas/Atlas.dm",
+    )
+
+    resolution = resolve_atlas_for_sample(
+        collection.samples[0],
+        _atlas_lookup([first_atlas, second_atlas]),
+    )
+
+    assert resolution.ambiguous is True
+    assert resolution.sample is None
+    assert resolution.linked is False
+    assert {candidate.id for candidate in resolution.candidates} == {
+        "atlas-a-sample",
+        "atlas-b-sample",
+    }
+
+    groups = build_project_tree_groups([first_atlas, second_atlas, collection])
+
+    assert [group.kind for group in groups] == ["atlas", "atlas", "unresolved"]
+    warning = groups[-1].warnings[0]
+    assert "Ambiguous atlas link" in warning
+    # Both same-named candidates must remain distinguishable in the warning.
+    assert "project_a" in warning
+    assert "project_b" in warning
+
+
+def test_exact_atlas_path_wins_over_a_competing_relative_suffix() -> None:
+    """An exact normalised path is decisive even when a suffix also matches."""
+
+    exact_atlas = _atlas_session("Atlas_F", "C:/project_a")
+    exact_atlas.samples[0].id = "atlas-exact"
+    suffix_atlas = _atlas_session("Atlas_F", "C:/project_b")
+    suffix_atlas.samples[0].id = "atlas-suffix"
+    collection = _collection_session(
+        "DataCollection_07",
+        "C:/collection",
+        "C:/project_a/Atlas_F/Sample1/Atlas/Atlas.dm",
+    )
+
+    resolution = resolve_atlas_for_sample(
+        collection.samples[0],
+        _atlas_lookup([exact_atlas, suffix_atlas]),
+    )
+
+    assert resolution.linked is True
+    assert resolution.sample is exact_atlas.samples[0]
+    assert resolution.method == ATLAS_MATCH_EXACT
+
+    groups = build_project_tree_groups([exact_atlas, suffix_atlas, collection])
+
+    assert [group.kind for group in groups] == ["linked", "atlas"]
+    assert groups[0].atlas_session is exact_atlas
+
+
+def test_exact_atlas_path_survives_same_sample_ids_in_different_roots() -> None:
+    """Grouping must not collapse back to the non-unique parser sample ID."""
+
+    exact_atlas = _atlas_session("Atlas_H", "C:/project_a")
+    competing_atlas = _atlas_session("Atlas_H", "C:/project_b")
+    collection = _collection_session(
+        "DataCollection_09",
+        "C:/collection",
+        "C:/project_a/Atlas_H/Sample1/Atlas/Atlas.dm",
+    )
+
+    assert exact_atlas.samples[0].id == competing_atlas.samples[0].id
+
+    groups = build_project_tree_groups([exact_atlas, competing_atlas, collection])
+
+    assert [group.kind for group in groups] == ["linked", "atlas"]
+    assert groups[0].atlas_session is exact_atlas
+    assert groups[0].collection_sessions == [collection]
+
+
+def test_single_relative_suffix_match_still_links() -> None:
+    """The conservative change must not break ordinary relative AtlasId links."""
+
+    atlas = _atlas_session("Atlas_G", "C:/project")
+    collection = _collection_session(
+        "DataCollection_08",
+        "C:/collection",
+        "Atlas_G/Sample1/Atlas/Atlas.dm",
+    )
+
+    resolution = resolve_atlas_for_sample(collection.samples[0], _atlas_lookup([atlas]))
+
+    assert resolution.linked is True
+    assert resolution.method == ATLAS_MATCH_SUFFIX
+
+    groups = build_project_tree_groups([atlas, collection])
+
+    assert [group.kind for group in groups] == ["linked"]
+
+
+def test_ambiguous_atlas_link_does_not_become_a_weak_sample_index_group() -> None:
+    """An unresolved collection must not be linked in through the weak fallback.
+
+    Both collections carry sample folders that yield the same weak sample-index
+    key, so a regression that promoted weak groups would rejoin them to an
+    atlas.
+    """
+
+    first_atlas = _atlas_session("Atlas_H", "C:/project_a")
+    first_atlas.samples[0].id = "atlas-h-a"
+    second_atlas = _atlas_session("Atlas_H", "C:/project_b")
+    second_atlas.samples[0].id = "atlas-h-b"
+    collection = _collection_session(
+        "DataCollection_09",
+        "C:/collection",
+        "Atlas_H/Sample1/Atlas/Atlas.dm",
+    )
+
+    groups = build_project_tree_groups([first_atlas, second_atlas, collection])
+
+    assert [group.kind for group in groups] == ["atlas", "atlas", "unresolved"]
+    for group in groups:
+        if group.kind == "atlas":
+            assert group.collection_sessions == []
+
+
 def test_atlas_link_suffix_must_start_at_path_component_boundary() -> None:
     atlas = _atlas_session("Atlas_A", "C:/project")
     collection = _collection_session(
@@ -294,7 +435,7 @@ def test_atlas_link_suffix_must_start_at_path_component_boundary() -> None:
         "C:/archive/XAtlas_A/Sample1/Atlas/Atlas.dm",
     )
 
-    assert _matching_atlas_sample(collection.samples[0], _atlas_lookup([atlas])) is None
+    assert matching_atlas_sample(collection.samples[0], _atlas_lookup([atlas])) is None
 
 
 def test_custom_project_group_name_is_display_only() -> None:
@@ -647,7 +788,7 @@ def test_collection_session_scope_includes_linked_atlas_without_broadening_count
     linked_atlases = window._context_atlases(collection)
     assert linked_atlases == [atlas.samples[0].atlas]
     assert window.tabs.tabText(1) == "Atlas  1"
-    assert window.tabs.tabText(5) == "Batch position  1"
+    assert window.tabs.tabText(5) == "Batch positions  1"
     assert window._context_batch_positions(collection) == collection.samples[0].batch_positions
     assert window._context_for_object(linked_atlases[0]) is collection
     assert window._current_viewer_scope_contains(linked_atlases[0])
@@ -803,7 +944,7 @@ def test_collection_sample_scope_includes_only_its_linked_atlas() -> None:
     linked_atlases = window._context_atlases(sample)
     assert linked_atlases == [atlas.samples[0].atlas]
     assert window.tabs.tabText(1) == "Atlas  1"
-    assert window.tabs.tabText(5) == "Batch position  1"
+    assert window.tabs.tabText(5) == "Batch positions  1"
     assert window._context_batch_positions(sample) == sample.batch_positions
     assert window._context_for_object(linked_atlases[0]) is sample
     model = session_dashboard_model(window._dashboard_scope_value())
@@ -915,7 +1056,10 @@ def test_dashboard_scope_returns_to_parent_session_after_tilt_list_selection(tmp
     assert window._pending_project_tree_clear_tilt_id is None
     assert not window._project_tree_tilt_click_timer.isActive()
     assert window.tabs.currentIndex() == main_window.TAB_LABELS.index("Tilt series")
-    assert viewer.list_filter.text() == "manual filter"
+    # S1 contract change: an incompatible filter is cleared on arrival rather
+    # than leaving a single unhidden row behind a count of 0.
+    assert viewer.list_filter.text() == ""
+    assert viewer.list_count.text() == str(viewer.list.topLevelItemCount())
     assert window._dashboard_highlighted_tilt_series_id == tilts[1].id
     assert bool(tilt_item.data(0, main_window.HIGHLIGHT_ROLE))
 

@@ -32,7 +32,7 @@ PROJECT_GROUP_ICONS: Final[dict[ProjectGroupKind, str]] = {
 TREE_ENTITY_GROUP_ICONS: Final[dict[str, str]] = {
     "Overviews": TAB_ICONS["Overview"],
     "Search maps": TAB_ICONS["Search map"],
-    "Search": TAB_ICONS["Search"],
+    "Search tiles": TAB_ICONS["Search"],
     "Batch positions": TAB_ICONS["Batch position"],
     "Tilt series": TAB_ICONS["Tilt series"],
 }

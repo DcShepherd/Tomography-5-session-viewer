@@ -6,6 +6,7 @@ from tomography_session_browser.ui.theme import (
     LIGHT_PALETTE,
     MONO_FONT_FAMILY,
     SANS_FONT_FAMILY,
+    VISUAL_TIERS,
     build_stylesheet,
 )
 
@@ -184,3 +185,57 @@ def _relative_luminance(hex_colour: str) -> float:
 
     red, green, blue = (linear(channel) for channel in channels)
     return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+# --- the three visual tiers (V1) -------------------------------------------
+
+
+def test_every_visual_tier_is_defined_in_both_palettes() -> None:
+    for palette in (DARK_PALETTE, LIGHT_PALETTE):
+        stylesheet = build_stylesheet(palette)
+        for tier in VISUAL_TIERS:
+            assert _style_blocks_for_selector(stylesheet, f'[tier="{tier}"]'), tier
+
+
+def test_every_visual_tier_has_a_widget_that_carries_it() -> None:
+    """The tiers were dead CSS: defined, documented, and used by nothing.
+
+    ``theme.py`` declared ``tierLandmark``/``tierPrimary``/``tierSupporting``
+    and no widget ever set them, so V1's "three visual tiers" could not be seen
+    on screen and the native-display checklist item asking a human to verify
+    them had nothing to look at. This test fails if that happens again.
+    """
+
+    sources = [
+        path.read_text(encoding="utf-8")
+        for path in (REPO_ROOT / "tomography_session_browser" / "ui").rglob("*.py")
+        if path.name != "theme.py"
+    ]
+    joined = "\n".join(sources)
+
+    for tier in VISUAL_TIERS:
+        constant = f"TIER_{tier.upper()}"
+        assert f"apply_tier(" in joined
+        assert constant in joined, f"No widget claims the {tier} tier"
+
+
+def test_tiered_widgets_do_not_also_set_type_inline() -> None:
+    """An inline font rule is a fourth place type is decided.
+
+    It also bakes the palette in at construction, so a theme switch leaves the
+    widget in the previous theme's colour until it is rebuilt.
+    """
+
+    offenders: list[str] = []
+    for path in (REPO_ROOT / "tomography_session_browser" / "ui").rglob("*.py"):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "setStyleSheet(" not in line:
+                continue
+            if "font-size" in line or "font-weight" in line:
+                offenders.append(f"{path.name}:{number}")
+
+    assert offenders == [], (
+        "Type is set inline at: "
+        + ", ".join(offenders)
+        + ". Give the widget an object name or a tier instead."
+    )

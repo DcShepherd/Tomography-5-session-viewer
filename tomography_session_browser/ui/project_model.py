@@ -6,7 +6,10 @@ from typing import Literal
 
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.models import Sample, Session
-from tomography_session_browser.ui.session_linking import linked_sample_groups
+from tomography_session_browser.ui.session_linking import (
+    atlas_link_resolutions,
+    linked_sample_groups,
+)
 
 
 ProjectGroupKind = Literal["linked", "atlas", "collection", "unresolved"]
@@ -82,6 +85,27 @@ def build_project_tree_groups(
         for atlas_id in group_atlases:
             atlas_to_collections.setdefault(atlas_id, set()).update(group_collections)
 
+    # An AtlasId that matches several atlas samples never reaches the grouping
+    # above, because linked_sample_groups deliberately refuses to pick one.
+    # Record those candidates here so the collection surfaces as unresolved
+    # rather than quietly becoming a standalone collection group.
+    for sample, resolution in _ambiguous_atlas_samples(unique_sessions):
+        collection_session = parent_by_sample.get(id(sample))
+        if collection_session is None or id(collection_session) in atlas_set:
+            continue
+        if not _sample_has_collection_data(sample):
+            continue
+        candidate_atlas_ids = {
+            id(candidate_session)
+            for candidate in resolution.candidates
+            if (candidate_session := parent_by_sample.get(id(candidate))) is not None
+            and id(candidate_session) in atlas_set
+        }
+        if len(candidate_atlas_ids) > 1:
+            collection_to_atlases.setdefault(id(collection_session), set()).update(
+                candidate_atlas_ids
+            )
+
     ambiguous_collection_ids = {
         collection_id
         for collection_id, related_atlases in collection_to_atlases.items()
@@ -140,10 +164,12 @@ def build_project_tree_groups(
         if session_id in atlas_set or session_id in used_collection_ids:
             continue
         if session_id in ambiguous_collection_ids:
-            related_names = sorted(
-                session_by_id[atlas_id].name
-                for atlas_id in collection_to_atlases.get(session_id, set())
-                if atlas_id in session_by_id
+            related_names = _candidate_labels(
+                [
+                    session_by_id[atlas_id]
+                    for atlas_id in collection_to_atlases.get(session_id, set())
+                    if atlas_id in session_by_id
+                ]
             )
             key = f"unresolved:{session_key(session)}"
             automatic_name = session.name or session.path.name or "Unresolved data collection"
@@ -178,6 +204,36 @@ def build_project_tree_groups(
         )
 
     return groups
+
+
+def _ambiguous_atlas_samples(sessions: list[Session]):
+    """Yield ``(sample, resolution)`` for every sample with an undecidable AtlasId."""
+
+    for sample_key_id, resolution in atlas_link_resolutions(sessions).items():
+        if not resolution.ambiguous:
+            continue
+        sample = next(
+            (
+                candidate
+                for session in sessions
+                for candidate in session.samples
+                if id(candidate) == sample_key_id
+            ),
+            None,
+        )
+        if sample is not None:
+            yield sample, resolution
+
+
+def _candidate_labels(sessions: list[Session]) -> list[str]:
+    """Name the candidate atlas sessions, disambiguating identical names by path."""
+
+    names = [session.name or session.path.name or "Atlas session" for session in sessions]
+    if len(set(names)) == len(names):
+        return sorted(names)
+    return sorted(
+        f"{name} ({session.path})" for name, session in zip(names, sessions, strict=True)
+    )
 
 
 def session_key(session: Session) -> str:

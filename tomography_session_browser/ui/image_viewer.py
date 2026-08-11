@@ -49,10 +49,19 @@ from tomography_session_browser.domain.display_names import count_phrase, format
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.domain.models import Atlas, BatchPosition, MrcMetadata, Overview, SearchMap, SearchTile, TiltSeries
 from tomography_session_browser.domain.units import ANGSTROM, ANGSTROM_PER_PIXEL, DEGREE, MICROMETRE, NANOMETRE
+from tomography_session_browser.ui.context_stack import open_action_label
+from tomography_session_browser.ui.empty_states import (
+    KIND_LOAD_FAILED,
+    EmptyState,
+    missing_preview_state,
+    viewer_empty_state,
+)
+from tomography_session_browser.ui.widgets.empty_state_panel import EmptyStatePanel
 from tomography_session_browser.ui.list_decorations import paint_selection_marker
 from tomography_session_browser.parsers.mrc_parser import MrcPreviewSource, NORMALISATION
 from tomography_session_browser.parsers.xml_parser import find_first
 from tomography_session_browser.services.item_status import ItemListStatus, display_status_label
+from tomography_session_browser.services.status_taxonomy import acquisition_state
 from tomography_session_browser.services.batch_label_service import (
     LABEL_STROKE_WIDTH_PX,
     AtlasLabelPlacement,
@@ -109,6 +118,23 @@ LIST_SUMMARY_ROLE = VIEWER_OBJECT_ROLE + 2
 LIST_STATUS_ROLE = VIEWER_OBJECT_ROLE + 3
 LIST_TOOLTIP_ROLE = VIEWER_OBJECT_ROLE + 4
 MAX_PREVIEW_DIMENSION = 2048
+# Verb-plus-destination names for the viewer's jump buttons. The button faces
+# stay short because the strip is dense; these carry the full phrasing to
+# assistive technology and tooltips.
+NAVIGATION_ACTION_NAMES: dict[str, str] = {
+    "batch": open_action_label("Batch position"),
+    "search": open_action_label("Search"),
+    "search_map": open_action_label("Search map"),
+    "overview": open_action_label("Overview"),
+    "tilt_series": open_action_label("Tilt series"),
+}
+# How many logical images keep a remembered crop. Four proportional floats
+# each, so the cap is about memory discipline rather than size.
+VIEWPORT_MEMORY_LIMIT = 32
+# The overlay panel is bounded to its canvas so it cannot grow off-screen when
+# a linked root contributes many collections; the dynamic list scrolls instead.
+OVERLAY_PANEL_MARGIN_PX = 24
+ATLAS_COLLECTION_LIST_MAX_PX = 180
 FIRST_ZOOM_PREVIEW_DIMENSION = 4096
 MRC_JPEG_FALLBACK_GRACE_MS = 220
 PYRAMID_LEVELS = (2048, 4096, 8192)
@@ -791,6 +817,17 @@ class _AtlasClusterRow(QPushButton):
             else Qt.CursorShape.ArrowCursor
         )
         self.setToolTip(marker.tooltip or "")
+        # The label is painted, not set, so this button has no text for a
+        # screen reader to announce. Spell out the batch and its status, and
+        # say when it cannot be opened rather than leaving it silently inert.
+        navigable = bool(marker.metadata.get("navigation_enabled", True))
+        name = marker.label or marker.linked_object_id or marker.id
+        self.setAccessibleName(f"Batch {name}, {acquisition_state(marker.status)}")
+        self.setAccessibleDescription(
+            marker.tooltip
+            if navigable
+            else f"Unavailable. {marker.tooltip or 'No unique destination.'}"
+        )
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt signature
         from tomography_session_browser.ui.theme import DARK_PALETTE, MONO_FONT_NAME
@@ -980,6 +1017,10 @@ class ImagePreviewView(QGraphicsView):
         self._has_user_interacted = False
         self._pending_initial_fit = False
         self._last_view_range: tuple[tuple[float, float], tuple[float, float]] | None = None
+        # Viewport memory, keyed by *logical image* rather than by tab, so a
+        # different image can never inherit another's crop. Stores only the
+        # scene-space rectangle the user was looking at.
+        self._view_memory: OrderedDict[Any, tuple[float, float, float, float]] = OrderedDict()
         self._current_image_shape: tuple[int, int] | None = None
         self._markers: list[ImageMarker] = []
         self._marker_items: list[QGraphicsItem] = []
@@ -1015,6 +1056,9 @@ class ImagePreviewView(QGraphicsView):
         self.setBackgroundBrush(Qt.GlobalColor.black)
 
     def clear(self, message: str = "") -> None:
+        # Bank the crop before the key is dropped, so a rebuild that lands the
+        # user back on the same image returns them to where they were.
+        self.remember_current_view()
         self._close_cluster_popup()
         self._scene.clear()
         self._pixmap_item = None
@@ -1115,8 +1159,14 @@ class ImagePreviewView(QGraphicsView):
     def set_markers(self, markers: list[ImageMarker], selected_marker_id: str | None = None) -> None:
         self._close_cluster_popup()
         self._cluster_cache.clear()
-        self._keyboard_marker_id = None
         marker_ids = {marker.id for marker in markers}
+        # Keep the keyboard cursor if its marker survived this refresh.
+        # Clearing unconditionally meant a keyboard selection wiped its own
+        # cursor: arrowing to a marker notifies the window, which refreshes the
+        # overlay, which landed back here — so the next arrow press started
+        # over from the edge.
+        if self._keyboard_marker_id not in marker_ids:
+            self._keyboard_marker_id = None
         self._highlighted_exposure_marker_ids.intersection_update(marker_ids)
         self._markers = [
             ImageMarker(
@@ -1186,6 +1236,80 @@ class ImagePreviewView(QGraphicsView):
             return
         self._fit_image()
         self._pending_initial_fit = False
+
+    def remember_current_view(self) -> None:
+        """Store the current crop against the image being displayed.
+
+        Only a view the user actually changed is worth restoring; a fitted
+        view is reproduced exactly by fitting again, and remembering it would
+        pin an image to a stale window size.
+        """
+
+        if self._current_image_key is None or self._pixmap_item is None:
+            return
+        if not self._has_user_interacted:
+            self._view_memory.pop(self._current_image_key, None)
+            return
+        rect = self.mapToScene(self.viewport().rect()).boundingRect()
+        item_rect = self._pixmap_item.boundingRect()
+        if item_rect.width() <= 0 or item_rect.height() <= 0:
+            return
+        # Stored proportionally so a resized window, or a different pyramid
+        # level of the same image, restores the same region rather than the
+        # same pixel coordinates.
+        self._view_memory[self._current_image_key] = (
+            rect.left() / item_rect.width(),
+            rect.top() / item_rect.height(),
+            rect.width() / item_rect.width(),
+            rect.height() / item_rect.height(),
+        )
+        self._view_memory.move_to_end(self._current_image_key)
+        while len(self._view_memory) > VIEWPORT_MEMORY_LIMIT:
+            self._view_memory.popitem(last=False)
+
+    def _restore_remembered_view(self, logical_image_key: Any) -> bool:
+        """Re-apply a remembered crop for ``logical_image_key``."""
+
+        remembered = self._view_memory.get(logical_image_key)
+        if remembered is None or self._pixmap_item is None:
+            return False
+        item_rect = self._pixmap_item.boundingRect()
+        if item_rect.width() <= 0 or item_rect.height() <= 0:
+            return False
+        left, top, width, height = remembered
+        if width <= 0 or height <= 0:
+            return False
+        target = QRectF(
+            left * item_rect.width(),
+            top * item_rect.height(),
+            width * item_rect.width(),
+            height * item_rect.height(),
+        )
+        viewport_rect = self.viewport().rect()
+        if viewport_rect.width() <= 0 or viewport_rect.height() <= 0:
+            return False
+        # Set the transform directly rather than calling fitInView: that
+        # reserves room for the frame, so a round trip drifts a few percent
+        # wider each time instead of landing back on the same crop.
+        scale = min(
+            viewport_rect.width() / target.width(),
+            viewport_rect.height() / target.height(),
+        )
+        if scale <= 0:
+            return False
+        self.resetTransform()
+        self.scale(scale, scale)
+        self.centerOn(target.center())
+        self._pending_initial_fit = False
+        self._has_user_interacted = True
+        visible = self.mapToScene(viewport_rect).boundingRect()
+        self._zoom = item_rect.width() / visible.width() if visible.width() > 0 else 1.0
+        return True
+
+    def forget_remembered_views(self) -> None:
+        """Drop all viewport memory (session replaced or removed)."""
+
+        self._view_memory.clear()
 
     def view_range(self) -> tuple[tuple[float, float], tuple[float, float]] | None:
         if self._pixmap_item is None:
@@ -1332,6 +1456,8 @@ class ImagePreviewView(QGraphicsView):
         same_logical_image = logical_image_key is not None and logical_image_key == self._current_image_key
         is_new_logical_image = logical_image_key is None or not same_logical_image
         if is_new_logical_image:
+            # Bank the outgoing image's crop before its key is replaced.
+            self.remember_current_view()
             self._current_image_key = logical_image_key
             self._has_user_interacted = False
             self._pending_initial_fit = True
@@ -1367,7 +1493,11 @@ class ImagePreviewView(QGraphicsView):
             new_center = _absolute_point(self._pixmap_item.boundingRect(), old_relative_center) if old_relative_center is not None else old_center
             self.centerOn(new_center)
             self._pending_initial_fit = False
-        else:
+        elif not (
+            is_new_logical_image
+            and logical_image_key is not None
+            and self._restore_remembered_view(logical_image_key)
+        ):
             self.maybe_fit_initial_view()
         new_range = self.view_range()
         self._last_view_range = new_range
@@ -1506,40 +1636,37 @@ class ImagePreviewView(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt signature
-        if self._atlas_lod_enabled and event.key() == Qt.Key.Key_Escape:
+        if event.key() == Qt.Key.Key_Escape and self._keyboard_marker_id is not None:
             self._clear_marker_interaction()
             event.accept()
             return
-        if self._atlas_lod_enabled and event.key() in {
+        if event.key() in {
             Qt.Key.Key_Left,
             Qt.Key.Key_Right,
             Qt.Key.Key_Up,
             Qt.Key.Key_Down,
         }:
-            interactive = self._atlas_interactive_markers()
+            interactive = self._interactive_markers()
             if interactive:
-                ids = [marker.id for marker in interactive]
-                try:
-                    index = ids.index(self._keyboard_marker_id or "")
-                except ValueError:
-                    index = -1
-                delta = -1 if event.key() in {Qt.Key.Key_Left, Qt.Key.Key_Up} else 1
-                selected = interactive[(index + delta) % len(interactive)]
-                self._keyboard_marker_id = selected.id
-                self._redraw_markers()
-                if self._marker_selected is not None and selected.marker_type != MarkerType.BATCH_CLUSTER:
-                    self._marker_selected(selected)
-                event.accept()
-                return
+                selected = self._marker_in_direction(interactive, event.key())
+                if selected is not None:
+                    self._keyboard_marker_id = selected.id
+                    self._redraw_markers()
+                    if (
+                        self._marker_selected is not None
+                        and selected.marker_type != MarkerType.BATCH_CLUSTER
+                    ):
+                        self._marker_selected(selected)
+                    event.accept()
+                    return
         if (
-            self._atlas_lod_enabled
-            and event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}
+            event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}
             and self._keyboard_marker_id is not None
         ):
             marker = next(
                 (
                     value
-                    for value in self._atlas_interactive_markers()
+                    for value in self._interactive_markers()
                     if value.id == self._keyboard_marker_id
                 ),
                 None,
@@ -1548,6 +1675,10 @@ class ImagePreviewView(QGraphicsView):
                 if marker.marker_type == MarkerType.BATCH_CLUSTER:
                     self._activate_cluster(marker)
                 elif bool(marker.metadata.get("navigation_enabled", False)) and self._marker_opened is not None:
+                    # ``navigation_enabled`` is the resolver's verdict carried
+                    # on the marker. Enter must never open a marker the
+                    # resolver declined to resolve uniquely, so the keyboard
+                    # path cannot bypass what the pointer path obeys.
                     self._marker_opened(marker)
                 elif self._marker_selected is not None:
                     self._marker_selected(marker)
@@ -1555,16 +1686,88 @@ class ImagePreviewView(QGraphicsView):
                 return
         super().keyPressEvent(event)
 
-    def _atlas_interactive_markers(self) -> list[ImageMarker]:
+    def _interactive_markers(self) -> list[ImageMarker]:
+        """Markers the keyboard can reach, on Atlas *and* every other tab.
+
+        Arrow-key marker traversal used to exist only when Atlas LOD was on, so
+        Overview, Search map, Search and Batch position overlays were reachable
+        by pointer alone.
+        """
+
+        if self._atlas_lod_enabled:
+            return sorted(
+                [
+                    marker
+                    for marker in self._last_display_markers
+                    if marker.marker_type == MarkerType.BATCH_CLUSTER
+                    or marker.metadata.get("atlas_lod_role")
+                    in {"batch_position", "unattributed"}
+                ],
+                key=lambda marker: marker.id,
+            )
         return sorted(
             [
                 marker
                 for marker in self._last_display_markers
-                if marker.marker_type == MarkerType.BATCH_CLUSTER
-                or marker.metadata.get("atlas_lod_role") in {"batch_position", "unattributed"}
+                if marker.linked_object_id
+                and marker.marker_type
+                not in {
+                    MarkerType.CAMERA_FOV,
+                    MarkerType.BATCH_LABEL,
+                    MarkerType.LINK_LINE,
+                    MarkerType.STAGE_CROSSHAIR,
+                }
             ],
             key=lambda marker: marker.id,
         )
+
+    def _marker_in_direction(
+        self,
+        markers: list[ImageMarker],
+        key: Qt.Key,
+    ) -> ImageMarker | None:
+        """Nearest marker in the pressed direction, geometrically.
+
+        Traversal used to step through markers sorted by ID, which bears no
+        relation to where they are on the image — pressing Right could jump
+        across the micrograph. Movement now follows the overlay's geometry, so
+        the keyboard order matches what the reviewer sees.
+        """
+
+        current = next(
+            (m for m in markers if m.id == self._keyboard_marker_id),
+            None,
+        )
+        if current is None:
+            # No cursor yet: enter from the edge the key implies.
+            reverse = key in {Qt.Key.Key_Left, Qt.Key.Key_Up}
+            vertical = key in {Qt.Key.Key_Up, Qt.Key.Key_Down}
+            return sorted(
+                markers,
+                key=lambda m: (m.y, m.x) if vertical else (m.x, m.y),
+                reverse=reverse,
+            )[0]
+
+        dx_sign = {Qt.Key.Key_Left: -1, Qt.Key.Key_Right: 1}.get(key, 0)
+        dy_sign = {Qt.Key.Key_Up: -1, Qt.Key.Key_Down: 1}.get(key, 0)
+
+        candidates: list[tuple[float, ImageMarker]] = []
+        for marker in markers:
+            if marker.id == current.id:
+                continue
+            dx = marker.x - current.x
+            dy = marker.y - current.y
+            # Must lie predominantly in the direction of travel.
+            along = dx * dx_sign + dy * dy_sign
+            across = abs(dy if dx_sign else dx)
+            if along <= 0:
+                continue
+            # Prefer close and well-aligned over merely close.
+            candidates.append((along + across * 2.0, marker))
+        if candidates:
+            return min(candidates, key=lambda item: item[0])[1]
+        # Nothing that way — stay put rather than wrapping to the far side.
+        return current
 
     def _activate_cluster(self, marker: ImageMarker) -> None:
         bounds = marker.metadata.get("member_bounds_scene")
@@ -2202,6 +2405,14 @@ def _marker_colors(marker: ImageMarker) -> tuple[QColor, QColor]:
         return QColor(theme.overlay_selected), fill(theme.overlay_selected, 90)
     if marker.unresolved:
         return QColor(theme.overlay_unresolved), fill(theme.overlay_unresolved, 60)
+    if (
+        marker.metadata.get("queued_position")
+        and marker.marker_type in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}
+    ):
+        # Match the Atlas queued glyph: the blue hue carries pending status,
+        # while the empty centre keeps it distinct from the filled blue Focus
+        # area even when both are near the same target.
+        return QColor(theme.atlas_marker_queued), fill(theme.atlas_marker_queued, 0)
     status_color = _status_color(marker.status)
     # Failed batches now propagate their status to every marker they
     # spawn (template area, exposure / tracking / focus, batch dot).
@@ -2974,7 +3185,34 @@ class ImageExportDialog(QDialog):
         self.accept()
 
 
+@dataclass(frozen=True, slots=True)
+class ViewerViewState:
+    """What a viewer tab must remember across a rebuild.
+
+    Identifiers and scalars only — never entities, pixmaps or markers — so a
+    cache of these cannot keep a removed session alive or grow with image data.
+    """
+
+    object_id: str | None = None
+    marker_id: str | None = None
+    frame_index: int | None = None
+    filter_text: str = ""
+
+    @property
+    def is_empty(self) -> bool:
+        return self.object_id is None and not self.filter_text
+
+
+def _viewer_object_id(value: Any) -> str | None:
+    identifier = getattr(value, "id", None)
+    return str(identifier) if identifier else None
+
+
 class ViewerTab(QWidget):
+    #: A command from the empty-state panel, e.g. ``open_session`` or
+    #: ``clear_filter``. The main window decides what each one does.
+    empty_state_action_requested = Signal(str)
+
     def __init__(
         self,
         empty_text: str,
@@ -3021,6 +3259,15 @@ class ViewerTab(QWidget):
         self._current_fallback: Path | None = None
         self._displayed_path: Path | None = None
         self._displayed_slice_index: int | None = None
+        # Set when a hidden tab is rebuilt: applied on first show so lazy tabs
+        # stay lazy without losing the selection they should return to.
+        self._pending_view_state: ViewerViewState | None = None
+        # Supplied by the main window so an empty list can name its scope and
+        # tell "nothing loaded" apart from "this scope has none of these".
+        self._has_sessions = False
+        self._scope_name = ""
+        self._entity_label = ""
+        self._empty_state_override: EmptyState | None = None
         self._current_mrc_max_size = MAX_PREVIEW_DIMENSION
         self._request_id = 0
         self._pending_fallback_request: tuple[int, Path, int, Path, tuple[str, int, int | None]] | None = None
@@ -3211,7 +3458,20 @@ class ViewerTab(QWidget):
             )
             self._atlas_collection_section_layout.setSpacing(4)
             self._atlas_collection_section.setVisible(False)
-            overlay_panel_layout.addWidget(self._atlas_collection_section)
+            # The per-collection list is dynamic — a linked root can carry many
+            # collections — so it scrolls inside a bounded area rather than
+            # growing the panel until it runs off the canvas.
+            self._atlas_collection_scroll = QScrollArea(self.overlay_panel)
+            self._atlas_collection_scroll.setObjectName("viewerAtlasCollectionScroll")
+            self._atlas_collection_scroll.setWidgetResizable(True)
+            self._atlas_collection_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self._atlas_collection_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            self._atlas_collection_scroll.setMaximumHeight(ATLAS_COLLECTION_LIST_MAX_PX)
+            self._atlas_collection_scroll.setWidget(self._atlas_collection_section)
+            self._atlas_collection_scroll.setVisible(False)
+            overlay_panel_layout.addWidget(self._atlas_collection_scroll)
 
             self.marker_legend_checkbox = QCheckBox(
                 "Marker legend",
@@ -3316,6 +3576,14 @@ class ViewerTab(QWidget):
         viewer_shell_layout.setContentsMargins(0, 0, 0, 0)
         viewer_shell_layout.setSpacing(0)
         viewer_shell_layout.addWidget(self.viewer, 0, 0)
+
+        # Stacked over the canvas so an empty list explains itself with a real
+        # panel rather than a bare line of text on a black rectangle. Hidden
+        # whenever there is an image to show.
+        self.empty_state_panel = EmptyStatePanel(viewer_shell)
+        self.empty_state_panel.action_requested.connect(self.empty_state_action_requested)
+        self.empty_state_panel.setVisible(False)
+        viewer_shell_layout.addWidget(self.empty_state_panel, 0, 0)
 
         top_right = QWidget(viewer_shell)
         top_right.setObjectName("viewerTopControls")
@@ -3508,7 +3776,9 @@ class ViewerTab(QWidget):
                 else Qt.ArrowType.RightArrow
             )
         if self._atlas_collection_section is not None:
-            self._atlas_collection_section.setVisible(
+            # The scroll area is what participates in the panel layout now, so
+            # it is the thing that shows and hides.
+            self._set_atlas_collection_list_visible(
                 expanded and bool(self._atlas_collection_checks)
             )
 
@@ -3558,10 +3828,14 @@ class ViewerTab(QWidget):
             )
             self._atlas_collection_checks[option.key] = checkbox
             self._atlas_collection_section_layout.addWidget(checkbox)
-        self._atlas_collection_section.setVisible(
+        self._set_atlas_collection_list_visible(
             bool(options)
             and self._atlas_collection_section_button.isChecked()
         )
+        # The list just changed length. Without this, an Atlas with many more
+        # collections selected while the panel is open keeps a scroll cap
+        # computed for the previous content until the next resize.
+        self._constrain_overlay_panel()
 
     def _atlas_collection_toggled(self, key: str) -> None:
         checkbox = self._atlas_collection_checks.get(key)
@@ -3688,6 +3962,16 @@ class ViewerTab(QWidget):
             button.setText(action.label.lstrip("↗ ").strip())
             button.setEnabled(action.enabled)
             button.setToolTip(action.tooltip)
+            # The visible face stays terse — these sit in a dense strip. The
+            # verb-plus-destination phrasing goes where it has room, and where
+            # a screen reader will actually reach it. A disabled action states
+            # its reason here too, not only on hover.
+            button.setAccessibleName(NAVIGATION_ACTION_NAMES.get(action.key, action.label))
+            button.setAccessibleDescription(
+                action.tooltip
+                if action.enabled
+                else f"Unavailable. {action.tooltip}".strip()
+            )
             button.setVisible(True)
             any_visible = True
         if not any_visible:
@@ -3719,7 +4003,19 @@ class ViewerTab(QWidget):
             item.setHidden(not matches)
             if matches:
                 visible_count += 1
-        self.list_count.setText(str(visible_count if query else self.list.topLevelItemCount()))
+        total = self.list.topLevelItemCount()
+        # Honest count under a filter: "0 of 20" rather than a bare "0", which
+        # reads the same as a scope that genuinely holds nothing.
+        if query:
+            self.list_count.setText(f"{visible_count} of {total}")
+            announced = f"{visible_count} of {total} shown, filtered by {query}"
+        else:
+            self.list_count.setText(str(total))
+            announced = f"{total} shown"
+        # The bare number is meaningless out of context to a screen reader.
+        self.list_count.setAccessibleName("Visible item count")
+        self.list_count.setAccessibleDescription(announced)
+        self._refresh_empty_state_panel()
 
     def _install_frame_shortcuts(self) -> None:
         for key, step in ((Qt.Key.Key_Left, -1), (Qt.Key.Key_Right, 1)):
@@ -3734,6 +4030,237 @@ class ViewerTab(QWidget):
         if next_value != self.slice_slider.value():
             self.slice_slider.setValue(next_value)
 
+    def has_same_items(self, items: list[Any]) -> bool:
+        """True when ``items`` is the identical list this tab already shows."""
+
+        if len(items) != len(self._items):
+            return False
+        return all(new is old for new, old in zip(items, self._items, strict=True))
+
+    def _decorate_row(self, tree_item: QTreeWidgetItem, value: Any, label: str) -> None:
+        """Write a row's status chip, summary, tooltip and announced text.
+
+        Shared by the full rebuild and by ``refresh_providers``, so a row's
+        decoration can never be derived from one provider while its markers
+        come from another.
+        """
+
+        list_status = self._item_status_for(value) if self._item_status_for is not None else None
+        raw_status = list_status.status if list_status is not None else _status_label_for_item(value)
+        status = display_status_label(raw_status) if raw_status else ""
+        summary = list_status.summary if list_status is not None else _summary_for_item(value)
+        tooltip = list_status.tooltip if list_status is not None else ""
+        tooltip_text = tooltip or (f"{label}\n{summary}" if summary else label)
+        tree_item.setToolTip(0, tooltip_text)
+        tree_item.setData(0, LIST_PRIMARY_ROLE, label)
+        tree_item.setData(0, LIST_SUMMARY_ROLE, summary)
+        tree_item.setData(0, LIST_STATUS_ROLE, status)
+        tree_item.setData(0, LIST_TOOLTIP_ROLE, tooltip_text)
+        # A screen reader otherwise announces the label alone, dropping the
+        # status chip and summary that are the point of the row.
+        announced = ", ".join(part for part in (label, status, summary) if part)
+        tree_item.setData(0, Qt.ItemDataRole.AccessibleTextRole, announced)
+
+    def _refresh_row_decorations(self) -> None:
+        """Re-read every row's status without rebuilding the list."""
+
+        for index in range(self.list.topLevelItemCount()):
+            tree_item = self.list.topLevelItem(index)
+            value = tree_item.data(0, VIEWER_OBJECT_ROLE)
+            if value is None:
+                continue
+            label = str(tree_item.data(0, LIST_PRIMARY_ROLE) or tree_item.text(0))
+            self._decorate_row(tree_item, value, label)
+        self.list.viewport().update()
+
+    def refresh_providers(
+        self,
+        sources_for: Callable[[Any], PreviewSources],
+        *,
+        markers_for: Callable[[Any], list[ImageMarker]] | None = None,
+        item_status_for: Callable[[Any], ItemListStatus] | None = None,
+        prepared_sources: dict[str, PreviewSources] | None = None,
+    ) -> None:
+        """Re-point the callbacks without tearing the list down.
+
+        ``set_items`` rebuilds the rows *and* installs the marker/status
+        providers, so a scope-unchanged rebuild used to be the only way to get
+        fresh markers. This is that work without the teardown: the provider
+        closures are replaced, the current image's overlay is repainted and
+        every row's decoration is re-read, while selection, filter, frame and
+        scroll position are untouched.
+
+        Refreshing the rows matters as much as the markers. This path runs
+        whenever ``has_same_items()`` reports the list is unchanged, so a
+        re-derived status — a newly failed tilt series, a link that has since
+        resolved — would otherwise repaint the overlay while leaving the row
+        chips stating the previous answer, with nothing on screen to signal
+        that the two disagreed.
+        """
+
+        self._sources_for = sources_for
+        self._prepared_sources = prepared_sources or {}
+        if item_status_for is not None:
+            self._item_status_for = item_status_for
+        if markers_for is not None:
+            self._markers_for = markers_for
+        self._refresh_marker_selection()
+        self._refresh_row_decorations()
+        # The filter matches on status and summary text, so re-apply it: the
+        # visible set and the count must agree with the decorations just
+        # written, not with the ones they replaced.
+        self._filter_list(self.list_filter.text())
+        # Navigation buttons carry the resolver's verdict for the current row;
+        # that verdict is derived from the same providers.
+        self._update_navigation_actions(self._current_value)
+
+    def set_scope_description(
+        self,
+        *,
+        has_sessions: bool,
+        scope_name: str,
+        entity_label: str = "",
+    ) -> None:
+        """Tell this tab what scope and entity type it is showing.
+
+        ``entity_label`` matters when the list is *empty*: the type cannot be
+        inferred from zero items, and "No items in Reference collection B" is
+        markedly less useful than "No search maps in Reference collection B".
+        """
+
+        self._has_sessions = has_sessions
+        self._scope_name = scope_name or ""
+        self._entity_label = entity_label or self._entity_label
+
+    def _current_entity_label(self) -> str:
+        if self._items:
+            return _panel_title_for_items(self._items)
+        return self._entity_label or _panel_title_for_items(self._items)
+
+    def empty_state(self) -> EmptyState:
+        """The state-specific empty experience for this tab right now."""
+
+        return viewer_empty_state(
+            has_sessions=self._has_sessions,
+            total_items=self.list.topLevelItemCount(),
+            filter_text=self.list_filter.text().strip(),
+            scope_name=self._scope_name,
+            entity_label=self._current_entity_label(),
+        )
+
+    def show_empty_state(self, state: EmptyState) -> None:
+        """Show a specific recovery state over an empty canvas."""
+
+        self._empty_state_override = state
+        self._refresh_empty_state_panel()
+
+    def clear_empty_state_override(self) -> None:
+        self._empty_state_override = None
+        self._refresh_empty_state_panel()
+
+    def _refresh_empty_state_panel(self) -> None:
+        """Show the panel only when there is genuinely nothing to look at.
+
+        Deliberately does **not** cover a loaded image. Filtering the list to
+        nothing while a valid preview is on screen is not an empty state — the
+        image is real content, and hiding it behind a panel would destroy more
+        information than the panel adds. That case is already carried by the
+        honest ``0 of 20`` count and by the context header's filter note and
+        Clear action.
+
+        The panel is for when the canvas itself has nothing: no session loaded,
+        a scope holding none of this entity, or a filter applied before any
+        preview resolved.
+        """
+
+        panel = getattr(self, "empty_state_panel", None)
+        if panel is None:
+            return
+        visible_rows = sum(
+            1
+            for index in range(self.list.topLevelItemCount())
+            if not self.list.topLevelItem(index).isHidden()
+        )
+        if self.viewer.has_image():
+            panel.setVisible(False)
+            return
+        # Precedence between a zero-result filter and an override depends on
+        # what the override is *about*.
+        #
+        # A failed load is about the whole scope, so it outranks the filter:
+        # otherwise an unrelated search box could hide the Retry button and the
+        # reason for it. A missing preview is about one row, and when the
+        # filter matches nothing that row is not even in the list — announcing
+        # it would describe something the reviewer cannot see, so the honest
+        # "0 of N" wins there.
+        override = self._empty_state_override
+        filtered_to_nothing = bool(self.list_filter.text().strip()) and not visible_rows
+        if override is not None and override.kind == KIND_LOAD_FAILED:
+            state = override
+        elif filtered_to_nothing:
+            state = self.empty_state()
+        elif override is not None:
+            state = override
+        elif visible_rows:
+            panel.setVisible(False)
+            return
+        else:
+            state = self.empty_state()
+        panel.set_state(state)
+        panel.setVisible(True)
+
+    def capture_view_state(self) -> ViewerViewState:
+        """Snapshot what this tab should get back after a rebuild."""
+
+        return ViewerViewState(
+            object_id=_viewer_object_id(self._current_value),
+            marker_id=self._selected_marker_id_override,
+            frame_index=self._displayed_slice_index,
+            filter_text=self.list_filter.text(),
+        )
+
+    def _index_of_object_id(self, object_id: str | None) -> int | None:
+        if not object_id:
+            return None
+        for index, item in enumerate(self._items):
+            if _viewer_object_id(item) == object_id:
+                return index
+        return None
+
+    def _apply_restored_state(
+        self,
+        state: ViewerViewState,
+        *,
+        auto_load_preview: bool,
+    ) -> bool:
+        """Re-select a remembered object, if it is still in this scope.
+
+        Returns False when the object has gone, so the caller falls back to
+        the ordinary initial-preview path rather than showing nothing.
+        """
+
+        index = self._index_of_object_id(state.object_id)
+        if index is None:
+            return False
+
+        if self.list.isVisible() or self.list.topLevelItemCount():
+            previous = self.list.blockSignals(True)
+            try:
+                self.list.setCurrentItem(self.list.topLevelItem(index))
+            finally:
+                self.list.blockSignals(previous)
+
+        if not auto_load_preview:
+            # Hidden tabs stay lazy: remember the intent and apply it when the
+            # tab is actually shown.
+            self._pending_view_state = state
+            return True
+
+        self._load_value(self._items[index], max(state.frame_index or 0, 0))
+        if state.marker_id:
+            self.select_marker(state.marker_id)
+        return True
+
     def set_items(
         self,
         items: list[Any],
@@ -3744,6 +4271,7 @@ class ViewerTab(QWidget):
         item_status_for: Callable[[Any], ItemListStatus] | None = None,
         prepared_sources: dict[str, PreviewSources] | None = None,
         auto_load_preview: bool = True,
+        restore_state: ViewerViewState | None = None,
     ) -> None:
         self._items = items
         self._sources_for = sources_for
@@ -3758,6 +4286,8 @@ class ViewerTab(QWidget):
         self._current_value = None
         self._selected_marker_id_override = None
         self._marker_selection_explicitly_cleared = False
+        self._pending_view_state = None
+        self._empty_state_override = None
         self._update_atlas_collection_overlay_controls(None)
         self._current_mrc_max_size = MAX_PREVIEW_DIMENSION
         self._request_id += 1
@@ -3766,7 +4296,19 @@ class ViewerTab(QWidget):
         self.list.setUpdatesEnabled(False)
         try:
             self.list.clear()
-            empty_text = "Select an item" if items else "No items for the current selection."
+            # One generic message used to cover six different situations. The
+            # variant is chosen from what is actually true here; the caller
+            # supplies the scope so the message can name it.
+            if items:
+                empty_text = "Select an item"
+            else:
+                empty_text = viewer_empty_state(
+                    has_sessions=self._has_sessions,
+                    total_items=0,
+                    filter_text=self.list_filter.text().strip(),
+                    scope_name=self._scope_name,
+                    entity_label=self._current_entity_label(),
+                ).title
             self.viewer.clear(empty_text)
             self.export_image_button.setEnabled(False)
             self.image_badge.setVisible(False)
@@ -3782,41 +4324,60 @@ class ViewerTab(QWidget):
             self.list_filter.setAccessibleName(f"Filter {panel_title.lower()}")
             self._set_slice_state(1, 0, valid_stack=False)
             tree_items: list[QTreeWidgetItem] = []
-            for index, item in enumerate(items):
+            for item in items:
                 label = label_for(item)
-                list_status = item_status_for(item) if item_status_for is not None else None
-                raw_status = list_status.status if list_status is not None else _status_label_for_item(item)
-                status = display_status_label(raw_status) if raw_status else ""
-                summary = list_status.summary if list_status is not None else _summary_for_item(item)
-                tooltip = list_status.tooltip if list_status is not None else ""
                 tree_item = QTreeWidgetItem([label])
                 if self._entity_icon is not None:
                     tree_item.setIcon(
                         0,
                         themed_icon(self._entity_icon, size=16),
                     )
-                tooltip_text = tooltip or (f"{label}\n{summary}" if summary else label)
-                tree_item.setToolTip(0, tooltip_text)
                 tree_item.setData(0, VIEWER_OBJECT_ROLE, item)
-                tree_item.setData(0, LIST_PRIMARY_ROLE, label)
-                tree_item.setData(0, LIST_SUMMARY_ROLE, summary)
-                tree_item.setData(0, LIST_STATUS_ROLE, status)
-                tree_item.setData(0, LIST_TOOLTIP_ROLE, tooltip_text)
+                self._decorate_row(tree_item, item, label)
                 tree_item.setSizeHint(0, QSize(0, 58))
                 tree_items.append(tree_item)
             self.list.addTopLevelItems(tree_items)
-            if items and auto_load_preview:
+            # The filter must be applied before an initial preview is chosen,
+            # otherwise the tab opens on a row the user has filtered out.
+            #
+            # Signals are blocked around ``setText`` so the single explicit
+            # pass below is the only one: the edit signal would otherwise run
+            # ``_filter_list`` over every row a second time, and drive a
+            # context-header refresh, in the middle of a rebuild.
+            if restore_state is not None:
+                blocked = self.list_filter.blockSignals(True)
+                try:
+                    self.list_filter.setText(restore_state.filter_text)
+                finally:
+                    self.list_filter.blockSignals(blocked)
+            self._filter_list(self.list_filter.text())
+            restored = (
+                restore_state is not None
+                and items
+                and self._apply_restored_state(
+                    restore_state,
+                    auto_load_preview=auto_load_preview,
+                )
+            )
+            if items and auto_load_preview and not restored:
                 self._load_initial_item()
         finally:
             self.list.setUpdatesEnabled(True)
             self.list.blockSignals(False)
-        self._filter_list(self.list_filter.text())
+        self._refresh_empty_state_panel()
         if items:
             QTimer.singleShot(0, lambda: fade_in(self.viewer_shell, duration_ms=140, start_opacity=0.82))
             if self.list.isVisible():
                 QTimer.singleShot(30, lambda: fade_in(self.list.viewport(), duration_ms=140, start_opacity=0.82))
 
     def ensure_initial_preview_loaded(self, *, notify_selection: bool = True) -> None:
+        pending = self._pending_view_state
+        if pending is not None and self._current_value is None and self._items:
+            self._pending_view_state = None
+            if self._apply_restored_state(pending, auto_load_preview=True):
+                if notify_selection and self._on_item_selected is not None:
+                    self._on_item_selected(self._current_value)
+                return
         if self._current_value is None and self._items:
             self._load_initial_item(notify_selection=notify_selection)
         elif notify_selection and self._current_value is not None and self._on_item_selected is not None:
@@ -3825,9 +4386,20 @@ class ViewerTab(QWidget):
     def _load_initial_item(self, *, notify_selection: bool = True) -> None:
         if not self._items:
             return
-        initial_index = 0
-        for index, item in enumerate(self._items):
-            source = self._source_for_value(item).primary
+        # Honour the active filter: opening on a row the user filtered out
+        # contradicts the visible count and hides the item they are reviewing.
+        visible_indexes = [
+            index
+            for index in range(min(self.list.topLevelItemCount(), len(self._items)))
+            if not self.list.topLevelItem(index).isHidden()
+        ]
+        if self.list_filter.text().strip() and not visible_indexes:
+            self._refresh_empty_state_panel()
+            return
+        candidate_indexes = visible_indexes or list(range(len(self._items)))
+        initial_index = candidate_indexes[0]
+        for index in candidate_indexes:
+            source = self._source_for_value(self._items[index]).primary
             if source is not None:
                 initial_index = index
                 break
@@ -3843,16 +4415,28 @@ class ViewerTab(QWidget):
         if notify_selection and self._on_item_selected is not None:
             self._on_item_selected(self._items[initial_index])
 
-    def select_object(self, value: Any) -> None:
+    def select_object(self, value: Any) -> bool:
+        """Select ``value`` in the list.
+
+        Returns True when an incompatible filter had to be cleared to reveal
+        it. Unhiding the single row instead would leave the row visible while
+        the count still read 0, so the whole filter is dropped and the caller
+        announces why.
+        """
+
+        filter_cleared = False
         for index in range(self.list.topLevelItemCount()):
             item = self.list.topLevelItem(index)
             if item.data(0, VIEWER_OBJECT_ROLE) is value:
                 if item.isHidden():
-                    item.setHidden(False)
+                    self.list_filter.clear()
+                    self._filter_list("")
+                    filter_cleared = True
                 self.list.setCurrentItem(item)
                 self.list.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
-                return
+                return filter_cleared
         self._load_value(value, 0)
+        return filter_cleared
 
     def select_frame(self, frame_index: int) -> None:
         """Select a zero-based frame in the currently loaded stack, if any."""
@@ -3891,6 +4475,7 @@ class ViewerTab(QWidget):
     def _load_value(self, value: Any, slice_index: int) -> None:
         sources = self._source_for_value(value)
         path = sources.primary
+        self._empty_state_override = None
         self._current_value = value
         self._selected_marker_id_override = None
         self._marker_selection_explicitly_cleared = False
@@ -3911,6 +4496,12 @@ class ViewerTab(QWidget):
             self.export_image_button.setEnabled(False)
             self._set_status_text("No preview image found for this item.")
             self._set_slice_state(1, 0, valid_stack=False)
+            self.show_empty_state(
+                missing_preview_state(
+                    name=str(getattr(value, "name", None) or getattr(value, "id", "this item")),
+                    metadata_available=True,
+                )
+            )
             return
         self._current_path = path
         self._current_fallback = sources.fallback
@@ -3935,6 +4526,17 @@ class ViewerTab(QWidget):
         if not warnings:
             self._displayed_path = path
             self._displayed_slice_index = 0
+            self._empty_state_override = None
+        elif not self.viewer.has_image():
+            self._empty_state_override = missing_preview_state(
+                name=str(
+                    getattr(self._current_value, "name", None)
+                    or getattr(self._current_value, "id", "this item")
+                ),
+                expected_path=str(path),
+                metadata_available=True,
+                warnings=tuple(warnings),
+            )
         self._update_image_badge()
         self._update_scale_bar()
         self._set_slice_state(1, 0, valid_stack=False)
@@ -3942,6 +4544,7 @@ class ViewerTab(QWidget):
             self._compact_path_status("Image", path, warnings=warnings),
             tooltip=self._path_status_tooltip("Image", path, warnings=warnings),
         )
+        self._refresh_empty_state_panel()
 
     def _load_mrc_path(self, path: Path, fallback: Path | None, slice_index: int) -> None:
         self._fallback_debounce.stop()
@@ -4118,6 +4721,7 @@ class ViewerTab(QWidget):
             logical_image_key=self._logical_image_key(path, slice_index),
             pyramid_level=self._current_mrc_max_size,
         )
+        self._empty_state_override = None
         self._refresh_marker_selection()
         self._displayed_path = path
         self._displayed_slice_index = slice_index
@@ -4154,6 +4758,17 @@ class ViewerTab(QWidget):
                 self._compact_path_status("JPEG fallback · MRC unavailable", self._current_fallback, warnings=all_warnings),
                 tooltip=f"MRC unavailable: {path}\nFallback: {self._current_fallback}{_warning_tooltip(all_warnings)}",
             )
+            if fallback_warnings and not self.viewer.has_image():
+                self._empty_state_override = missing_preview_state(
+                    name=str(
+                        getattr(self._current_value, "name", None)
+                        or getattr(self._current_value, "id", "this item")
+                    ),
+                    expected_path=str(path),
+                    metadata_available=True,
+                    warnings=tuple(all_warnings),
+                )
+                self._refresh_empty_state_panel()
             return
         self.viewer.clear("Preview unavailable")
         self.export_image_button.setEnabled(False)
@@ -4164,6 +4779,16 @@ class ViewerTab(QWidget):
             self._compact_path_status("MRC unavailable", path, slice_count=slice_count, warnings=warnings),
             tooltip=self._path_status_tooltip("MRC unavailable", path, slice_count=slice_count, warnings=warnings),
         )
+        self._empty_state_override = missing_preview_state(
+            name=str(
+                getattr(self._current_value, "name", None)
+                or getattr(self._current_value, "id", "this item")
+            ),
+            expected_path=str(path),
+            metadata_available=True,
+            warnings=tuple(warnings),
+        )
+        self._refresh_empty_state_panel()
 
     def _logical_image_key(self, path: Path, slice_index: int) -> tuple[str, int, int | None]:
         return (str(path), slice_index, id(self._current_value) if self._current_value is not None else None)
@@ -4267,6 +4892,16 @@ class ViewerTab(QWidget):
             if has_camera_fallback
             else set()
         )
+        for marker_type in {
+            MarkerType.EXPOSURE_AREA,
+            MarkerType.FOCUS_AREA,
+            MarkerType.TRACKING_AREA,
+        }:
+            candidates = [
+                marker for marker in markers if marker.marker_type == marker_type
+            ]
+            if candidates and not any(marker.visible for marker in candidates):
+                unavailable.add(marker_type)
         if not has_camera_fov:
             unavailable.add(MarkerType.CAMERA_FOV)
         if not has_batch_labels:
@@ -4309,11 +4944,72 @@ class ViewerTab(QWidget):
             checkbox.blockSignals(False)
         self.viewer.set_marker_type_visible(marker_type, effective_visible)
 
+    def _set_atlas_collection_list_visible(self, visible: bool) -> None:
+        section = getattr(self, "_atlas_collection_section", None)
+        scroll = getattr(self, "_atlas_collection_scroll", None)
+        if section is not None:
+            section.setVisible(visible)
+        if scroll is not None:
+            scroll.setVisible(visible)
+
+    def _constrain_overlay_panel(self) -> None:
+        """Keep the overlay panel inside the canvas it belongs to.
+
+        With many collections the panel would otherwise grow past the bottom of
+        the image and become partly unreachable. Bounding it to the viewport
+        means the list scrolls instead of the panel escaping.
+        """
+
+        panel = getattr(self, "overlay_panel", None)
+        # Intent, not ``isVisible()``: an unshown parent reports every child as
+        # invisible, which skipped the bound entirely during construction.
+        if panel is None or not self.overlay_button.isChecked():
+            return
+        available = max(self.viewer.viewport().height() - OVERLAY_PANEL_MARGIN_PX, 120)
+        panel.setMaximumHeight(available)
+        scroll = getattr(self, "_atlas_collection_scroll", None)
+        if scroll is not None and scroll.isVisible():
+            # Give the dynamic list whatever the fixed controls do not need,
+            # never more than its own cap.
+            fixed = panel.sizeHint().height() - scroll.height()
+            scroll.setMaximumHeight(
+                max(min(ATLAS_COLLECTION_LIST_MAX_PX, available - fixed), 60)
+            )
+
+    def close_overlay_panel(self) -> bool:
+        """Close the overlay panel and return focus to the control that opened it.
+
+        Returns True when a panel was actually closed, so a key handler knows
+        whether it consumed the event.
+        """
+
+        if not getattr(self, "overlay_panel", None) or not self.overlay_panel.isVisible():
+            return False
+        self.overlay_button.setChecked(False)
+        self.overlay_panel.setVisible(False)
+        self.overlay_button.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        return True
+
     def _overlay_panel_toggled(self, checked: bool) -> None:
         self.overlay_panel.setVisible(checked)
         self.overlay_button.setToolTip(
             "Hide overlay controls" if checked else "Show overlay controls"
         )
+        if checked:
+            self._constrain_overlay_panel()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        super().resizeEvent(event)
+        self._constrain_overlay_panel()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt signature
+        # Escape closes the overlay panel before anything else acts on it, and
+        # puts focus back on the button that opened it so a keyboard user is
+        # not stranded.
+        if event.key() == Qt.Key.Key_Escape and self.close_overlay_panel():
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _scale_bar_toggled(self) -> None:
         self._scale_bar_enabled = self.scale_bar_checkbox.isChecked()
