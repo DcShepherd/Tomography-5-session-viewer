@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from tomography_session_browser.domain.models import MrcMetadata, TiltSeries
 from tomography_session_browser.ui import image_viewer
+from tomography_session_browser.ui.empty_states import missing_preview_state
 from tomography_session_browser.ui.image_viewer import CachedPreview, ViewerTab
 
 
@@ -335,6 +336,34 @@ def test_fast_mrc_load_cancels_delayed_jpeg_fallback(monkeypatch, tmp_path: Path
     assert fallback_calls == []
     assert viewer._pending_fallback_request is None
     assert viewer._displayed_path == path
+
+
+def test_completed_mrc_load_hides_a_stale_missing_preview_panel(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """The worker completion must reconcile the overlay with the new image."""
+
+    _app()
+    path = tmp_path / "available.mrc"
+    path.write_bytes(b"")
+    viewer = ViewerTab("empty", show_list=False, show_tilt_controls=True)
+    monkeypatch.setattr(viewer, "_prefetch_neighbors", lambda *_args: None)
+    monkeypatch.setattr(viewer, "_prefetch_current_high_detail", lambda *_args: None)
+    viewer._request_id = 7
+    viewer._current_path = path
+    viewer.show_empty_state(
+        missing_preview_state(name="Previous item", metadata_available=True)
+    )
+    assert viewer.empty_state_panel.isHidden() is False
+    image = QImage(4, 4, QImage.Format.Format_Grayscale8)
+    image.fill(128)
+
+    viewer._mrc_loaded(7, path, 0, image, 1, [], image.sizeInBytes())
+
+    assert viewer.viewer.has_image() is True
+    assert viewer.empty_state_panel.isHidden() is True
+    assert viewer._empty_state_override is None
 
 
 def test_mrc_loaded_prefetches_current_high_detail_frame(monkeypatch, tmp_path: Path) -> None:

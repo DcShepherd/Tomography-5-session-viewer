@@ -34,7 +34,7 @@ from tomography_session_browser.ui.empty_states import (
     unresolved_relationship_state,
 )
 from tomography_session_browser.ui.main_window import TAB_LABELS, MainWindow
-from tomography_session_browser.ui.image_viewer import PreviewSources
+from tomography_session_browser.ui.image_viewer import PreviewSources, ViewerTab
 from tomography_session_browser.ui.widgets.empty_state_panel import EmptyStatePanel
 
 
@@ -329,6 +329,35 @@ def test_a_selected_item_with_no_preview_reaches_the_missing_preview_panel(
     assert tab.empty_state_panel.state() is not None
     assert tab.empty_state_panel.state().kind == KIND_MISSING_PREVIEW
     assert "Unreadable map" in tab.empty_state_panel.title_label.text()
+
+
+def test_selecting_an_mrc_backed_item_clears_the_previous_missing_preview_panel(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A row-specific empty state must not cover the next section's MRC load."""
+
+    _app()
+    mrc_path = tmp_path / "available.mrc"
+    missing = SearchMap(id="missing", name="Unreadable map")
+    available = SearchMap(id="available", name="Available map", mrc_path=mrc_path)
+    tab = ViewerTab("empty")
+    monkeypatch.setattr(tab._thread_pool, "start", lambda _task: None)
+    tab.set_items(
+        [missing, available],
+        lambda value: PreviewSources(mrc_path if value is available else None),
+        lambda value: value.name,
+        auto_load_preview=False,
+    )
+
+    tab.select_object(missing)
+    assert tab.empty_state_panel.isHidden() is False
+    assert tab.empty_state_panel.state().kind == KIND_MISSING_PREVIEW
+
+    tab.select_object(available)
+
+    assert tab.empty_state_panel.isHidden() is True
+    assert tab._empty_state_override is None
 
 
 def test_a_failed_first_load_reaches_the_load_failure_panel(

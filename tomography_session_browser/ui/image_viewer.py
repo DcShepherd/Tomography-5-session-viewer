@@ -4475,7 +4475,12 @@ class ViewerTab(QWidget):
     def _load_value(self, value: Any, slice_index: int) -> None:
         sources = self._source_for_value(value)
         path = sources.primary
-        self._empty_state_override = None
+        # Empty-state overrides such as ``missing_preview`` describe the row
+        # that is being left.  Clear the realised panel as well as the model
+        # before starting the next preview; MRC loading is asynchronous, so
+        # waiting for its completion otherwise leaves the old panel stacked
+        # over the canvas while the new section loads.
+        self.clear_empty_state_override()
         self._current_value = value
         self._selected_marker_id_override = None
         self._marker_selection_explicitly_cleared = False
@@ -4560,6 +4565,7 @@ class ViewerTab(QWidget):
                 logical_image_key=logical_key,
                 pyramid_level=self._current_mrc_max_size,
             )
+            self.clear_empty_state_override()
             self._refresh_marker_selection()
             self._displayed_path = path
             self._displayed_slice_index = clamped_index
@@ -4605,6 +4611,7 @@ class ViewerTab(QWidget):
         if not warnings:
             self._displayed_path = fallback
             self._displayed_slice_index = 0
+            self.clear_empty_state_override()
         self._update_image_badge()
         self._update_scale_bar()
         self._set_status_text(
@@ -4721,7 +4728,7 @@ class ViewerTab(QWidget):
             logical_image_key=self._logical_image_key(path, slice_index),
             pyramid_level=self._current_mrc_max_size,
         )
-        self._empty_state_override = None
+        self.clear_empty_state_override()
         self._refresh_marker_selection()
         self._displayed_path = path
         self._displayed_slice_index = slice_index
