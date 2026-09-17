@@ -50,7 +50,9 @@ class SessionScanner:
 
         if kind == SessionKind.ATLAS_SCREENING:
             with _profile_phase(profile, "parse_session_xml", count=1):
-                session.metadata_summary["ScreeningSession.dm"] = parse_xml_file(root / "ScreeningSession.dm")
+                metadata = parse_xml_file(root / "ScreeningSession.dm")
+                session.metadata_summary["ScreeningSession.dm"] = metadata
+                _append_xml_warning(session.warnings, metadata, "ScreeningSession.dm")
             sample_dirs = self._sample_dirs(root)
             with _profile_phase(profile, "load_screening_samples", count=len(sample_dirs)):
                 session.samples = [self._load_screening_sample(sample_dir, profile=profile) for sample_dir in sample_dirs]
@@ -64,7 +66,9 @@ class SessionScanner:
                 session.atlas = root_atlas
         elif kind == SessionKind.MULTIGRID:
             with _profile_phase(profile, "parse_session_xml", count=1):
-                session.metadata_summary["Session.dm"] = parse_xml_file(root / "Session.dm")
+                metadata = parse_xml_file(root / "Session.dm")
+                session.metadata_summary["Session.dm"] = metadata
+                _append_xml_warning(session.warnings, metadata, "Session.dm")
             sample_dirs = self._sample_dirs(root)
             with _profile_phase(profile, "load_collection_samples", count=len(sample_dirs)):
                 session.samples = [self._load_collection_sample(sample_dir, profile=profile) for sample_dir in sample_dirs]
@@ -78,7 +82,9 @@ class SessionScanner:
             session.tilt_series = sample.tilt_series
             if (root / "Session.dm").exists():
                 with _profile_phase(profile, "parse_session_xml", count=1):
-                    session.metadata_summary["Session.dm"] = parse_xml_file(root / "Session.dm")
+                    metadata = parse_xml_file(root / "Session.dm")
+                    session.metadata_summary["Session.dm"] = metadata
+                    _append_xml_warning(session.warnings, metadata, "Session.dm")
         else:
             session.warnings.append("Folder did not match a known Tomography 5 layout.")
 
@@ -91,7 +97,9 @@ class SessionScanner:
         sample_dm = path / "Sample.dm"
         if sample_dm.exists():
             with _profile_phase(profile, "parse_sample_xml", count=1):
-                sample.metadata["Sample.dm"] = parse_xml_file(sample_dm)
+                metadata = parse_xml_file(sample_dm)
+                sample.metadata["Sample.dm"] = metadata
+                _append_xml_warning(sample.warnings, metadata, "Sample.dm")
         sample.name = self._sample_display_name(path, sample.metadata.get("Sample.dm"), [])
         sample.atlas = _safe_parse(
             f"{sample.name} Atlas",
@@ -108,7 +116,9 @@ class SessionScanner:
         session_dm = path / "Session.dm"
         if session_dm.exists():
             with _profile_phase(profile, "parse_sample_session_xml", count=1):
-                sample.metadata["Session.dm"] = parse_xml_file(session_dm)
+                metadata = parse_xml_file(session_dm)
+                sample.metadata["Session.dm"] = metadata
+                _append_xml_warning(sample.warnings, metadata, "Session.dm")
 
         sample.atlas = _safe_parse("Atlas", lambda: _profiled_parse(profile, "parse_atlas", lambda: parse_atlas_folder(path / "Atlas")), None, sample.warnings)
         sample.overviews = _safe_parse("Overviews", lambda: self._parse_overviews(path, sample.warnings, profile=profile), [], sample.warnings)
@@ -344,6 +354,15 @@ def _safe_parse(label: str, parser: Callable[[], T], fallback: T, warnings: list
             warnings.append(message)
         LOGGER.warning(message, exc_info=True)
         return fallback
+
+
+def _append_xml_warning(warnings: list[str], metadata: object, filename: str) -> None:
+    if not isinstance(metadata, dict):
+        return
+    if message := metadata.get("_parse_error"):
+        warnings.append(f"Could not parse metadata XML {filename}: {message}")
+    elif message := metadata.get("_read_error"):
+        warnings.append(f"Could not read metadata XML {filename}: {message}")
 
 
 def _profile_phase(profile: LoadingProfiler | None, name: str, *, count: int = 0):

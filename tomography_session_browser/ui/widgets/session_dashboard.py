@@ -742,6 +742,7 @@ class SessionDashboard(QWidget):
     point_double_clicked = Signal(str, object)  # tilt_series_id, 1-based frame_index | None
     timeline_tilt_series_requested = Signal(str, object)  # tilt_series_id, 1-based frame_index | None
     highlight_clear_requested = Signal()
+    warning_details_requested = Signal(str, object)  # category, raw messages
     # Generic per-tile selection: emitted with the destination tab label and
     # the item id when the user clicks a status tile on any of the four
     # count cards. The main window resolves the id back to the underlying
@@ -2022,8 +2023,21 @@ class SessionDashboard(QWidget):
             for group in model.warning_groups[:6]:
                 layout.addWidget(self._warning_group_row(group))
             if len(model.warning_groups) > 6:
-                more = QLabel(f"+{_count_phrase(len(model.warning_groups) - 6, 'more group')}")
-                more.setObjectName("metaKey")
+                more = QToolButton(card)
+                more.setText(f"Show all {len(model.warning_groups):,} warning groups")
+                more.setObjectName("inlineLink")
+                more.setCursor(Qt.CursorShape.PointingHandCursor)
+                more.setAccessibleName("Show all warning groups")
+                all_items = [
+                    f"{group.label}: {item}"
+                    for group in model.warning_groups
+                    for item in group.items
+                ]
+                more.clicked.connect(
+                    lambda _checked=False, items=all_items: self.warning_details_requested.emit(
+                        "All warnings", items
+                    )
+                )
                 layout.addWidget(more)
             layout.addStretch(1)
             return card
@@ -2094,8 +2108,17 @@ class SessionDashboard(QWidget):
         label.setToolTip("\n".join(group.items[:8]))
         layout.addWidget(label, stretch=1)
 
-        # No chevron here. It navigated nowhere and expanded nothing, which is
-        # a promise the row cannot keep. Warning groups are summary-only.
+        view = QToolButton(wrap)
+        view.setText("View")
+        view.setObjectName("inlineLink")
+        view.setCursor(Qt.CursorShape.PointingHandCursor)
+        view.setToolTip(f"View {group.label.lower()} details")
+        view.setAccessibleName(f"View {group.label} details")
+        view.clicked.connect(
+            lambda _checked=False, label=group.label, items=list(group.items):
+            self.warning_details_requested.emit(label, items)
+        )
+        layout.addWidget(view)
         return wrap
 
     # ----- helpers

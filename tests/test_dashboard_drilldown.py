@@ -15,15 +15,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QToolButton
 
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.models import MdocSection, Sample, Session, TiltSeries
 from tomography_session_browser.ui.main_window import MainWindow
 from tomography_session_browser.ui.session_presenter import (
     StatCardModel,
+    WarningGroupModel,
     grouped_warnings,
 )
+from tomography_session_browser.ui.widgets.session_dashboard import SessionDashboard
 from tomography_session_browser.ui.widgets.stat_card import StatCard
 
 
@@ -198,6 +200,28 @@ def test_grouped_warnings_omits_empty_categories() -> None:
     assert len(groups) == 1
 
 
+def test_warning_group_has_keyboard_accessible_detail_action() -> None:
+    _app()
+    dashboard = SessionDashboard()
+    group = WarningGroupModel(
+        label="Missing MDOC file",
+        count=1,
+        severity="warning",
+        items=["Sample1 / tilt_1: No matching MDOC file found."],
+    )
+    emitted: list[tuple[str, list[str]]] = []
+    dashboard.warning_details_requested.connect(
+        lambda label, items: emitted.append((label, list(items)))
+    )
+
+    row = dashboard._warning_group_row(group)
+    button = next(button for button in row.findChildren(QToolButton) if button.text() == "View")
+    button.click()
+
+    assert button.focusPolicy() != Qt.FocusPolicy.NoFocus
+    assert emitted == [(group.label, group.items)]
+
+
 # --- aggregates drill down to the right rows -------------------------------
 
 
@@ -227,11 +251,7 @@ def _window(tmp_path: Path):
     )
     sample = Sample(id="s", name="Sample1", path=tmp_path, tilt_series=tilts)
     session = Session(
-        id="sess",
-        name="Reference collection B",
-        path=tmp_path,
-        kind=SessionKind.MULTIGRID,
-        samples=[sample],
+        id="sess", name="Srujan", path=tmp_path, kind=SessionKind.MULTIGRID, samples=[sample]
     )
     window = MainWindow()
     window._sessions = [session]

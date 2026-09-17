@@ -20,6 +20,7 @@ from tomography_session_browser.services.tilt_series_validation import (
     STATUS_INCOMPLETE,
     STATUS_UNKNOWN,
     TiltSeriesValidation,
+    actual_tilt_count,
     validate_session_tilt_series,
 )
 
@@ -106,7 +107,7 @@ def build_item_status_context(
     )
 
 
-def item_list_status(value: Any, context: ItemStatusContext | None) -> ItemListStatus:
+def item_list_status(value: Any, context: ItemStatusContext | None, *, include_inferred: bool = True) -> ItemListStatus:
     if context is None:
         return ItemListStatus(status=STATUS_UNKNOWN_LABEL, summary="")
     if isinstance(value, SearchMap):
@@ -114,7 +115,7 @@ def item_list_status(value: Any, context: ItemStatusContext | None) -> ItemListS
     if isinstance(value, SearchTile):
         return _search_tile_status(value, context)
     if isinstance(value, BatchPosition):
-        return _batch_position_status(value, context)
+        return _batch_position_status(value, context, include_inferred=include_inferred)
     if isinstance(value, TiltSeries):
         return _tilt_series_status(value, context)
     return ItemListStatus(status=STATUS_UNKNOWN_LABEL, summary="")
@@ -271,8 +272,13 @@ def _search_tile_status(search_tile: SearchTile, context: ItemStatusContext) -> 
     return ItemListStatus(status=status, summary=" · ".join(parts), tooltip="\n".join(tooltip_lines))
 
 
-def _batch_position_status(batch: BatchPosition, context: ItemStatusContext) -> ItemListStatus:
-    details = batch_position_status_counts(batch, context)
+def _batch_position_status(batch: BatchPosition, context: ItemStatusContext, *, include_inferred: bool = True) -> ItemListStatus:
+    details = batch_position_status_counts(batch, context, include_inferred=include_inferred)
+    return batch_position_status_from_counts(batch, details)
+
+
+def batch_position_status_from_counts(batch: BatchPosition, details: BatchPositionStatusCounts) -> ItemListStatus:
+    """Classify already-derived counts for GUI, Atlas and presenter consumers."""
     planned = details.planned
     counts = _StatusCounts(
         complete=details.complete,
@@ -463,7 +469,7 @@ def _tilt_series_for_batch(
 
 
 def _planned_exposures_for_batch(batch: BatchPosition, linked_tilts: list[TiltSeries]) -> int:
-    planned = _planned_exposures_from_metadata(batch.metadata or {})
+    planned = planned_exposures_from_metadata(batch.metadata or {})
     if planned:
         return max(planned, len(linked_tilts))
     if batch.exposure_image_paths:
@@ -473,7 +479,8 @@ def _planned_exposures_for_batch(batch: BatchPosition, linked_tilts: list[TiltSe
     return len(linked_tilts)
 
 
-def _planned_exposures_from_metadata(metadata: dict[str, Any]) -> int:
+def planned_exposures_from_metadata(metadata: dict[str, Any]) -> int:
+    """Count recorded exposure slots, excluding XML nil placeholders."""
     main = metadata.get("ExposureTemplateAreaParameters")
     has_main = isinstance(main, dict) and (
         not isinstance(main.get("_attributes"), dict)
@@ -482,8 +489,8 @@ def _planned_exposures_from_metadata(metadata: dict[str, Any]) -> int:
 
     raw_areas = find_first(metadata.get("AdditionalExposureTemplateAreas"), "ExposureTemplateAreaParameters")
     if isinstance(raw_areas, dict):
-        additional_count = 1
-    elif isinstance(raw_areas, list):
+        raw_areas = [raw_areas]
+    if isinstance(raw_areas, list):
         additional_count = sum(
             1
             for entry in raw_areas
@@ -561,11 +568,7 @@ def _safe_int(value: Any) -> int:
 
 
 def _actual_tilt_count(tilt: TiltSeries) -> int:
-    if tilt.sections:
-        return len(tilt.sections)
-    if tilt.mrc_metadata is not None and tilt.mrc_metadata.nz:
-        return int(tilt.mrc_metadata.nz)
-    return tilt.tilt_count or 0
+    return actual_tilt_count(tilt)
 
 
 def _inferred_failed_batch_labels(

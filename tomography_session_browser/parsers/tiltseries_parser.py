@@ -18,7 +18,7 @@ from tomography_session_browser.services.acquisition_metadata import (
     acquisition_setting_value,
     apply_acquisition_settings,
 )
-from tomography_session_browser.services.tilt_angle_service import tilt_angle_metadata_warnings
+from tomography_session_browser.services.tilt_angle_service import plausible_tilt_angles, tilt_angle_metadata_warnings
 
 LOGGER = logging.getLogger(__name__)
 
@@ -71,6 +71,8 @@ def parse_tilt_series(mrc_path: Path, mdoc_path: Path | None = None) -> TiltSeri
         warnings.append("No matching MDOC file found.")
 
     tilt_angles = numeric_values(sections, "TiltAngle")
+    if len(tilt_angles) != len(sections) or not plausible_tilt_angles(tilt_angles):
+        tilt_angles = []
     defocus_values = numeric_values(sections, "Defocus")
     target_defocus_values = numeric_values(sections, "TargetDefocus")
     dates = [str(section.metadata["DateTime"]) for section in sections if section.metadata.get("DateTime")]
@@ -113,20 +115,23 @@ def parse_tilt_series(mrc_path: Path, mdoc_path: Path | None = None) -> TiltSeri
             "validation uses the shared tilt-series validator."
         )
     _apply_mrc_acquisition_spot(header, mrc_metadata, mrc_path, warnings)
+    image_count = mrc_metadata.available_frames
+    if image_count is None:
+        image_count = mrc_metadata.nz if mrc_metadata.nz is not None else len(sections) or None
 
     tilt_series = TiltSeries(
         id=safe_id(mrc_path),
         name=mrc_path.stem,
         mrc_path=mrc_path,
         mdoc_path=mdoc_path if mdoc_path and mdoc_path.exists() else None,
-        tilt_count=len(sections) or None,
+        tilt_count=image_count,
         tilt_range=(min(tilt_angles), max(tilt_angles)) if tilt_angles else None,
         pixel_size=pixel_size,
         original_pixel_size=original_pixel_size,
         binning=binning,
         defocus=sum(defocus_values) / len(defocus_values) if defocus_values else None,
         target_defocus=sum(target_defocus_values) / len(target_defocus_values) if target_defocus_values else None,
-        number_of_frames=len(sections) or None,
+        number_of_frames=image_count,
         acquisition_time_start=dates[0] if dates else None,
         acquisition_time_end=dates[-1] if dates else None,
         metadata=header,

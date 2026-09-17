@@ -105,9 +105,22 @@ def extract_batch_position_settings(
 ) -> tuple[dict[str, AcquisitionSetting], dict[str, dict[str, AcquisitionSetting]]]:
     """Return ``(global_settings, per_position_settings)`` from batch XML data."""
 
-    global_settings = extract_acquisition_settings(data, source=source)
-    per_position: dict[str, dict[str, AcquisitionSetting]] = {}
     raw_positions = _raw_batch_positions(data)
+    position_nodes = {id(raw) for raw in raw_positions if isinstance(raw, Mapping)}
+
+    def global_scope(value: Any) -> Any:
+        # Retain wrappers and genuine defaults without promoting any recognised
+        # position's local fields into settings shared by its neighbours.
+        if id(value) in position_nodes:
+            return {}
+        if isinstance(value, Mapping):
+            return {key: global_scope(child) for key, child in value.items()}
+        if isinstance(value, list):
+            return [global_scope(child) for child in value]
+        return value
+
+    global_settings = extract_acquisition_settings(global_scope(data), source=source)
+    per_position: dict[str, dict[str, AcquisitionSetting]] = {}
     for index, raw in enumerate(raw_positions):
         if not isinstance(raw, Mapping):
             continue

@@ -554,6 +554,10 @@ def normalise_report_scope(
             )
         )
 
+    # An Atlas the reviewer selected explicitly is selected content even when
+    # a chosen collection also needs it. Supporting provenance applies only to
+    # sessions introduced by normalisation.
+    supporting_session_ids.difference_update(selected_session_ids)
     selected_or_supporting = selected_session_ids | supporting_session_ids
     selected_sessions_list: list[Session] = []
     for session in loaded_sessions:

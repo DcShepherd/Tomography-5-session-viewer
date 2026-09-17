@@ -1326,7 +1326,7 @@ def _template_markers_in_frame(
         panel_name=frame.source,
         default_central_name=batch.name or batch.id,
     )
-    _correct_distinct_focus_orientation(
+    _correct_focus_tracking_orientation(
         markers,
         frame=frame,
         batch=batch,
@@ -1691,21 +1691,21 @@ def _apply_grouped_marker_correction(
         )
 
 
-def _correct_distinct_focus_orientation(
+def _correct_focus_tracking_orientation(
     markers: list[ImageMarker],
     *,
     frame: ImageFrame,
     batch: BatchPosition,
 ) -> None:
-    """Correct the Tomography 5 convention used by distinct Focus targets.
+    """Restore Focus/Tracking offsets after the shared frame reflection.
 
-    Coincident Focus/Tracking targets in the reference sessions are already
-    validated in the legacy reflected frame and must stay coincident.  When
-    Focus is recorded at a different template offset from Tracking, however,
-    its offset is in the same target-relative convention as the exposure
-    pattern.  The legacy whole-image reflection leaves that Focus vector 180
-    degrees from the pattern, so rotate only that distinct Focus marker around
-    the primary exposure after the shared frame correction.
+    Tomography 5 records Exposure, Focus, and Tracking offsets in the same
+    target-relative coordinate system.  The whole-image reflection corrects
+    the absolute batch location on Search Map and Overview frames, but also
+    reverses every child vector around the primary Exposure.  Additional
+    Exposure markers already receive a local 180-degree restoration in
+    ``_apply_grouped_marker_correction``; Focus and Tracking need the same
+    restoration whether they are coincident or distinct.
     """
 
     if frame.source not in {"SearchMap", "Overview"}:
@@ -1719,58 +1719,45 @@ def _correct_distinct_focus_orientation(
         ),
         None,
     )
-    focus = next(
-        (marker for marker in markers if marker.marker_type == MarkerType.FOCUS_AREA),
-        None,
-    )
-    tracking = next(
-        (marker for marker in markers if marker.marker_type == MarkerType.TRACKING_AREA),
-        None,
-    )
-    if primary is None or focus is None or tracking is None:
-        return
-    focus_raw = focus.metadata.get("raw")
-    tracking_raw = tracking.metadata.get("raw")
-    if not isinstance(focus_raw, dict) or not isinstance(tracking_raw, dict):
-        return
-    focus_offset = (
-        _as_float(focus_raw.get("PositionX")),
-        _as_float(focus_raw.get("PositionY")),
-    )
-    tracking_offset = (
-        _as_float(tracking_raw.get("PositionX")),
-        _as_float(tracking_raw.get("PositionY")),
-    )
-    if None in focus_offset or None in tracking_offset:
-        return
-    if math.isclose(focus_offset[0], tracking_offset[0], rel_tol=1e-9, abs_tol=1e-12) and math.isclose(
-        focus_offset[1], tracking_offset[1], rel_tol=1e-9, abs_tol=1e-12
-    ):
+    if primary is None:
         return
     anchor = _marker_center(primary)
-    before = _marker_center(focus)
-    if anchor is None or before is None:
+    if anchor is None:
         return
-    after = rotate_point_180_around_anchor(
-        before[0],
-        before[1],
-        anchor[0],
-        anchor[1],
-    )
-    _move_marker_center(focus, after)
-    focus.metadata["focus_orientation_transform"] = (
-        "local_180_about_primary_exposure"
-    )
-    focus.metadata["focus_orientation_anchor"] = primary.id
-    focus.metadata["focus_orientation_before"] = before
-    LOGGER.debug(
-        "Focus orientation correction panel=%s batch=%s before=%s after=%s anchor=%s",
-        frame.source,
-        batch.id,
-        before,
-        after,
-        anchor,
-    )
+    for marker_type, prefix in (
+        (MarkerType.FOCUS_AREA, "focus"),
+        (MarkerType.TRACKING_AREA, "tracking"),
+    ):
+        marker = next(
+            (item for item in markers if item.marker_type == marker_type),
+            None,
+        )
+        if marker is None:
+            continue
+        before = _marker_center(marker)
+        if before is None:
+            continue
+        after = rotate_point_180_around_anchor(
+            before[0],
+            before[1],
+            anchor[0],
+            anchor[1],
+        )
+        _move_marker_center(marker, after)
+        marker.metadata[f"{prefix}_orientation_transform"] = (
+            "local_180_about_primary_exposure"
+        )
+        marker.metadata[f"{prefix}_orientation_anchor"] = primary.id
+        marker.metadata[f"{prefix}_orientation_before"] = before
+        LOGGER.debug(
+            "%s orientation correction panel=%s batch=%s before=%s after=%s anchor=%s",
+            prefix.title(),
+            frame.source,
+            batch.id,
+            before,
+            after,
+            anchor,
+        )
 
 
 def _overlay_group_name(marker: ImageMarker, default_central_name: str | None = None) -> str:

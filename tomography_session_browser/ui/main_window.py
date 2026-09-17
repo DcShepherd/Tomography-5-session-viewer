@@ -66,16 +66,25 @@ from tomography_session_browser.services.marker_service import MarkerContext, at
 from tomography_session_browser.services.item_status import ItemListStatus, build_item_status_context, item_list_status
 from tomography_session_browser.services.loading_profiler import LoadingProfiler
 from tomography_session_browser.services.navigation_service import (
+    ExposureSelection,
+    ExposureTiltSeriesResolution,
     NavigationResolution,
+    expected_tilt_keys_for_exposure,
+    exposure_index_for_marker,
+    exposure_selection,
+    marker_exposure_match_key,
     navigation_resolution_from_candidates,
+    normalise_exposure_key,
     resolve_batch_position_overview,
     resolve_batch_position_search_map,
     resolve_search_map_overview,
     resolve_search_tile_batch_position,
     resolve_search_tile_search_map,
     resolve_search_tile_tilt_series,
+    resolve_exposure_tilt_series,
     resolve_tilt_series_navigation_targets,
     tab_label_for_object,
+    tilt_exposure_match_keys,
 )
 from tomography_session_browser.services.tilt_series_validation import (
     TiltSeriesValidation,
@@ -191,6 +200,7 @@ WORKSPACE_WIDE_PILL_PX = 1500
 WORKSPACE_FULL_TOTALS_PX = 1500
 WORKSPACE_ABBREVIATED_TOTALS_PX = 1120
 WORKSPACE_RUNTIME_LABEL_PX = 1040
+CONTEXT_DOCK_MIN_WIDTH_PX = 300
 # Floor for the derived workspace width. Dragging the docks out until they meet
 # leaves nothing in the middle; reporting the *window* width there said "wide"
 # at the precise moment the reviewing area was at its narrowest.
@@ -290,15 +300,7 @@ def _raw_marker_name(marker: ImageMarker) -> str | None:
 
 
 def _normalise_exposure_key(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    text = text.replace("\\", "/").split("/")[-1].split(":")[-1]
-    for suffix in (".mrc", ".mdoc", ".xml", ".jpg", ".jpeg", ".png", ".tif", ".tiff"):
-        if text.lower().endswith(suffix):
-            text = text[: -len(suffix)]
-            break
-    return text.strip().casefold()
+    return normalise_exposure_key(value)
 
 
 def _search_tile_sort_key(value: SearchTile) -> tuple[Any, ...]:
@@ -419,21 +421,8 @@ class _PreparedSessionUi:
     tilt_validations: dict[str, TiltSeriesValidation]
 
 
-@dataclass(slots=True)
-class _SelectedExposureArea:
-    batch_position_id: str
-    exposure_index: int | None
-    exposure_area_id: str | None
-    exposure_type: str
-    linked_tilt_series_id: str | None = None
-
-
-@dataclass(slots=True)
-class _ExposureTiltResolution:
-    exposure: _SelectedExposureArea | None
-    tilt_series: TiltSeries | None
-    tooltip: str
-    ambiguous: bool = False
+_SelectedExposureArea = ExposureSelection
+_ExposureTiltResolution = ExposureTiltSeriesResolution
 
 
 @dataclass(slots=True)
@@ -896,6 +885,9 @@ class MainWindow(QMainWindow):
         # Set for one event turn so a double-click, which Qt reports through
         # both itemDoubleClicked and itemActivated, only acts once.
         self._project_tree_activation_guard: int | None = None
+        # Filtering may temporarily expand matching branches. Restore the
+        # reviewer's prior tree layout when the query is cleared.
+        self._project_filter_expanded_ids: set[str] | None = None
         # Why the current filter was applied from a dashboard drill-down.
         self._dashboard_filter_reason = ""
         # Status-bar project totals, keyed by a cheap fingerprint of the
@@ -964,6 +956,7 @@ class MainWindow(QMainWindow):
         # Search Maps even when
         # they live in a different session.
         self._sample_index: dict[str, list[Sample]] = {}
+        self._sample_object_index: dict[int, list[Sample]] = {}
         self.setWindowTitle("Tomography Session Browser")
         self.setWindowIcon(brand_window_icon())
         # Default size targets the comfortable laptop / desktop layout the
@@ -1824,7 +1817,7 @@ class MainWindow(QMainWindow):
         self.context_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
         self.context_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         self.context_dock.setTitleBarWidget(QWidget(self.context_dock))
-        self.context_dock.setMinimumWidth(260)
+        self.context_dock.setMinimumWidth(CONTEXT_DOCK_MIN_WIDTH_PX)
         panel = QWidget(self.context_dock)
         panel.setObjectName("contextShell")
         layout = QVBoxLayout(panel)
@@ -1863,6 +1856,7 @@ class MainWindow(QMainWindow):
                 self.session_dashboard.point_double_clicked.connect(self._on_dashboard_plot_point_double_clicked)
                 self.session_dashboard.timeline_tilt_series_requested.connect(self._on_dashboard_timeline_tilt_series_requested)
                 self.session_dashboard.highlight_clear_requested.connect(self._on_dashboard_highlight_clear_requested)
+                self.session_dashboard.warning_details_requested.connect(self._show_warning_details)
                 layout.addWidget(self.session_dashboard, stretch=1)
                 # Keep the tree widgets for backwards-compat tests / debug —
                 # never parented into the visible UI.
@@ -2848,7 +2842,7 @@ class MainWindow(QMainWindow):
         sessions = sessions if sessions is not None else self._sessions
         items: list[QTreeWidgetItem] = []
         for samples in sorted(linked_sample_groups(sessions), key=sample_sort_key_for_group):
-            if not any(sample.atlas or self._sample_has_collection_data(sample) for sample in samples):
+            if not any(sample.atlas or self._sample_is_inspectable(sample) for sample in samples):
                 continue
             label = self._linked_sample_label(samples)
             item = self._item(label, build_linked_sample_group(label, samples))
@@ -3647,6 +3641,18 @@ class MainWindow(QMainWindow):
         self._record_history(departure)
         self._refresh_context_header()
 
+    @Slot(str, object)
+    def _show_warning_details(self, category: str, items_value: object) -> None:
+        items = [str(item) for item in items_value] if isinstance(items_value, list | tuple) else []
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(category)
+        box.setText(f"{len(items):,} warning message{'s' if len(items) != 1 else ''}")
+        box.setInformativeText("Open details to inspect the parser evidence.")
+        box.setDetailedText("\n\n".join(items) if items else "No warning details are available.")
+        box.setStandardButtons(QMessageBox.StandardButton.Close)
+        box.exec()
+
     def _render_warning_groups(self, warnings: list[str]) -> None:
         self.warning_tree.setUpdatesEnabled(False)
         try:
@@ -4000,6 +4006,8 @@ class MainWindow(QMainWindow):
 
     def _filter_project_tree(self, text: str) -> None:
         query = text.strip().lower()
+        if query and self._project_filter_expanded_ids is None:
+            self._project_filter_expanded_ids = self._collect_expanded_node_ids()
 
         def apply(item: QTreeWidgetItem) -> bool:
             own_match = not query or query in item.text(0).lower() or query in item.toolTip(0).lower()
@@ -4014,13 +4022,23 @@ class MainWindow(QMainWindow):
 
         for index in range(self.tree.topLevelItemCount()):
             apply(self.tree.topLevelItem(index))
+        if not query and self._project_filter_expanded_ids is not None:
+            self._restore_expanded_node_ids(self._project_filter_expanded_ids)
+            self._project_filter_expanded_ids = None
 
     def _display_samples(self, session: Session) -> list[Sample]:
         if len(self._sessions) > 1:
             return session.samples
         if session.kind.value == "multigrid":
-            return [sample for sample in session.samples if self._sample_has_collection_data(sample)]
+            return [sample for sample in session.samples if self._sample_is_inspectable(sample)]
         return session.samples
+
+    def _sample_is_inspectable(self, sample: Sample) -> bool:
+        return bool(
+            self._sample_has_collection_data(sample)
+            or sample.metadata
+            or sample.warnings
+        )
 
     def _sample_has_collection_data(self, sample: Sample) -> bool:
         return bool(sample.overviews or sample.search_maps or sample.search_tiles or sample.batch_positions or sample.tilt_series)
@@ -4643,10 +4661,13 @@ class MainWindow(QMainWindow):
                             atlas_collection_options,
                             atlas_collection_visibility_changed,
                         )
+                    item_status_provider = (
+                        status_from_payload(payload) if payload.statuses else None
+                    )
                     tab.refresh_providers(
                         preview_path_by_label[label],
                         markers_for=markers_by_label[label],
-                        item_status_for=status_from_payload(payload),
+                        item_status_for=item_status_provider,
                         prepared_sources=payload.sources,
                     )
                     continue
@@ -6109,27 +6130,10 @@ class MainWindow(QMainWindow):
         return None
 
     def _tilt_exposure_match_keys(self, tilt: TiltSeries) -> set[str]:
-        raw_values = {
-            tilt.name,
-            tilt.id,
-            Path(tilt.id).stem,
-            tilt.mrc_path.stem if tilt.mrc_path is not None else None,
-        }
-        return {key for value in raw_values if (key := _normalise_exposure_key(value))}
+        return tilt_exposure_match_keys(tilt)
 
     def _marker_exposure_match_key(self, marker: ImageMarker) -> str:
-        raw_values = (
-            marker.metadata.get("linked_area_name"),
-            marker.metadata.get("area_name"),
-            _raw_marker_name(marker),
-            marker.label,
-            marker.id.rsplit(":", 1)[-1] if marker.id else None,
-        )
-        for value in raw_values:
-            key = _normalise_exposure_key(value)
-            if key and key != "exposure":
-                return key
-        return _normalise_exposure_key(marker.metadata.get("area_name") or _raw_marker_name(marker))
+        return marker_exposure_match_key(marker)
 
     def _should_open_tilt_from_exposure_marker(self, marker: ImageMarker) -> bool:
         if TAB_LABELS[self.tabs.currentIndex()] not in {"Search", "Batch position"}:
@@ -6241,165 +6245,21 @@ class MainWindow(QMainWindow):
                 None,
                 "No tilt series is associated with the selected exposure area.",
             )
-        exposure = self._selected_exposure_area(marker, batch)
         marker_context = marker_context or self._marker_context_for_batch_position(batch)
-
-        explicit_tilt = self._explicit_tilt_for_exposure_marker(marker)
-        if explicit_tilt is not None:
-            exposure.linked_tilt_series_id = explicit_tilt.id
-            return _ExposureTiltResolution(
-                exposure,
-                explicit_tilt,
-                "Jump to the tilt series associated with this exposure area.",
-            )
-
-        linked_ids = list(batch.linked_tilt_series_ids or [])
-        linked_id_set = set(linked_ids)
-        context_tilts = list(marker_context.tilt_series)
-        linked_candidates = [
-            tilt
-            for tilt in context_tilts
-            if tilt.id in linked_id_set or tilt.linked_batch_position_id == batch.id
-        ]
-        all_candidates = linked_candidates or context_tilts
-        if not all_candidates:
-            return _ExposureTiltResolution(
-                exposure,
-                None,
-                "No tilt series is associated with the selected exposure area.",
-            )
-
-        expected_keys = self._expected_tilt_keys_for_exposure(batch, exposure)
-        if expected_keys:
-            linked_matches = [
-                tilt
-                for tilt in linked_candidates
-                if self._tilt_exposure_match_keys(tilt).intersection(expected_keys)
-            ]
-            if len(linked_matches) == 1:
-                exposure.linked_tilt_series_id = linked_matches[0].id
-                return _ExposureTiltResolution(exposure, linked_matches[0], "Jump to the tilt series associated with this exposure area.")
-            if len(linked_matches) > 1:
-                return _ExposureTiltResolution(exposure, None, "Multiple tilt series candidates found for this exposure area.", ambiguous=True)
-            name_matches = [
-                tilt
-                for tilt in context_tilts
-                if self._tilt_exposure_match_keys(tilt).intersection(expected_keys)
-            ]
-            if len(name_matches) == 1:
-                exposure.linked_tilt_series_id = name_matches[0].id
-                return _ExposureTiltResolution(exposure, name_matches[0], "Jump to the tilt series associated with this exposure area.")
-            if len(name_matches) > 1:
-                return _ExposureTiltResolution(exposure, None, "Multiple tilt series candidates found for this exposure area.", ambiguous=True)
-
-        marker_key = self._marker_exposure_match_key(marker)
-        if marker_key:
-            exact = [
-                tilt
-                for tilt in all_candidates
-                if marker_key in self._tilt_exposure_match_keys(tilt)
-            ]
-            if len(exact) == 1:
-                exposure.linked_tilt_series_id = exact[0].id
-                return _ExposureTiltResolution(exposure, exact[0], "Jump to the tilt series associated with this exposure area.")
-            if len(exact) > 1:
-                return _ExposureTiltResolution(exposure, None, "Multiple tilt series candidates found for this exposure area.", ambiguous=True)
-
-        ordered = self._linked_tilt_candidates_in_batch_order(batch, linked_candidates)
-        if exposure.exposure_index is not None and 0 <= exposure.exposure_index < len(ordered):
-            tilt = ordered[exposure.exposure_index]
-            exposure.linked_tilt_series_id = tilt.id
-            return _ExposureTiltResolution(exposure, tilt, "Jump to the tilt series associated with this exposure area.")
-        if exposure.exposure_index in (None, 0) and len(all_candidates) == 1:
-            exposure.linked_tilt_series_id = all_candidates[0].id
-            return _ExposureTiltResolution(exposure, all_candidates[0], "Jump to the tilt series associated with this exposure area.")
-        if len(all_candidates) > 1:
-            return _ExposureTiltResolution(exposure, None, "Multiple tilt series candidates found for this exposure area.", ambiguous=True)
-        return _ExposureTiltResolution(
-            exposure,
-            None,
-            "No tilt series is associated with the selected exposure area.",
+        return resolve_exposure_tilt_series(
+            marker,
+            batch=batch,
+            tilt_series=marker_context.tilt_series,
         )
 
     def _selected_exposure_area(self, marker: ImageMarker, batch: BatchPosition) -> _SelectedExposureArea:
-        index = self._exposure_index_for_marker(marker, batch)
-        exposure_type = str(marker.metadata.get("exposure_type") or ("main" if index == 0 else "additional"))
-        return _SelectedExposureArea(
-            batch_position_id=batch.id,
-            exposure_index=index,
-            exposure_area_id=str(marker.metadata.get("exposure_marker_id") or marker.id),
-            exposure_type=exposure_type,
-        )
+        return exposure_selection(marker, batch)
 
     def _exposure_index_for_marker(self, marker: ImageMarker, batch: BatchPosition) -> int | None:
-        raw_index = marker.metadata.get("exposure_index")
-        try:
-            if raw_index is not None:
-                return int(raw_index)
-        except (TypeError, ValueError):
-            pass
-        area_name = str(marker.metadata.get("area_name") or _raw_marker_name(marker) or "").strip()
-        if area_name.casefold() == "exposure":
-            return 0
-        match = re.fullmatch(r"exposure\s*(\d+)", area_name.strip(), flags=re.IGNORECASE)
-        if match:
-            # Tomography 5 names the main exposure ``Exposure`` (or exposure
-            # number 1) and uses stack suffix ``_2`` for the first additional
-            # exposure. Convert that one-based label to the zero-based index
-            # used by marker metadata and batch-order fallback.
-            return max(0, int(match.group(1)) - 1)
-        batch_key = _normalise_exposure_key(batch.name or batch.id)
-        marker_key = self._marker_exposure_match_key(marker)
-        if marker_key and batch_key:
-            if marker_key == batch_key:
-                return 0
-            suffix = marker_key.removeprefix(f"{batch_key}_")
-            if suffix != marker_key and suffix.isdigit():
-                return max(0, int(suffix) - 1)
-        return None
+        return exposure_index_for_marker(marker, batch)
 
     def _expected_tilt_keys_for_exposure(self, batch: BatchPosition, exposure: _SelectedExposureArea) -> set[str]:
-        batch_key = _normalise_exposure_key(batch.name or batch.id)
-        if not batch_key or exposure.exposure_index is None:
-            return set()
-        if exposure.exposure_index == 0:
-            return {batch_key}
-        return {f"{batch_key}_{exposure.exposure_index + 1}"}
-
-    def _linked_tilt_candidates_in_batch_order(
-        self,
-        batch: BatchPosition,
-        candidates: list[TiltSeries],
-    ) -> list[TiltSeries]:
-        order = {tilt_id: index for index, tilt_id in enumerate(batch.linked_tilt_series_ids or [])}
-        return sorted(
-            candidates,
-            key=lambda tilt: (
-                order.get(tilt.id, 10**9),
-                natural_key(tilt.name or tilt.id),
-            ),
-        )
-
-    def _explicit_tilt_for_exposure_marker(self, marker: ImageMarker) -> TiltSeries | None:
-        keys = (
-            "tilt_series_id",
-            "TiltSeriesId",
-            "TiltSeriesID",
-            "linked_tilt_series_id",
-            "LinkedTiltSeriesId",
-        )
-        metadata = marker.metadata or {}
-        raw = metadata.get("raw")
-        values = [metadata.get(key) for key in keys]
-        if isinstance(raw, dict):
-            values.extend(raw.get(key) for key in keys)
-        for value in values:
-            if not value:
-                continue
-            target = self._find_object_by_id(str(value))
-            if isinstance(target, TiltSeries):
-                return target
-        return None
+        return expected_tilt_keys_for_exposure(batch, exposure)
 
     def _tilt_for_exposure_marker(self, marker: ImageMarker) -> TiltSeries | None:
         batch = self._batch_for_exposure_marker(marker)
@@ -6613,6 +6473,9 @@ class MainWindow(QMainWindow):
         if self._suppress_viewer_context or self._preserve_tree_root_context:
             return
         if not isinstance(value, TiltSeries):
+            return
+        viewer = self._viewer_tabs.get("Tilt series")
+        if self.tabs.currentIndex() != TAB_LABELS.index("Tilt series") or getattr(viewer, "_current_value", None) is not value:
             return
         self.context_panel.set_title(self._label_for(value))
         lines = [
@@ -7306,6 +7169,20 @@ class MainWindow(QMainWindow):
         """
 
         index: dict[str, list[Sample]] = {}
+        object_index: dict[int, list[Sample]] = {}
+        ambiguous_ids: set[str] = set()
+
+        def register(entity: Any, members: list[Sample]) -> None:
+            object_index[id(entity)] = members
+            if entity.id in ambiguous_ids:
+                return
+            previous = index.get(entity.id)
+            if previous is not None and {id(item) for item in previous} != {id(item) for item in members}:
+                # A reused ID must never overwrite another sample's ownership.
+                ambiguous_ids.add(entity.id)
+                index.pop(entity.id, None)
+                return
+            index[entity.id] = members
         try:
             groups = linked_sample_groups(self._sessions)
         except Exception:  # pragma: no cover — defensive; linker is robust
@@ -7316,18 +7193,19 @@ class MainWindow(QMainWindow):
             members = list(group)
             for sample in members:
                 if sample.atlas is not None:
-                    index[sample.atlas.id] = members
+                    register(sample.atlas, members)
                 for overview in sample.overviews:
-                    index[overview.id] = members
+                    register(overview, members)
                 for search_map in sample.search_maps:
-                    index[search_map.id] = members
+                    register(search_map, members)
                 for search_tile in sample.search_tiles:
-                    index[search_tile.id] = members
+                    register(search_tile, members)
                 for batch_position in sample.batch_positions:
-                    index[batch_position.id] = members
+                    register(batch_position, members)
                 for tilt_series in sample.tilt_series:
-                    index[tilt_series.id] = members
+                    register(tilt_series, members)
         self._sample_index = index
+        self._sample_object_index = object_index
 
     def _marker_context_for(self, value: Any, fallback: MarkerContext) -> MarkerContext:
         """Return a MarkerContext scoped to ``value``'s linked-sample group.
@@ -7340,7 +7218,9 @@ class MainWindow(QMainWindow):
         cross-session bleed can be diagnosed quickly.
         """
 
-        members = self._sample_index.get(getattr(value, "id", "")) if hasattr(self, "_sample_index") else None
+        members = getattr(self, "_sample_object_index", {}).get(id(value))
+        if members is None:
+            members = self._sample_index.get(getattr(value, "id", "")) if hasattr(self, "_sample_index") else None
         if not members:
             LOGGER.debug(
                 "overlay context: no parent sample group for %s id=%s — using fallback (%d overviews, %d search_maps, %d batches)",

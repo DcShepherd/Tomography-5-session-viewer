@@ -193,7 +193,7 @@ def _window(tmp_path: Path):
     )
     session = Session(
         id="sess-1",
-        name="Reference collection B",
+        name="Srujan",
         path=tmp_path,
         kind=SessionKind.MULTIGRID,
         samples=[sample],

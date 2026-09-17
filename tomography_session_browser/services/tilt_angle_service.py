@@ -57,6 +57,24 @@ def stack_order_mdoc_section_indices(
     frame_count = frame_count or _frame_count_for(tilt_series)
     if frame_count < 1:
         return None
+    mrc_angles = _mrc_extended_header_angles(tilt_series, frame_count)
+    if mrc_angles is not None:
+        # MRC labels describe the actual image order. Do not pair those images
+        # with a separately sorted MDOC, even when both cover the same range.
+        section_angles = [_numeric(section.metadata.get("TiltAngle")) for section in tilt_series.sections]
+        if len(section_angles) != frame_count or any(angle is None for angle in section_angles):
+            return None
+        if not plausible_tilt_angles(section_angles):
+            return None
+        indices: list[int | None] = []
+        used: set[int] = set()
+        for angle in mrc_angles:
+            matches = [index for index, candidate in enumerate(section_angles) if abs(candidate - angle) <= 0.05]
+            if len(matches) != 1 or matches[0] in used:
+                return None
+            used.add(matches[0])
+            indices.append(matches[0])
+        return indices
     entries = _mdoc_stack_order_angle_entries(tilt_series, frame_count)
     if entries is None:
         return None
@@ -118,6 +136,10 @@ def tilt_angle_metadata_warnings(
     warnings.extend(_tlt_metadata_warnings(tilt_series, frame_count, tlt_angles))
 
     if mrc_angles is not None:
+        if tilt_series.sections and stack_order_mdoc_section_indices(tilt_series, frame_count) is None:
+            warnings.append(
+                "MDOC tilt-angle correspondence is ambiguous or conflicting; ignoring MDOC per-frame values."
+            )
         if mdoc_angles is not None and not _angles_close(mrc_angles, mdoc_angles):
             if _angle_sets_close(mrc_angles, mdoc_angles):
                 warnings.append(
@@ -218,6 +240,11 @@ def _mdoc_stack_order_angle_entries(tilt_series: TiltSeries, frame_count: int) -
         file_order_angles.append(angle)
         file_order_metadata_indices.append(section_index)
         z_ordered.append((section.z_value, section_index, angle))
+
+    # Single-frame and constant-angle MDOCs remain valid explicit records;
+    # unlike inferred/extended-header sequences they need no angular spread.
+    if not plausible_tilt_angles(file_order_angles):
+        return None
 
     if _is_tomography5_stack_mdoc(tilt_series):
         # Tomography 5 stack mdocs describe the dose-symmetric acquisition
@@ -358,10 +385,18 @@ def _tlt_metadata_warnings(tilt_series: TiltSeries, frame_count: int, accepted: 
     return warnings
 
 
+def plausible_tilt_angles(values: list[float] | tuple[float, ...]) -> bool:
+    """Validate recorded angles without requiring an angular sweep."""
+    return bool(values) and all(
+        isinstance(value, int | float) and math.isfinite(float(value)) and -90 <= float(value) <= 90
+        for value in values
+    )
+
+
 def _valid_angles(values: list[float] | tuple[float, ...]) -> bool:
     if len(values) < 2:
         return False
-    return all(isinstance(value, int | float) and math.isfinite(float(value)) and -90 <= float(value) <= 90 for value in values) and (
+    return plausible_tilt_angles(values) and (
         max(values) - min(values) >= 1
     )
 

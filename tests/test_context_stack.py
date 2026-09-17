@@ -65,18 +65,16 @@ def test_open_action_labels_are_verb_plus_destination() -> None:
 
 def test_the_stack_reads_coarsest_to_finest() -> None:
     stack = build_context_stack(
-        scope_name="Reference_Collection_B_20260319",
+        scope_name="Srujan_20260319",
         scope_kind="linked",
         section_key="Search",
         selection_name="vellio_1",
         marker_name="Tile 19",
     )
 
-    assert stack.to_text() == (
-        "Reference_Collection_B_20260319 (LS) › Search tiles › vellio_1 · Tile 19"
-    )
+    assert stack.to_text() == "Srujan_20260319 (LS) › Search tiles › vellio_1 · Tile 19"
     assert stack.crumbs() == (
-        "Reference_Collection_B_20260319 (LS)",
+        "Srujan_20260319 (LS)",
         "Search tiles",
         "vellio_1 · Tile 19",
     )
@@ -146,12 +144,12 @@ def test_no_filter_produces_no_view_state_noise() -> None:
 
 def test_relationship_context_is_surfaced_inline() -> None:
     stack = build_context_stack(
-        scope_name="Reference collection B",
+        scope_name="Srujan",
         scope_kind="linked",
-        relationship="Atlas context borrowed from Reference atlas 1",
+        relationship="Atlas context borrowed from SSK_Training_1",
     )
 
-    assert "borrowed from Reference atlas 1" in stack.view_state_notes()[0]
+    assert "borrowed from SSK_Training_1" in stack.view_state_notes()[0]
 
 
 def test_marker_is_shown_against_its_row_not_instead_of_it() -> None:
@@ -193,7 +191,7 @@ def _live_window(tmp_path):
     sample = Sample(id="s-1", name="Sample1", path=tmp_path, search_maps=maps)
     session = Session(
         id="sess-1",
-        name="Reference_Collection_B_20260319",
+        name="Srujan_20260319",
         path=tmp_path,
         kind=SessionKind.MULTIGRID,
         samples=[sample],
@@ -216,10 +214,10 @@ def test_live_window_builds_a_scope_first_context_stack(tmp_path) -> None:
 
     stack = window.current_context_stack()
 
-    assert stack.scope == "Reference_Collection_B_20260319"
+    assert stack.scope == "Srujan_20260319"
     assert stack.section == "Search maps"
     assert "Map 2" in stack.selection
-    assert stack.crumbs()[0].startswith("Reference_Collection_B_20260319")
+    assert stack.crumbs()[0].startswith("Srujan_20260319")
 
 
 def test_live_context_stack_reports_an_active_filter(tmp_path) -> None:
@@ -264,18 +262,15 @@ def test_dashboard_eyebrow_shows_the_real_scope_when_it_adds_something(tmp_path)
     # context header above the tabs is the one place the scope is stated.
     assert "PROJECT · SESSION" not in _eyebrows(window)
     assert _eyebrows(window) == [""]
-    assert "Reference_Collection_B_20260319" in window.context_header.scope_text()
+    assert "Srujan_20260319" in window.context_header.scope_text()
 
     # A scope wider than the title still earns an eyebrow — a sample-scoped
     # dashboard inside a linked group is the real case.
     from tomography_session_browser.ui.context_stack import build_context_stack
 
     window.session_dashboard.set_context_stack(
-        build_context_stack(
-            scope_name="Reference_Collection_B_20260319 + Reference_Atlas_1",
-            scope_kind="linked",
-        )
+        build_context_stack(scope_name="Srujan_20260319 + SSK_Training_1", scope_kind="linked")
     )
     window.session_dashboard.set_model(window.session_dashboard._model)
 
-    assert any("REFERENCE_ATLAS_1" in text for text in _eyebrows(window)), _eyebrows(window)
+    assert any("SSK_TRAINING_1" in text for text in _eyebrows(window)), _eyebrows(window)

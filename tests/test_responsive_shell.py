@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.models import (
@@ -27,6 +27,7 @@ from tomography_session_browser.domain.models import (
 )
 from tomography_session_browser.ui.image_viewer import VIEWER_OBJECT_ROLE
 from tomography_session_browser.ui.main_window import (
+    CONTEXT_DOCK_MIN_WIDTH_PX,
     TAB_LABELS,
     WORKSPACE_MEDIUM_PILL_PX,
     WORKSPACE_NARROW_CHROME_PX,
@@ -71,11 +72,7 @@ def _window(tmp_path: Path) -> MainWindow:
         ],
     )
     session = Session(
-        id="sess",
-        name="Reference collection B",
-        path=tmp_path,
-        kind=SessionKind.MULTIGRID,
-        samples=[sample],
+        id="sess", name="Srujan", path=tmp_path, kind=SessionKind.MULTIGRID, samples=[sample]
     )
     window = MainWindow()
     window._sessions = [session]
@@ -275,6 +272,36 @@ def test_the_totals_strip_uses_plural_section_names(tmp_path: Path) -> None:
     assert "Search map " not in text.replace("Search maps ", "")
 
 
+@pytest.mark.parametrize("width,height", [(960, 640), (1366, 768), (2000, 1100)])
+def test_context_descriptors_stay_on_one_line_at_supported_sizes(
+    tmp_path: Path, width: int, height: int
+) -> None:
+    window = _window(tmp_path)
+    window.resize(width, height)
+    window.context_panel.set_text(
+        "Summary:\n"
+        "  Batch positions: 12\n"
+        "  Linked data collections: 2\n"
+        "Acquisition:\n"
+        "  Acquisition spot size: 6\n"
+        "  Expected source: session metadata"
+    )
+    window.show()
+    _app().processEvents()
+
+    try:
+        labels = window.context_panel.findChildren(QLabel, "metaKey")
+        assert window.context_dock.width() >= CONTEXT_DOCK_MIN_WIDTH_PX
+        assert len({label.width() for label in labels}) == 1
+        assert all(
+            label.heightForWidth(label.width()) <= label.fontMetrics().lineSpacing() + 2
+            for label in labels
+        )
+    finally:
+        window.close()
+        _app().processEvents()
+
+
 # --- breakpoints -----------------------------------------------------------
 
 
@@ -344,7 +371,7 @@ def test_the_header_stacks_rather_than_starving_the_scope(tmp_path: Path) -> Non
 
     header = window.context_header
     assert header.is_narrow() is True
-    assert header.scope_text().startswith("Reference collection B")
+    assert header.scope_text().startswith("Srujan")
     # Stacked, so the leading separator that joins them on one line is dropped.
     assert not header.crumb_text().startswith(" ›")
     assert "Map 2" in header.crumb_text()

@@ -66,7 +66,7 @@ def _session(tmp_path: Path) -> Session:
     )
     return Session(
         id="sess-1",
-        name="Reference_Collection_B_20260319",
+        name="Srujan_20260319",
         path=tmp_path,
         kind=SessionKind.MULTIGRID,
         samples=[sample],
@@ -118,6 +118,39 @@ def test_every_tree_group_heading_resolves_to_a_tab() -> None:
 
     for tab_key, display in ENTITY_DISPLAY_LABELS.items():
         assert tab_key_for_display_label(display) == tab_key
+
+
+def test_warning_only_multigrid_sample_remains_inspectable(tmp_path: Path) -> None:
+    window = _window(tmp_path)
+    sample = Sample(
+        id="warning-only",
+        name="Sample2",
+        path=tmp_path / "Sample2",
+        warnings=["Could not list SearchMaps folder: permission denied"],
+    )
+    session = Session(
+        id="warning-session",
+        name="Warning session",
+        path=tmp_path,
+        kind=SessionKind.MULTIGRID,
+        samples=[sample],
+    )
+
+    assert window._display_samples(session) == [sample]
+
+
+def test_clearing_project_filter_restores_prior_expansion_state(tmp_path: Path) -> None:
+    window = _window(tmp_path)
+    item = _item_for(window, lambda value: isinstance(value, BatchPosition))
+    assert item is not None and item.parent() is not None
+    branch = item.parent()
+    branch.setExpanded(False)
+
+    window._filter_project_tree("Position 1")
+    assert branch.isExpanded()
+
+    window._filter_project_tree("")
+    assert not branch.isExpanded()
 
 
 @pytest.mark.parametrize("heading", ["Overviews", "Search maps", "Search tiles", "Batch positions", "Tilt series"])

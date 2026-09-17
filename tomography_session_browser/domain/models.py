@@ -37,6 +37,11 @@ class MrcMetadata:
     parser_version: str | None = None
     warnings: list[str] = field(default_factory=list)
 
+    # Parser-observed payload evidence, separate from the declared NZ and MDOC.
+    # None keeps synthetic/legacy metadata and unreadable headers distinguishable.
+    available_frames: int | None = None
+    data_complete: bool | None = None
+
 
 @dataclass(slots=True)
 class MdocSection:

@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from tomography_session_browser.domain.models import TiltSeries
+from tomography_session_browser.services.tilt_angle_service import plausible_tilt_angles
 
 LOGGER = logging.getLogger(__name__)
 
@@ -127,6 +128,10 @@ def validate_tilt_series(
     )
 
     status, reason = _classify(actual, expected)
+    metadata = tilt_series.mrc_metadata
+    if metadata is not None and metadata.data_complete is False and status == STATUS_COMPLETE:
+        status = STATUS_INCOMPLETE if metadata.available_frames is not None else STATUS_UNKNOWN
+        reason = "MRC image data is incomplete or unreadable; MDOC records cannot establish stack completeness."
 
     result = TiltSeriesValidation(
         tilt_series_id=tilt_series.id,
@@ -207,16 +212,18 @@ def summarise_validations(validations: Iterable[TiltSeriesValidation]) -> dict[s
 def actual_tilt_count(tilt_series: TiltSeries) -> int:
     """Return the number of tilt images we believe are actually present.
 
-    Prefers the parsed mdoc sections (the most reliable source — they are
-    the per-image records the microscope wrote). Falls back to the MRC
-    ``nz`` (number of Z slices) if the mdoc is missing.
+    Prefer parser-observed image payload, then declared stack depth. MDOC
+    records are a fallback only: their presence does not prove images exist.
     """
 
+    metadata = getattr(tilt_series, "mrc_metadata", None)
+    if metadata is not None:
+        if metadata.available_frames is not None:
+            return max(0, metadata.available_frames)
+        if metadata.nz is not None and metadata.nz > 0:
+            return int(metadata.nz)
     if tilt_series.sections:
         return len(tilt_series.sections)
-    metadata = getattr(tilt_series, "mrc_metadata", None)
-    if metadata is not None and metadata.nz:
-        return int(metadata.nz)
     return 0
 
 
@@ -343,7 +350,7 @@ def _observed_from_mdoc(
     tilt_series: TiltSeries,
 ) -> tuple[float | None, float | None, float | None]:
     angles = _mdoc_tilt_angles(tilt_series)
-    if not angles:
+    if not plausible_tilt_angles(angles):
         return None, None, None
     if len(angles) < 2:
         return angles[0], angles[0], None
@@ -358,7 +365,7 @@ def _observed_from_mrc(
     if metadata is None:
         return None, None, None
     angles = list(getattr(metadata, "tilt_angles", []) or [])
-    if not angles:
+    if not plausible_tilt_angles(angles):
         return None, None, None
     if len(angles) < 2:
         return angles[0], angles[0], None

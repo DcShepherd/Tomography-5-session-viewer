@@ -74,6 +74,23 @@ def test_report_scope_atlas_only_does_not_add_collections() -> None:
     assert describe_report_scope(scope) == "Report will include 1 Atlas session"
 
 
+def test_explicit_atlas_selection_is_not_relabelled_as_supporting_context() -> None:
+    atlas, first, _second, _standalone = _project_sessions()
+    groups = build_project_tree_groups([atlas, first])
+
+    scope = normalise_report_scope(
+        [atlas, first],
+        groups,
+        ReportScopeRequest(
+            group_keys=frozenset(),
+            session_keys=frozenset({session_key(atlas), session_key(first)}),
+        ),
+    )
+
+    assert session_key(atlas) not in scope.supporting_session_keys
+    assert describe_report_scope(scope).endswith("1 Atlas session")
+
+
 def test_report_scope_can_filter_multigrid_session_to_selected_samples() -> None:
     atlas, collection, _second, _standalone = _project_sessions()
     collection.samples.append(

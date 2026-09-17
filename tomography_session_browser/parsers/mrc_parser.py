@@ -313,7 +313,12 @@ def read_mrc_metadata(path: Path) -> MrcMetadata:
             size_bytes = path.stat().st_size
         except OSError:
             size_bytes = 0
-        return MrcMetadata(path=path, size_bytes=size_bytes, warnings=[str(exc)])
+        return MrcMetadata(path=path, size_bytes=size_bytes, warnings=[str(exc)], data_complete=False)
+    frame_bytes = inspection.nx * inspection.ny * inspection.dtype.itemsize
+    available_frames = min(
+        inspection.nz,
+        max(0, inspection.size_bytes - inspection.data_offset) // frame_bytes,
+    )
     return MrcMetadata(
         path=path,
         size_bytes=inspection.size_bytes,
@@ -331,6 +336,8 @@ def read_mrc_metadata(path: Path) -> MrcMetadata:
         parser_name=inspection.parsed_metadata.parser_name if inspection.parsed_metadata is not None else None,
         parser_version=inspection.parsed_metadata.parser_version if inspection.parsed_metadata is not None else None,
         warnings=list(inspection.warnings),
+        available_frames=available_frames,
+        data_complete=available_frames == inspection.nz,
     )
 
 

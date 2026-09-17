@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QFrame,
@@ -62,22 +62,23 @@ _PATH_KEY_HINTS = (
 _LABEL_ALIASES = {
     "Automatic name": "Auto name",
     "Loaded sessions": "Sessions",
-    "Linked data collections": "Linked data collections",
+    "Batch positions": "Batch targets",
+    "Linked data collections": "Collections",
     "Data collection magnification": "Magnification",
     "Pixel size (Original)": "Pixel size",
     "Date of data collection": "Date",
     "Total data collection time": "Duration",
     "Tile metadata files": "Tile metadata",
-    "Linked batch positions": "Linked batch positions",
+    "Linked batch positions": "Linked targets",
     "Linked tilt series": "Linked tilt series",
+    "Acquisition spot size": "Spot size",
+    "Expected source": "Count source",
+    "Number of frames": "Frames",
 }
-_KEY_COLUMN_MIN_WIDTH = 78
-# Widened from 112. At the old cap roughly a third of rows wrapped onto two
-# lines ("Acquisition spot size:", "Linked data collections:", "Expected
-# source:") while the value column beside them sat half empty. 152px clears
-# every alias in ``_LABEL_ALIASES`` at 9pt on one line and still leaves the
-# panel's default ~340px width usable for values.
-_KEY_COLUMN_MAX_WIDTH = 152
+_KEY_COLUMN_MIN_WIDTH = 88
+_KEY_COLUMN_MAX_WIDTH = 240
+_KEY_COLUMN_VIEWPORT_FRACTION = 0.62
+_VALUE_COLUMN_MIN_WIDTH = 88
 _PROVENANCE_TOOLTIP_KEYS = {
     "Detector",
     "Search spot size",
@@ -257,6 +258,7 @@ class MetadataPanel(QWidget):
         self._scroll = QScrollArea(self)
         self._scroll.setObjectName("metadataScroll")
         self._scroll.viewport().setObjectName("metadataViewport")
+        self._scroll.viewport().installEventFilter(self)
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -315,6 +317,16 @@ class MetadataPanel(QWidget):
     def refresh_theme(self) -> None:
         for button in self.findChildren(QToolButton, "metaCopyButton"):
             button.setIcon(themed_icon("copy", size=14))
+        self._update_key_column_width()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        super().resizeEvent(event)
+        self._update_key_column_width()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt signature
+        if watched is self._scroll.viewport() and event.type() == QEvent.Type.Resize:
+            self._update_key_column_width()
+        return super().eventFilter(watched, event)
 
     # ----- legacy / Qt-style accessors --------------------------------------
     # The panel replaces a QLabel + QPlainTextEdit pair. Older callers expect
@@ -352,8 +364,35 @@ class MetadataPanel(QWidget):
         self._body_layout.insertWidget(self._body_layout.count() - 1, widget)
 
     def _finalize(self) -> None:
-        # Trigger a re-layout so newly added rows take their final size.
+        # Every row owns its own horizontal layout, so Qt cannot align their
+        # first columns for us. Derive one shared width from the rendered font
+        # and the current viewport before laying the body out.
+        self._update_key_column_width()
         self._body.adjustSize()
+
+    def _update_key_column_width(self) -> None:
+        labels = self.findChildren(QLabel, "metaKey")
+        if not labels:
+            return
+        viewport_width = self._scroll.viewport().width()
+        if viewport_width <= 0:
+            return
+
+        required = max(
+            label.fontMetrics().horizontalAdvance(label.text()) + 4
+            for label in labels
+        )
+        available = max(_KEY_COLUMN_MIN_WIDTH, viewport_width - _VALUE_COLUMN_MIN_WIDTH)
+        responsive_cap = max(
+            _KEY_COLUMN_MIN_WIDTH,
+            int(viewport_width * _KEY_COLUMN_VIEWPORT_FRACTION),
+        )
+        width = max(
+            _KEY_COLUMN_MIN_WIDTH,
+            min(required, available, responsive_cap, _KEY_COLUMN_MAX_WIDTH),
+        )
+        for label in labels:
+            label.setFixedWidth(width)
 
     def _signatures_match(self, specs: list[_RowSpec]) -> bool:
         if len(specs) != len(self._row_specs):

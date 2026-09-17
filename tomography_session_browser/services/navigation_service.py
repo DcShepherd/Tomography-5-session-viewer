@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
+from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.domain.models import Atlas, BatchPosition, Overview, SearchMap, SearchTile, TiltSeries
 from tomography_session_browser.services.batch_inference import inferred_batch_label_for_tilt
+from tomography_session_browser.services.item_status import planned_exposures_from_metadata
 from tomography_session_browser.services.tilt_series_validation import (
     STATUS_FAILED,
     validate_tilt_series,
@@ -70,6 +74,28 @@ class NavigationResolution:
     @property
     def unresolved(self) -> bool:
         return self.state == STATE_UNRESOLVED
+
+
+@dataclass(frozen=True, slots=True)
+class ExposureSelection:
+    """Display-only identity of one selected exposure area."""
+
+    batch_position_id: str
+    exposure_index: int | None
+    exposure_area_id: str | None
+    exposure_type: str
+    linked_tilt_series_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExposureTiltSeriesResolution:
+    """Conservative exposure-to-tilt navigation result."""
+
+    exposure: ExposureSelection | None
+    tilt_series: TiltSeries | None
+    tooltip: str
+    ambiguous: bool = False
+    resolution: NavigationResolution = field(default_factory=NavigationResolution)
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +374,288 @@ def _classify(
             explanation=f"{ambiguous_prefix}: {names}.",
         )
     return _unresolved(provenance=provenance, explanation=unresolved_explanation)
+
+
+# ---------------------------------------------------------------------------
+# Exposure-area relationships
+# ---------------------------------------------------------------------------
+
+
+def resolve_exposure_tilt_series(
+    marker: ImageMarker,
+    *,
+    batch: BatchPosition,
+    tilt_series: Iterable[TiltSeries],
+) -> ExposureTiltSeriesResolution:
+    """Resolve an exposure marker to one tilt series without guessing.
+
+    Explicit IDs, expected acquisition names, reciprocal batch links, and the
+    recorded batch order are evaluated here so mouse, keyboard, and button
+    paths share one decision. Conflicting explicit IDs are an ambiguity even
+    if one happens to name an object currently in scope.
+    """
+
+    unavailable = "No tilt series is associated with the selected exposure area."
+    if marker.marker_type not in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}:
+        resolution = _unresolved(provenance="marker.marker_type", explanation=unavailable)
+        return ExposureTiltSeriesResolution(None, None, unavailable, resolution=resolution)
+
+    exposure = exposure_selection(marker, batch)
+    candidates = tuple(tilt_series)
+    explicit_ids = _explicit_tilt_ids(marker)
+    if len(explicit_ids) > 1:
+        explanation = (
+            "Exposure metadata is ambiguous and names multiple tilt series: "
+            + ", ".join(explicit_ids)
+            + "."
+        )
+        resolution = NavigationResolution(
+            candidate_ids=explicit_ids,
+            state=STATE_AMBIGUOUS,
+            explanation=explanation,
+            provenance="marker.explicit_tilt_series_id",
+        )
+        return ExposureTiltSeriesResolution(exposure, None, explanation, True, resolution)
+    if explicit_ids:
+        explicit = _classify(
+            (tilt for tilt in candidates if tilt.id == explicit_ids[0]),
+            provenance="marker.explicit_tilt_series_id",
+            navigable_explanation="Resolved from the exposure marker's explicit tilt-series ID.",
+            ambiguous_prefix="Ambiguous exposure tilt-series ID matches multiple records",
+            unresolved_explanation=unavailable,
+        )
+        if explicit.ambiguous:
+            return ExposureTiltSeriesResolution(exposure, None, explicit.explanation, True, explicit)
+        if explicit.navigable:
+            selected = replace(exposure, linked_tilt_series_id=explicit.target.id)
+            return ExposureTiltSeriesResolution(
+                selected,
+                explicit.target,
+                "Jump to the tilt series associated with this exposure area.",
+                resolution=explicit,
+            )
+
+    linked_ids = set(batch.linked_tilt_series_ids or ())
+    linked = tuple(
+        tilt
+        for tilt in candidates
+        if tilt.id in linked_ids or tilt.linked_batch_position_id == batch.id
+    )
+    pool = linked or candidates
+    if not pool:
+        resolution = _unresolved(provenance="batch.linked_tilt_series_ids", explanation=unavailable)
+        return ExposureTiltSeriesResolution(exposure, None, unavailable, resolution=resolution)
+
+    expected_keys = expected_tilt_keys_for_exposure(batch, exposure)
+    if expected_keys:
+        linked_matches = tuple(
+            tilt for tilt in linked if tilt_exposure_match_keys(tilt).intersection(expected_keys)
+        )
+        if linked_matches:
+            return _exposure_result_from_candidates(exposure, linked_matches, "exposure.expected_name+batch_link")
+        name_matches = tuple(
+            tilt for tilt in candidates if tilt_exposure_match_keys(tilt).intersection(expected_keys)
+        )
+        if name_matches:
+            return _exposure_result_from_candidates(exposure, name_matches, "exposure.expected_name")
+
+    marker_key = marker_exposure_match_key(marker)
+    if marker_key:
+        exact = tuple(
+            tilt for tilt in pool if marker_key in tilt_exposure_match_keys(tilt)
+        )
+        if exact:
+            return _exposure_result_from_candidates(exposure, exact, "exposure.marker_name")
+
+    ordered = _linked_tilts_in_batch_order(batch, linked)
+    planned = planned_exposures_from_metadata(batch.metadata)
+    complete_order = (
+        planned > 0
+        and len(ordered) == planned
+        and len(set(batch.linked_tilt_series_ids)) == len(batch.linked_tilt_series_ids) == planned
+        and {tilt.id for tilt in ordered} == set(batch.linked_tilt_series_ids)
+    )
+    if complete_order:
+        batch_key = normalise_exposure_key(batch.name or batch.id)
+        for index, tilt in enumerate(ordered):
+            keys = tilt_exposure_match_keys(tilt)
+            recorded_slot_keys = {key for key in keys if key == batch_key or re.fullmatch(re.escape(batch_key) + r"_\d+", key)}
+            expected_key = batch_key if index == 0 else f"{batch_key}_{index + 1}"
+            if recorded_slot_keys and recorded_slot_keys != {expected_key}:
+                complete_order = False
+                break
+    if complete_order and exposure.exposure_index is not None and 0 <= exposure.exposure_index < len(ordered):
+        return _exposure_result_from_candidates(
+            exposure,
+            (ordered[exposure.exposure_index],),
+            "batch.linked_tilt_series_ids+exposure_index",
+        )
+    if exposure.exposure_index in (None, 0) and planned == 1 and len(linked) == 1:
+        return _exposure_result_from_candidates(exposure, linked, "single_tilt_candidate")
+    # A partial list contains acquisitions, not exposure slots. Neither its
+    # ordinal positions nor a sole unrelated candidate establish this link.
+    resolution = _unresolved(provenance="exposure.missing_slot", explanation=unavailable)
+    return ExposureTiltSeriesResolution(exposure, None, unavailable, resolution=resolution)
+
+
+def exposure_selection(marker: ImageMarker, batch: BatchPosition) -> ExposureSelection:
+    index = exposure_index_for_marker(marker, batch)
+    exposure_type = str(
+        marker.metadata.get("exposure_type")
+        or ("main" if index == 0 else "additional")
+    )
+    return ExposureSelection(
+        batch_position_id=batch.id,
+        exposure_index=index,
+        exposure_area_id=str(marker.metadata.get("exposure_marker_id") or marker.id),
+        exposure_type=exposure_type,
+    )
+
+
+def exposure_index_for_marker(marker: ImageMarker, batch: BatchPosition) -> int | None:
+    raw_index = marker.metadata.get("exposure_index")
+    try:
+        if raw_index is not None:
+            return int(raw_index)
+    except (TypeError, ValueError):
+        pass
+    area_name = str(marker.metadata.get("area_name") or _raw_marker_name(marker) or "").strip()
+    if area_name.casefold() == "exposure":
+        return 0
+    match = re.fullmatch(r"exposure\s*(\d+)", area_name, flags=re.IGNORECASE)
+    if match:
+        return max(0, int(match.group(1)) - 1)
+    batch_key = normalise_exposure_key(batch.name or batch.id)
+    marker_key = marker_exposure_match_key(marker)
+    if marker_key and batch_key:
+        if marker_key == batch_key:
+            return 0
+        suffix = marker_key.removeprefix(f"{batch_key}_")
+        if suffix != marker_key and suffix.isdigit():
+            return max(0, int(suffix) - 1)
+    return None
+
+
+def expected_tilt_keys_for_exposure(
+    batch: BatchPosition,
+    exposure: ExposureSelection,
+) -> set[str]:
+    batch_key = normalise_exposure_key(batch.name or batch.id)
+    if not batch_key or exposure.exposure_index is None:
+        return set()
+    if exposure.exposure_index == 0:
+        return {batch_key}
+    return {f"{batch_key}_{exposure.exposure_index + 1}"}
+
+
+def tilt_exposure_match_keys(tilt: TiltSeries) -> set[str]:
+    raw_values = {
+        tilt.name,
+        tilt.id,
+        Path(tilt.id).stem,
+        tilt.mrc_path.stem if tilt.mrc_path is not None else None,
+    }
+    return {key for value in raw_values if (key := normalise_exposure_key(value))}
+
+
+def marker_exposure_match_key(marker: ImageMarker) -> str:
+    raw_values = (
+        marker.metadata.get("linked_area_name"),
+        marker.metadata.get("area_name"),
+        _raw_marker_name(marker),
+        marker.label,
+        marker.id.rsplit(":", 1)[-1] if marker.id else None,
+    )
+    for value in raw_values:
+        key = normalise_exposure_key(value)
+        if key and key != "exposure":
+            return key
+    return normalise_exposure_key(marker.metadata.get("area_name") or _raw_marker_name(marker))
+
+
+def normalise_exposure_key(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = text.replace("\\", "/").split("/")[-1].split(":")[-1]
+    for suffix in (".mrc", ".mdoc", ".xml", ".jpg", ".jpeg", ".png", ".tif", ".tiff"):
+        if text.lower().endswith(suffix):
+            text = text[: -len(suffix)]
+            break
+    return text.strip().casefold()
+
+
+def _explicit_tilt_ids(marker: ImageMarker) -> tuple[str, ...]:
+    keys = (
+        "tilt_series_id",
+        "TiltSeriesId",
+        "TiltSeriesID",
+        "linked_tilt_series_id",
+        "LinkedTiltSeriesId",
+    )
+    metadata = marker.metadata or {}
+    raw = metadata.get("raw")
+    values = [metadata.get(key) for key in keys]
+    if isinstance(raw, dict):
+        values.extend(raw.get(key) for key in keys)
+    return tuple(dict.fromkeys(str(value) for value in values if value))
+
+
+def _exposure_result_from_candidates(
+    exposure: ExposureSelection,
+    candidates: Iterable[TiltSeries],
+    provenance: str,
+) -> ExposureTiltSeriesResolution:
+    resolution = _classify(
+        candidates,
+        provenance=provenance,
+        navigable_explanation="Resolved the selected exposure area to one tilt series.",
+        ambiguous_prefix="Multiple tilt series candidates remain for this exposure area",
+        unresolved_explanation="No tilt series is associated with the selected exposure area.",
+    )
+    if resolution.navigable:
+        selected = replace(exposure, linked_tilt_series_id=resolution.target.id)
+        return ExposureTiltSeriesResolution(
+            selected,
+            resolution.target,
+            "Jump to the tilt series associated with this exposure area.",
+            resolution=resolution,
+        )
+    return ExposureTiltSeriesResolution(
+        exposure,
+        None,
+        resolution.explanation,
+        resolution.ambiguous,
+        resolution,
+    )
+
+
+def _linked_tilts_in_batch_order(
+    batch: BatchPosition,
+    candidates: Iterable[TiltSeries],
+) -> tuple[TiltSeries, ...]:
+    order = {tilt_id: index for index, tilt_id in enumerate(batch.linked_tilt_series_ids or ())}
+    return tuple(
+        sorted(
+            candidates,
+            key=lambda tilt: (
+                order.get(tilt.id, 10**9),
+                _natural_key(tilt.name or tilt.id),
+            ),
+        )
+    )
+
+
+def _raw_marker_name(marker: ImageMarker) -> str | None:
+    raw = marker.metadata.get("raw") if marker.metadata else None
+    if isinstance(raw, dict):
+        value = raw.get("Name")
+        return str(value) if value is not None else None
+    return None
+
+
+def _natural_key(value: str) -> list[int | str]:
+    return [int(part) if part.isdigit() else part.casefold() for part in re.split(r"(\d+)", value)]
 
 
 # ---------------------------------------------------------------------------

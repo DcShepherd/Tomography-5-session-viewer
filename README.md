@@ -1,115 +1,98 @@
 # Tomography Session Browser
 
-Tomography Session Browser is a desktop application for reviewing **Thermo Fisher Tomography 5** session folders. It brings atlas screening and data collection sessions into one workspace, shows acquisition images and metadata, highlights incomplete or failed tilt series, and exports scoped PDF reports.
+Tomography Session Browser is a desktop application for Thermo Fisher Tomography 5 session folders. Use it to review session images and metadata. Use it to find incomplete or failed tilt series. Create scoped PDF reports.
 
-This app was vibecoded using a combination of Codex and Claude Code. 
+The application is read-only. It does not edit, repair, rename, move, or normalise files in microscope-output folders.
 
-The application is **read-only**. It does not edit, repair, rename, move, or normalise files in your microscope output folders.
-
-## Platform support
-
-The application runs on:
+## Supported platforms
 
 | Operating system | Recommended terminal |
 |---|---|
 | Windows | PowerShell, Miniforge Prompt, or Anaconda Prompt |
 | Linux | Bash |
-| macOS (formerly OS X) | Terminal using Zsh or Bash |
+| macOS | Terminal with Zsh or Bash |
 
-Python and the application dependencies are installed in an isolated Conda environment, so you do not need to change your system Python.
+The installation uses an isolated Conda environment. It does not change the system Python installation.
 
-## Before you begin
+## Before you start
 
 You need:
 
 - A 64-bit Windows, Linux, or macOS computer with a graphical desktop.
-- [Git](https://git-scm.com/downloads), unless you download the repository as a ZIP file.
-- A Conda-compatible installer. [Miniforge, Miniconda, and Anaconda installation options are described in the official Conda guide](https://docs.conda.io/projects/conda/en/stable/user-guide/install/).
-- An original Thermo Fisher Tomography 5 atlas screening or data collection session folder.
+- [Git](https://git-scm.com/downloads), unless you download a ZIP archive.
+- A Conda-compatible installer. See the [Conda installation guide](https://docs.conda.io/projects/conda/en/stable/user-guide/install/).
+- An original Thermo Fisher Tomography 5 atlas-screening or data-collection session folder.
 
-If you are new to Conda, install it, close and reopen your terminal, and confirm that this command works:
+If you are new to Conda, install it. Then close and reopen the terminal. Run this command to confirm that Conda is available:
 
-```text
+~~~text
 conda --version
-```
+~~~
 
-## Install and launch
+## Install and start the application
 
 ### Windows PowerShell
 
-On the repository page, select **Code**, copy the HTTPS URL, open PowerShell, and run:
+Copy the HTTPS repository URL. Open PowerShell. Then run:
 
-```powershell
+~~~powershell
 git clone PASTE_REPOSITORY_URL_HERE
 Set-Location Tomography-5-session-viewer
 conda env create -f environment.yml
 conda activate tomoapp_session
 python -m pip install -e .
 tomo_session_viewer
-```
+~~~
 
-### Linux Bash
+### Linux or macOS
 
-On the repository page, select **Code**, copy the HTTPS URL, open a terminal, and run:
+Copy the HTTPS repository URL. Open a terminal. Then run:
 
-```bash
+~~~bash
 git clone PASTE_REPOSITORY_URL_HERE
 cd Tomography-5-session-viewer
 conda env create -f environment.yml
 conda activate tomoapp_session
 python -m pip install -e .
 tomo_session_viewer
-```
+~~~
 
-### macOS Terminal
+If you downloaded a ZIP archive, extract it. Open a terminal in the extracted folder that contains environment.yml. Start with the conda env create command above.
 
-On the repository page, select **Code** and copy the HTTPS URL. These commands work in the default Zsh shell and in Bash:
+Use this alternative start command when required:
 
-```bash
-git clone PASTE_REPOSITORY_URL_HERE
-cd Tomography-5-session-viewer
-conda env create -f environment.yml
-conda activate tomoapp_session
-python -m pip install -e .
-tomo_session_viewer
-```
-
-If you downloaded a ZIP instead of using Git, extract it, open a terminal in the extracted folder containing `environment.yml`, and begin with `conda env create -f environment.yml`.
-
-The alternative launch command is:
-
-```text
+~~~text
 python -m tomography_session_browser.main
-```
+~~~
 
-## Keep the original Tomography 5 folder structure
+## Keep the session folder unchanged
 
 > [!IMPORTANT]
-> Select a **whole session folder**, not an individual `.dm`, `.mrc`, `.mdoc`, XML, image, `Atlas`, `Batch`, `SearchMap_*`, or `Sample1` subfolder. Do not rename files or folders, change capitalisation, flatten the directory tree, or move individual files out of it. Copying a complete session for review is fine as long as everything inside the copied session remains unchanged.
+> Select a complete session folder. Do not select a .dm, .mrc, .mdoc, XML, image, Atlas, Batch, SearchMap_*, or Sample1 item. Do not rename files or folders. Do not change letter case. Do not flatten the folder tree. Do not move files from the session folder. Copy a complete session folder for review only when its contents stay unchanged.
 
-The application recognises original Tomography 5 names and uses recorded paths to link atlas and data collection sessions. Renaming or rearranging them can cause missing images, empty tabs, or unresolved atlas links. Exact capitalisation is particularly important on Linux and on case-sensitive macOS filesystems.
+The application uses original Tomography 5 names and recorded paths. A changed name or path can cause missing images, empty tabs, or unresolved atlas links. Letter case is important on Linux and on case-sensitive macOS file systems.
 
-### Typical atlas screening session
+### Atlas-screening session
 
-The folder selected in the **Atlas session** field is the top folder containing `ScreeningSession.dm`:
+Select the top folder that contains ScreeningSession.dm:
 
-```text
+~~~text
 Atlas_Screening_Session/          <- select this folder
 ├── ScreeningSession.dm
-├── Sample1/                      <- Sample1 or Sample-1 style names
+├── Sample1/                      <- Sample1 or Sample-1 names
 │   ├── Sample.dm
 │   └── Atlas/
 │       ├── Atlas.dm
 │       ├── Atlas_*.mrc or Atlas_*.jpg
 │       └── Tile_* files
 └── ...other original Tomography 5 files
-```
+~~~
 
-### Typical multi-grid data collection session
+### Multi-grid data-collection session
 
-The folder selected in the **Data collection session** field is the top folder containing `Session.dm` and the original sample folders:
+Select the top folder that contains Session.dm and the original sample folders:
 
-```text
+~~~text
 Data_Collection_Session/          <- select this folder
 ├── Session.dm
 ├── Sample1/
@@ -122,182 +105,160 @@ Data_Collection_Session/          <- select this folder
 │   ├── Batch/
 │   │   ├── BatchPositionsList.xml
 │   │   └── *_Search.mrc, *_Tracking.mrc, and *_Exposure.mrc
-│   └── matching tilt-series `.mrc` and `.mdoc` files
+│   └── matching tilt-series .mrc and .mdoc files
 ├── Sample2/
 └── ...other original Tomography 5 files
-```
+~~~
 
-Single-collection exports can place `Session.dm`, `SearchMaps`, `Batch`, and matching tilt-series files directly in their top-level session folder. Select that original top-level folder.
+Some single-collection exports put Session.dm, SearchMaps, Batch, and tilt-series files in the top session folder. Select that folder.
 
-The examples above show the names used for discovery; real sessions may contain more files and may be incomplete. The browser tries to load partial sessions and reports recoverable problems as warnings.
+The application loads partial sessions. It reports recoverable problems as warnings.
 
-## First review: step by step
+## Review a session
 
-All screenshots below were generated by the real application using **synthetic dummy data**. They contain no microscope or research data.
+The screenshots use synthetic data. They contain no microscope or research data.
 
-### 1. Open one or two session folders
+### 1. Open session folders
 
-Launch the application and select **Open folder**. You may provide an atlas screening session, a data collection session, or both. Use **Browse folder...** and choose each whole session folder. When both are supplied, the application links them only when the recorded metadata supports the relationship.
+Start the application. Select **Open folder**. Add an atlas-screening session, a data-collection session, or both. Select **Browse folder...**. Then select each complete session folder.
 
-![Select the complete atlas and data collection session folders](docs/images/readme/01-select-session-folders.png)
+The application links two sessions only when their recorded metadata supports the link. Use **Import folder** to add another related session. Imported folders are also read-only.
 
-If you later need to add another related session, use **Import folder**. Imported folders are also read-only.
+![Select complete session folders](docs/images/readme/01-select-session-folders.png)
 
-### 2. Check the project tree and Session dashboard
+### 2. Check the project tree and dashboard
 
-After loading finishes, the left project tree shows the available project scope and the Session tab summarises atlases, overviews, search maps, batch positions, tilt series, acquisition timing, and warnings.
+Wait for loading to finish. The project tree shows the available review scope. The Session tab shows atlases, overviews, search maps, batch positions, tilt series, acquisition time, and warnings.
 
-![Linked-session dashboard rendered from synthetic dummy data](docs/images/readme/02-linked-session-dashboard.png)
-
-Project badges mean:
+![Linked-session dashboard with synthetic data](docs/images/readme/02-linked-session-dashboard.png)
 
 | Badge | Meaning |
 |---|---|
-| `LS` | Linked atlas and data collection session |
-| `AT` | Atlas-only session |
-| `DC` | Data collection session |
-| `!` | Atlas link is unresolved or ambiguous; inspect the warning instead of assuming a link |
+| LS | Linked atlas and data-collection session |
+| AT | Atlas-only session |
+| DC | Data-collection session |
+| ! | Unresolved or ambiguous atlas link. Read the warning. |
 
-### 3. Review images, status, metadata, and links
+### 3. Review images and metadata
 
-Use the **Atlas**, **Overview**, **Search map**, **Search**, **Batch position**, and **Tilt series** tabs. Select an item from the list to inspect its image, overlays, status, metadata, and available cross-tab navigation. Counts in the tab titles follow the selected project, session, or sample scope.
+Use the **Atlas**, **Overview**, **Search map**, **Search**, **Batch position**, and **Tilt series** tabs. Select an item to inspect its image, overlays, status, metadata, and available navigation. Tab counts match the selected project, session, or sample scope.
 
-![Search-map review using a generated synthetic preview](docs/images/readme/03-search-map-review.png)
+![Search-map review with synthetic data](docs/images/readme/03-search-map-review.png)
 
-Warnings and failed or incomplete status labels are expected when source data or links are missing. The browser shows unresolved information rather than inventing a scientific relationship.
+Warnings and failed or incomplete labels are valid findings when data or links are missing. The application shows unresolved information. It does not create a scientific link.
 
-The Atlas overlay uses zoom-dependent batch-position clustering. At a fitted
-whole-grid view, nearby batches appear as counted status clusters. Zooming in
-dissolves clusters into short numeric batch IDs; search-map footprints and tile
-grids appear only when they are large enough to read. Select a batch marker to
-inspect its status and metadata; double-click it to open an unambiguous linked
-Overview. When a cluster remains coincident at maximum zoom, select an
-individual popup row to open its unambiguous linked Search map. Unresolved or
-ambiguous links remain visible with an explanation. The **Overlays** panel
-controls clustering, labels, tile grids, marker-legend visibility, and the
-default-off per-exposure detail layer. When the linked project node is
-selected, its collapsed **Data collections** section controls batch-position
-visibility for each collection session independently. Selecting a specific
-data-collection node instead scopes Atlas batch markers to that session
-automatically. The scale bar uses readable snapped physical distances while
-retaining the compact overlay style.
+At a whole-grid Atlas view, nearby batch positions appear as counted clusters. Zoom in to show short batch IDs. Search-map footprints and tile grids appear only when they are readable. Select a batch marker to inspect it. Double-click a marker to open its one verified linked Overview. If several targets exist, the application does not navigate. It explains the reason.
 
-In Overview and Search-map images, middle-click or Shift-click an exposure area
-to highlight every exposure area linked to the same batch position. Left-click
-an empty part of the image, right-click the image, or press Escape to clear
-marker selections and linked-exposure highlights.
+Use the **Overlays** panel to control clusters, labels, tile grids, the marker legend, and the per-exposure detail layer. The detail layer is off by default. At a linked project node, use **Data collections** to control markers for each collection. Selecting one data-collection node limits Atlas batch markers to that collection.
 
-Use the export button above the zoom strip, or press **Ctrl+S**, to preview and
-save a high-resolution PNG of the current image crop and zoom. Visible markers,
-highlights, the scale bar, and the optional Atlas marker legend are rendered
-into the PNG; viewer controls and the pixel-size badge are not included.
+In an Overview or Search-map image, middle-click or Shift-click an exposure area to highlight all exposure areas from the same batch position. Left-click an empty area, right-click the image, or press Escape to clear the highlight.
 
-### 4. Generate a scoped PDF report
+Use the export button above the zoom control, or press **Ctrl+S**, to save the current crop as a high-resolution PNG. The PNG includes visible markers, highlights, the scale bar, and the optional Atlas marker legend. It excludes viewer controls and the pixel-size badge.
 
-Select **Report**, choose the linked group, session, or individual data collection samples to include, and then select **Generate report**. Supporting atlas context is included once where required.
+### 4. Create a PDF report
 
-![Choose linked sessions or samples for a PDF report](docs/images/readme/04-report-scope.png)
+Select **Report**. Select a linked group, a session, or data-collection samples. Then select **Generate report**. The report includes supporting Atlas context once when it is needed.
 
-## Updating an existing installation
+![Select report scope](docs/images/readme/04-report-scope.png)
 
-Open a terminal in the repository folder and run:
+## Update an installation
 
-```text
+Open a terminal in the repository folder. Run:
+
+~~~text
 git pull
 conda env update -n tomoapp_session -f environment.yml --prune
 conda activate tomoapp_session
 python -m pip install -e .
-```
+~~~
 
-If you installed from a ZIP, download and extract the new version, then run the last three commands from the new folder.
+If you installed from a ZIP archive, download and extract the new version. Then run the last three commands in the new folder.
 
 ## Troubleshooting
 
-### `conda` is not recognised or says `command not found`
+### conda is not recognised
 
-Close and reopen the terminal after installing Conda. On Windows, try the Miniforge Prompt or Anaconda Prompt. On Linux or macOS, initialise the shell once and then reopen it:
+Close and reopen the terminal after you install Conda. On Windows, use the Miniforge Prompt or Anaconda Prompt. On Linux or macOS, initialise the shell once. Then reopen the terminal:
 
-```text
+~~~text
 conda init
-```
+~~~
 
 ### The environment already exists
 
-Update it instead of creating it again:
+Update the environment:
 
-```text
+~~~text
 conda env update -n tomoapp_session -f environment.yml --prune
 conda activate tomoapp_session
 python -m pip install -e .
-```
+~~~
 
-### `tomo_session_viewer` is not recognised
+### tomo_session_viewer is not recognised
 
-Make sure the environment is active, then reinstall the entry point from the repository root:
+Activate the environment. Reinstall the application from the repository root:
 
-```text
+~~~text
 conda activate tomoapp_session
 python -m pip install -e .
 python -m tomography_session_browser.main
-```
+~~~
 
-### The folder is rejected or the tabs are empty
+### The folder is rejected or tabs are empty
 
-- Confirm that you selected the whole session folder, not `Session.dm`, `ScreeningSession.dm`, `Atlas`, `Batch`, `SearchMaps`, `SearchMap_*`, or a single MRC file.
-- Confirm that original names, capitalisation, and folder nesting have not changed.
-- For atlas screening, confirm the selected root contains `ScreeningSession.dm`.
-- For multi-grid data collection, confirm the selected root contains `Session.dm` and `Sample1` or `Sample-1` style folders.
-- Read any warning shown by the application. Partial acquisition data may load with missing previews or unresolved links.
+- Confirm that you selected a complete session folder.
+- Do not select Session.dm, ScreeningSession.dm, Atlas, Batch, SearchMaps, SearchMap_*, or one MRC file.
+- Confirm that the original names, letter case, and folder nesting are unchanged.
+- For atlas screening, confirm that the selected folder contains ScreeningSession.dm.
+- For multi-grid collection, confirm that the selected folder contains Session.dm and sample folders.
+- Read each application warning. A partial acquisition can include missing previews or unresolved links.
 
-### Linux reports a Qt platform plugin error
+### Linux reports a Qt platform-plugin error
 
-The application needs a graphical desktop session. Run it from a desktop terminal rather than a headless SSH session. Linux desktop library names vary by distribution; use your distribution's Qt/PySide guidance if the error identifies a missing system library.
+Run the application in a graphical desktop session. Do not use a headless SSH session. If the error names a missing library, use the Qt or PySide guidance for your Linux distribution.
 
-### Settings cannot be saved
+### The application cannot save settings
 
-The application may log a warning if the user configuration directory is read-only. Session browsing and report generation can still work because source tomography folders are never used for settings storage.
+The application logs a warning when the user configuration folder is read-only. Continue to review sessions and create reports. The application does not use source tomography folders to store settings.
 
-## Advanced and developer use
+## Developer use
 
-The project uses Python 3.11, PySide6, Pillow, NumPy, ReportLab, and pytest. Editable installation keeps the launch command connected to the current working copy:
+The project uses Python 3.11, PySide6, Pillow, NumPy, ReportLab, and pytest. An editable installation keeps the start command connected to the current working copy:
 
-```text
+~~~text
 conda env create -f environment.yml
 conda activate tomoapp_session
 python -m pip install -e .
-```
+~~~
 
-Run the complete test suite:
+Run all tests:
 
-```text
+~~~text
 conda run -n tomoapp_session python -m pytest --basetemp .pytest_tmp
-```
+~~~
 
-Run a syntax/import compile check:
+Run a compile check:
 
-```text
+~~~text
 conda run -n tomoapp_session python -m compileall tomography_session_browser tests tools
-```
+~~~
 
-Regenerate the public README screenshots from synthetic data:
+Create public README screenshots with synthetic data:
 
-```text
+~~~text
 conda run -n tomoapp_session python tools/generate_readme_screenshots.py
-```
+~~~
 
-For UI or report changes, also launch the application, open a known non-sensitive session, inspect the affected scopes and tabs, and generate a scoped PDF where practical. Never commit microscope session data or screenshots containing sensitive project data.
+For a UI or report change, start the application. Open a non-sensitive session. Check the changed scopes and tabs. Create a scoped PDF when practical. Do not commit microscope-session data or screenshots that contain sensitive data.
 
 ## Scope and data safety
 
-- Designed for Thermo Fisher Tomography 5 session layouts.
-- Reviews acquisition metadata and imagery; it is not a reconstruction pipeline.
-- Keeps parsed models and project grouping in memory.
-- Does not repair or write back to source session folders.
-- Preserves ambiguous or missing scientific associations as warnings instead of guessing.
+- Use this application with Thermo Fisher Tomography 5 session layouts.
+- Use it to review acquisition metadata and images. Do not use it for reconstruction.
+- The application keeps parsed models and project groups in memory.
+- The application does not repair or write to source session folders.
+- The application keeps ambiguous or missing scientific associations as warnings.
 
 ## License
 
-This project is available under the [MIT License](LICENSE). You may use, copy,
-modify, merge, publish, distribute, sublicense, or sell copies of the software,
-provided that the copyright and permission notice remain with copies or
-substantial portions of the software.
+This project uses the [MIT License](LICENSE).

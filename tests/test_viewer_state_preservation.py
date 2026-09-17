@@ -16,7 +16,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from tomography_session_browser.domain.enums import SessionKind
-from tomography_session_browser.domain.models import Overview, Sample, SearchMap, Session
+from tomography_session_browser.domain.models import Atlas, Overview, Sample, SearchMap, Session
 from tomography_session_browser.services.item_status import display_status_label
 from tomography_session_browser.ui.image_viewer import (
     LIST_STATUS_ROLE,
@@ -37,6 +37,8 @@ def _app() -> QApplication:
 
 
 def _session(tmp_path: Path) -> tuple[Session, Overview, SearchMap, SearchMap]:
+    atlas_path = tmp_path / "atlas.jpg"
+    atlas_path.write_bytes(b"image")
     overview = Overview(id="ov-1", name="Overview_1", image_path=tmp_path / "ov.jpg")
     map_1 = SearchMap(id="sm-1", name="Map 1", overview=overview)
     map_2 = SearchMap(id="sm-2", name="Map 2", overview=overview)
@@ -44,6 +46,7 @@ def _session(tmp_path: Path) -> tuple[Session, Overview, SearchMap, SearchMap]:
         id="sample-1",
         name="Sample1",
         path=tmp_path,
+        atlas=Atlas(id="atlas-1", image_path=atlas_path),
         overviews=[overview],
         search_maps=[map_1, map_2],
     )
@@ -107,6 +110,24 @@ def test_same_scope_navigation_does_not_rebuild_the_viewer_list(tmp_path: Path) 
 
     rows_after = [tab.list.topLevelItem(i) for i in range(tab.list.topLevelItemCount())]
     assert rows_after == rows_before
+
+
+def test_atlas_image_status_stays_available_after_same_item_refresh(tmp_path: Path) -> None:
+    """A status-less refresh must not replace known image availability with unknown."""
+
+    session, _overview, _map_1, _map_2 = _session(tmp_path)
+    window = _window(session)
+    tab = window._viewer_tabs["Atlas"]
+    row = tab.list.topLevelItem(0)
+
+    assert row.data(0, LIST_STATUS_ROLE) == "Available"
+
+    # Selecting an Atlas or linked-session node rebuilds the scope while the
+    # same Atlas objects remain in the tab, taking the refresh_providers path.
+    window._render_viewer_tabs()
+
+    assert tab.list.topLevelItem(0) is row
+    assert row.data(0, LIST_STATUS_ROLE) == "Available"
 
 
 def test_scope_change_still_rebuilds(tmp_path: Path) -> None:

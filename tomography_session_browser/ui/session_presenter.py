@@ -41,6 +41,11 @@ from tomography_session_browser.services.batch_inference import (
     inferred_batch_label_for_tilt,
 )
 from tomography_session_browser.services.marker_service import inferred_failed_tilt_ids_for_search_map
+from tomography_session_browser.services.item_status import (
+    BatchPositionStatusCounts,
+    batch_position_status_from_counts,
+    planned_exposures_from_metadata,
+)
 from tomography_session_browser.services.status_taxonomy import (
     WarningPresentation,
     build_warning_presentation,
@@ -473,21 +478,30 @@ def session_counts(session: Session) -> dict[str, int]:
     return counts
 
 
+def _entity_scope_warnings(value: Session | Sample, label: str, seen_entities: set[int]) -> list[str]:
+    """Collect descendant warnings once without changing parser wording."""
+    warnings: list[str] = []
+
+    def add_entity(label: str, entity: Any | None) -> None:
+        if entity is None or id(entity) in seen_entities:
+            return
+        seen_entities.add(id(entity))
+        warnings.extend(_prefix_warnings(label, getattr(entity, "warnings", ())))
+
+    add_entity(f"{label} / Atlas", value.atlas)
+    for attribute in ("overviews", "search_maps", "search_tiles", "batch_positions", "tilt_series"):
+        for entity in getattr(value, attribute):
+            add_entity(f"{label} / {entity.name or entity.id}", entity)
+    return warnings
+
+
 def session_warnings(session: Session) -> list[str]:
-    warnings = list(session.warnings)
+    warnings = _prefix_warnings(f"{session.name} / Session", session.warnings)
+    seen_entities: set[int] = set()
     for sample in session.samples:
-        warnings.extend(_prefix_warnings(sample.name, sample.warnings))
-        if sample.atlas:
-            warnings.extend(_prefix_warnings(f"{sample.name} / Atlas", sample.atlas.warnings))
-        for search_map in sample.search_maps:
-            warnings.extend(_prefix_warnings(f"{sample.name} / {search_map.name}", search_map.warnings))
-        for search_tile in sample.search_tiles:
-            warnings.extend(_prefix_warnings(f"{sample.name} / {search_tile.name}", search_tile.warnings))
-        for batch_position in sample.batch_positions:
-            label = batch_position.name or batch_position.id
-            warnings.extend(_prefix_warnings(f"{sample.name} / {label}", batch_position.warnings))
-        for tilt_series in sample.tilt_series:
-            warnings.extend(_prefix_warnings(f"{sample.name} / {tilt_series.name}", tilt_series.warnings))
+        warnings.extend(_prefix_warnings(f"{session.name} / {sample.name}", sample.warnings))
+        warnings.extend(_entity_scope_warnings(sample, sample.name, seen_entities))
+    warnings.extend(_entity_scope_warnings(session, session.name, seen_entities))
     return warnings
 
 
@@ -2221,8 +2235,12 @@ def session_dashboard_model(value: Any) -> DashboardModel:
     ]
     for label, destination, items, status_fn in card_specs:
         tiles: list[StatusTileModel] = []
-        if label == "Batch positions" and scope.is_sample_scope:
-            for row in batch_position_rows:
+        if label == "Batch positions":
+            # All scopes colour recorded batches from the same validated rows.
+            # Preserve the existing sample-only display of inferred orphan rows.
+            recorded_ids = {batch.id for batch in scope.batch_positions}
+            card_rows = [row for row in batch_position_rows if scope.is_sample_scope or row.id in recorded_ids]
+            for row in card_rows:
                 tiles.append(
                     StatusTileModel(
                         id=row.id,
@@ -2236,8 +2254,8 @@ def session_dashboard_model(value: Any) -> DashboardModel:
             cards.append(
                 StatCardModel(
                     label=label,
-                    value=len(batch_position_rows),
-                    sparkline=[],
+                    value=len(card_rows),
+                    sparkline=_scope_per_sample_counts(scope, label) if len(scope.sample_groups) > 1 else [],
                     items=tiles,
                     status_summary=summary,
                     destination=destination,
@@ -2335,14 +2353,11 @@ def session_dashboard_model(value: Any) -> DashboardModel:
     # ------------- warnings (severity is heuristic — same source data the
     # text view already used)
     warning_rows: list[WarningRowModel] = []
+    from tomography_session_browser.reports.warning_summary import split_warning_scope
+
     for raw in scope.warnings:
-        sample_name = None
-        message = raw
-        if ":" in raw:
-            head, _, tail = raw.partition(":")
-            if head and len(head) < 60:
-                sample_name = head.strip().split("/")[0].strip() or None
-                message = tail.strip()
+        prefix, message = split_warning_scope(raw)
+        sample_name = prefix.split("/")[0].strip() or None
         # The shared classifier decides severity here too. A local substring
         # rule used to, so one warning could be coloured "info" on this row and
         # ordered as a "warning" in the group above it.
@@ -2652,13 +2667,15 @@ def _batch_position_progress_rows(
             else:
                 queued = 1
 
-        status = _dominant_batch_row_status(
-            batch_status=batch_status,
-            complete=complete,
-            warning=warning,
-            failed=failed,
-            queued=queued,
-        )
+        acquisition_status = batch_position_status_from_counts(
+            batch, BatchPositionStatusCounts(exposure_count, complete, warning, failed, queued, 0)
+        ).status
+        status = {
+            "done": TILE_STATUS_COMPLETE,
+            "failed": TILE_STATUS_FAILED,
+            "partial": TILE_STATUS_WARNING,
+            "incomplete": TILE_STATUS_WARNING,
+        }.get(acquisition_status, TILE_STATUS_NEUTRAL)
         label = _batch_position_label(batch)
         rows.append(
             BatchPositionProgressModel(
@@ -3540,7 +3557,7 @@ def _scope_from_sample(sample: Sample) -> _DashboardScope:
         tilt_series=list(sample.tilt_series),
         samples=[sample],
         sample_groups=[(_clean_sample_label(sample.name), [sample])],
-        warnings=_prefix_warnings(sample.name, sample.warnings),
+        warnings=[*_prefix_warnings(sample.name, sample.warnings), *_entity_scope_warnings(sample, sample.name, set())],
         is_sample_scope=True,
     )
 
@@ -3576,8 +3593,10 @@ def _scope_from_linked_group(group: LinkedSampleGroup) -> _DashboardScope:
         atlases.append((group.label, group.atlas))
 
     warnings: list[str] = []
+    seen_entities: set[int] = set()
     for member in group.samples:
         warnings.extend(_prefix_warnings(member.name, member.warnings))
+        warnings.extend(_entity_scope_warnings(member, member.name, seen_entities))
 
     primary_path = ""
     for member in group.samples:
@@ -4104,6 +4123,8 @@ def _mrc_applied_defocus_um(metadata: dict[str, Any]) -> float | None:
 
 
 def _frame_count_for_per_image_metadata(tilt: TiltSeries) -> int:
+    if tilt.mrc_metadata is not None and tilt.mrc_metadata.nz is not None:
+        return actual_tilt_count(tilt)
     if tilt.number_of_frames and tilt.number_of_frames > 0:
         return int(tilt.number_of_frames)
     if tilt.tilt_count and tilt.tilt_count > 0:
@@ -4671,31 +4692,7 @@ def planned_exposures_for_batch(batch: BatchPosition) -> int:
     that the microscope file marks as empty isn't double-counted.
     """
 
-    metadata = batch.metadata or {}
-
-    main = metadata.get("ExposureTemplateAreaParameters")
-    has_main = isinstance(main, dict) and (
-        not isinstance(main.get("_attributes"), dict)
-        or main["_attributes"].get("nil") != "true"
-    )
-
-    raw_areas = find_first(metadata.get("AdditionalExposureTemplateAreas"), "ExposureTemplateAreaParameters")
-    if isinstance(raw_areas, dict):
-        additional_count = 1
-    elif isinstance(raw_areas, list):
-        additional_count = sum(
-            1
-            for entry in raw_areas
-            if isinstance(entry, dict)
-            and (
-                not isinstance(entry.get("_attributes"), dict)
-                or entry["_attributes"].get("nil") != "true"
-            )
-        )
-    else:
-        additional_count = 0
-
-    return (1 if has_main else 0) + additional_count
+    return planned_exposures_from_metadata(batch.metadata or {})
 
 
 def acquired_exposures_for_batch(

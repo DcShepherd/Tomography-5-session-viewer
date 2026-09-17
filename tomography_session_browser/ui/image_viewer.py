@@ -4124,8 +4124,8 @@ class ViewerTab(QWidget):
         """Tell this tab what scope and entity type it is showing.
 
         ``entity_label`` matters when the list is *empty*: the type cannot be
-        inferred from zero items, and "No items in Reference collection B" is
-        markedly less useful than "No search maps in Reference collection B".
+        inferred from zero items, and "No items in Srujan" is markedly less
+        useful than "No search maps in Srujan".
         """
 
         self._has_sessions = has_sessions
@@ -4256,7 +4256,10 @@ class ViewerTab(QWidget):
             self._pending_view_state = state
             return True
 
-        self._load_value(self._items[index], max(state.frame_index or 0, 0))
+        self._load_value(
+            self._items[index], max(state.frame_index or 0, 0),
+            restore_frame=state.frame_index is not None,
+        )
         if state.marker_id:
             self.select_marker(state.marker_id)
         return True
@@ -4472,7 +4475,7 @@ class ViewerTab(QWidget):
         if self._current_path is not None:
             self._load_path(self._current_path, self._current_fallback, self._pending_slice_index)
 
-    def _load_value(self, value: Any, slice_index: int) -> None:
+    def _load_value(self, value: Any, slice_index: int, *, restore_frame: bool = False) -> None:
         sources = self._source_for_value(value)
         path = sources.primary
         # Empty-state overrides such as ``missing_preview`` describe the row
@@ -4511,7 +4514,8 @@ class ViewerTab(QWidget):
         self._current_path = path
         self._current_fallback = sources.fallback
         self._current_mrc_max_size = self._initial_mrc_preview_size(path)
-        slice_index = self._default_frame_index(value, path, slice_index)
+        if not restore_frame:
+            slice_index = self._default_frame_index(value, path, slice_index)
         self._load_path(path, sources.fallback, slice_index)
 
     def _source_for_value(self, value: Any) -> PreviewSources:
@@ -5511,6 +5515,14 @@ def _summary_for_item(value: Any) -> str:
 
 
 def _status_label_for_item(value: Any) -> str:
+    if isinstance(value, Atlas):
+        image_path = value.image_path
+        if image_path is None:
+            return "missing"
+        try:
+            return "available" if image_path.exists() else "missing"
+        except OSError:
+            return "missing"
     if isinstance(value, BatchPosition):
         raw = (value.status or "").strip().lower()
         if raw in {"acquired", "done", "complete", "completed"}:

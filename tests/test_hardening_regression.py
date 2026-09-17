@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from tomography_session_browser.domain.enums import SessionKind
-from tomography_session_browser.domain.models import MrcMetadata, SearchMap
+from tomography_session_browser.domain.models import Atlas, MrcMetadata, Overview, Sample, SearchMap, Session
 from tomography_session_browser.parsers.mdoc_parser import parse_mdoc
 from tomography_session_browser.parsers.session_scanner import SessionScanner
 from tomography_session_browser.parsers.tiltseries_parser import (
@@ -15,6 +15,7 @@ from tomography_session_browser.parsers.xml_parser import parse_xml_file
 from tomography_session_browser.reports.report_generator import _resolve_overlay_geometry
 from tomography_session_browser.reports.warning_summary import summarise_warnings
 from tomography_session_browser.ui.session_presenter import grouped_warnings
+from tomography_session_browser.ui.session_presenter import session_warnings
 
 
 def test_unknown_folder_loads_as_warning_instead_of_crashing(tmp_path: Path) -> None:
@@ -145,6 +146,31 @@ def test_malformed_batch_positions_xml_warns_even_without_rows(tmp_path: Path) -
     )
 
 
+def test_malformed_session_xml_is_visible_as_a_session_warning(tmp_path: Path) -> None:
+    (tmp_path / "Session.dm").write_text("<Session>", encoding="utf-8")
+
+    session = SessionScanner().load(tmp_path)
+
+    assert any("Could not parse metadata XML Session.dm" in warning for warning in session_warnings(session))
+
+
+def test_session_warning_collection_includes_root_atlas_and_overviews(tmp_path: Path) -> None:
+    overview = Overview(
+        id="overview",
+        name="Overview 1",
+        image_path=tmp_path / "overview.mrc",
+        warnings=["Overview metadata could not be read."],
+    )
+    atlas = Atlas(id="atlas", warnings=["Atlas calibration is unavailable."])
+    sample = Sample(id="sample", name="Sample 1", path=tmp_path, overviews=[overview])
+    session = Session(id="session", name="Session", path=tmp_path, atlas=atlas, samples=[sample])
+
+    warnings = session_warnings(session)
+
+    assert any("Atlas calibration is unavailable" in warning for warning in warnings)
+    assert any("Overview metadata could not be read" in warning for warning in warnings)
+
+
 def test_malformed_search_map_xml_warns_on_search_map(tmp_path: Path) -> None:
     search_map_dir = tmp_path / "SearchMaps" / "SearchMap_001"
     search_map_dir.mkdir(parents=True)
@@ -251,3 +277,35 @@ def test_the_dashboard_and_the_report_count_the_same_things() -> None:
         # The raw strings are still available for the expanded view.
         assert len(row.items) == report_rows[row.label].count
         assert row.severity == report_rows[row.label].severity
+
+
+def test_warning_summary_counts_long_scoped_names_as_one_affected_object() -> None:
+    prefix = "Sample / " + "LongAcquisitionName" * 8
+    rows = summarise_warnings(
+        [
+            f"{prefix}: NaN dose field A",
+            f"{prefix}: NaN dose field B",
+        ]
+    )
+
+    assert rows[0].affected_items == 1
+
+
+def test_warning_classification_ignores_failed_text_in_object_name() -> None:
+    rows = summarise_warnings(
+        ["Sample / failed_control_1: Could not read MDOC file: permission denied"]
+    )
+
+    assert [(row.category, row.severity) for row in rows] == [
+        ("Missing MDOC file", "warning")
+    ]
+
+
+def test_orphan_mdoc_warning_is_a_missing_mrc_error() -> None:
+    rows = summarise_warnings(
+        ["Sample / stack: orphan.mdoc has no matching MRC stack and was skipped."]
+    )
+
+    assert [(row.category, row.severity) for row in rows] == [
+        ("Missing MRC file", "error")
+    ]

@@ -194,11 +194,7 @@ def _window(tmp_path: Path, *, with_maps: bool):
         id="s", name="Sample1", path=tmp_path, search_maps=maps if with_maps else []
     )
     session = Session(
-        id="sess",
-        name="Reference collection B",
-        path=tmp_path,
-        kind=SessionKind.MULTIGRID,
-        samples=[sample],
+        id="sess", name="Srujan", path=tmp_path, kind=SessionKind.MULTIGRID, samples=[sample]
     )
     window = MainWindow()
     window._sessions = [session]

@@ -31,6 +31,7 @@ TILT_TO_SEARCH_MAP = "tilt_series -> search_map"
 TILT_TO_OVERVIEW = "tilt_series -> overview"
 BATCH_TO_OVERVIEW = "batch_position -> overview"
 BATCH_TO_SEARCH_MAP = "batch_position -> search_map"
+EXPOSURE_TO_TILT = "exposure -> tilt_series"
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +284,41 @@ NAVIGATION_CONTRACT: tuple[ContractCase, ...] = (
         2,
         STATE_AMBIGUOUS,
         "Pre-existing behaviour, retained.",
+    ),
+    # --- exposure area -> tilt series -------------------------------------
+    ContractCase("exposure_missing_middle", EXPOSURE_TO_TILT, "compacted partial acquisition list", 0, STATE_UNRESOLVED,
+                 "Missing exposure slots must not shift later acquisitions."),
+    ContractCase("exposure_missing_singleton", EXPOSURE_TO_TILT, "only primary exposure acquired", 0, STATE_UNRESOLVED,
+                 "A unique acquired tilt does not belong to every exposure."),
+    ContractCase("exposure_unrelated_singleton", EXPOSURE_TO_TILT, "queued batch with another batch's sole tilt", 0, STATE_UNRESOLVED,
+                 "Candidate count is not relationship evidence."),
+    ContractCase("exposure_explicit_collision", EXPOSURE_TO_TILT, "one explicit ID matches two source paths", 2, STATE_AMBIGUOUS,
+                 "A weaker name or ordering rule must never override explicit ambiguity."),
+    ContractCase("exposure_complete_order", EXPOSURE_TO_TILT, "complete recorded template and linked order", 1, STATE_NAVIGABLE,
+                 "Complete batch-order fallback remains available."),
+    ContractCase(
+        "exposure_tilt_none",
+        EXPOSURE_TO_TILT,
+        "no exposure-specific or batch-order link recorded",
+        0,
+        STATE_UNRESOLVED,
+        "The exposure remains inspectable, but its open action stays inert.",
+    ),
+    ContractCase(
+        "exposure_tilt_explicit_one",
+        EXPOSURE_TO_TILT,
+        "one consistent explicit tilt_series_id",
+        1,
+        STATE_NAVIGABLE,
+        "An explicit exposure-to-tilt relationship is authoritative when unique.",
+    ),
+    ContractCase(
+        "exposure_tilt_explicit_many",
+        EXPOSURE_TO_TILT,
+        "conflicting explicit tilt_series_id values",
+        2,
+        STATE_AMBIGUOUS,
+        "Conflicting marker metadata must never resolve to the first value.",
     ),
 )
 

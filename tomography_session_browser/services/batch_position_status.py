@@ -53,7 +53,7 @@ def aggregate_batch_position_status(
 
     counts = batch_position_status_counts(batch, context, include_inferred=False)
     acquired = counts.acquired
-    source_status = item_list_status(batch, context).status
+    source_status = item_list_status(batch, context, include_inferred=False).status
     failed_count = counts.failed
     if source_status == STATUS_FAILED_LABEL:
         status = STATUS_FAILED

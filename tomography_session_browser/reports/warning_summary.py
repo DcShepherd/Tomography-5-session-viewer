@@ -93,6 +93,7 @@ _RULES: tuple[_Rule, ...] = (
             r"mrc.*missing",
             r"missing.*mrc",
             r"mrc file.*not found",
+            r"has no matching mrc stack",
         ),
     ),
     _Rule(
@@ -104,6 +105,7 @@ _RULES: tuple[_Rule, ...] = (
             r"mdoc.*missing",
             r"missing.*mdoc",
             r"mdoc has no sections",
+            r"could not read mdoc file",
         ),
     ),
     _Rule(
@@ -169,6 +171,7 @@ _RULES: tuple[_Rule, ...] = (
             r"missing metadata",
             r"\.dm.*not found",
             r"metadata.*(missing|absent|unavailable)",
+            r"could not (parse|read).*metadata xml",
         ),
     ),
     _Rule(
@@ -200,13 +203,14 @@ def _matches(rule: _Rule, message: str) -> bool:
 
 
 def _classify_one(message: str) -> _Rule:
+    _prefix, message = split_warning_scope(message)
     for rule in _RULES:
         if _matches(rule, message):
             return rule
     return _OTHER_RULE
 
 
-def _split_prefix(warning: str) -> tuple[str, str]:
+def split_warning_scope(warning: str) -> tuple[str, str]:
     """``"Sample / Tilt1: foo bar" -> ("Sample / Tilt1", "foo bar")``.
 
     Falls back to ``("", warning)`` if the warning has no obvious prefix.
@@ -221,9 +225,19 @@ def _split_prefix(warning: str) -> tuple[str, str]:
     head, _, tail = warning.partition(":")
     head = head.strip()
     tail = tail.strip()
-    if not head or len(head) > 80 or " " in head and "/" not in head:
+    if not head:
+        return "", warning
+    if len(head) == 1 and tail.startswith(("\\", "/")):
+        return "", warning
+    if " " in head and "/" not in head:
         return "", warning
     return head, tail
+
+
+def _split_prefix(warning: str) -> tuple[str, str]:
+    """Compatibility alias for existing internal callers and tests."""
+
+    return split_warning_scope(warning)
 
 
 def summarise_warnings(warnings: Iterable[str]) -> list[WarningSummary]:
@@ -242,7 +256,7 @@ def summarise_warnings(warnings: Iterable[str]) -> list[WarningSummary]:
 
     for raw in warnings:
         rule = _classify_one(raw)
-        prefix, _body = _split_prefix(raw)
+        prefix, _body = split_warning_scope(raw)
         rules[rule.category] = rule
         counts[rule.category] += 1
         affected[rule.category].add(prefix or raw)  # fall back to whole message
@@ -278,6 +292,7 @@ def severity_counts(rows: Sequence[WarningSummary]) -> dict[str, int]:
 
 __all__ = [
     "WarningSummary",
+    "split_warning_scope",
     "summarise_warnings",
     "severity_counts",
 ]

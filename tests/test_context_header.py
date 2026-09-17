@@ -42,14 +42,12 @@ def test_a_long_scope_name_elides_instead_of_widening_the_header() -> None:
     """
 
     header = _header()
-    header.set_context_stack(
-        build_context_stack(scope_name="Reference collection B", section_key="Search")
-    )
+    header.set_context_stack(build_context_stack(scope_name="Srujan", section_key="Search"))
     short_minimum = header.minimumSizeHint().width()
 
     header.set_context_stack(
         build_context_stack(
-            scope_name="Reference_Collection_C_With_A_Very_Long_Name_and_more",
+            scope_name="Eman2_Shepherd_20230524_Legionella_Mac_Nocyto_2_and_more",
             scope_kind="linked",
             section_key="Search",
         )
@@ -61,7 +59,7 @@ def test_a_long_scope_name_elides_instead_of_widening_the_header() -> None:
     assert header.scope_label.minimumWidth() == SCOPE_MIN_WIDTH_PX
 
     # The full value survives for callers and the tooltip...
-    assert header.scope_text().startswith("Reference_Collection_C")
+    assert header.scope_text().startswith("Eman2_Shepherd")
     assert header.scope_label.toolTip() == header.scope_text()
     # ...while the rendering shortens to whatever room the label is given.
     header.scope_label.resize(SCOPE_MIN_WIDTH_PX, 20)
@@ -72,7 +70,7 @@ def test_scope_is_shown_separately_from_the_crumb_tail() -> None:
     header = _header()
     header.set_context_stack(
         build_context_stack(
-            scope_name="Reference_Collection_B_20260319",
+            scope_name="Srujan_20260319",
             scope_kind="linked",
             section_key="Search",
             selection_name="vellio_1",
@@ -80,9 +78,9 @@ def test_scope_is_shown_separately_from_the_crumb_tail() -> None:
         )
     )
 
-    assert header.scope_text() == "Reference_Collection_B_20260319 (LS)"
+    assert header.scope_text() == "Srujan_20260319 (LS)"
     # The scope has its own emphasised label, so the tail must not repeat it.
-    assert "Reference_Collection_B_20260319" not in header.crumb_text()
+    assert "Srujan_20260319" not in header.crumb_text()
     assert "Search tiles" in header.crumb_text()
     assert "vellio_1 · Tile 19" in header.crumb_text()
 
@@ -120,13 +118,13 @@ def test_borrowed_atlas_context_is_stated_inline() -> None:
     header = _header()
     header.set_context_stack(
         build_context_stack(
-            scope_name="Reference collection B",
+            scope_name="Srujan",
             scope_kind="linked",
-            relationship="Atlas context borrowed from Reference atlas 1",
+            relationship="Atlas context borrowed from SSK_Training_1",
         )
     )
 
-    assert "borrowed from Reference atlas 1" in header.notes_text()
+    assert "borrowed from SSK_Training_1" in header.notes_text()
 
 
 def test_unavailable_reasons_appear_inline_not_only_in_a_tooltip() -> None:
@@ -208,7 +206,7 @@ def _live_window(tmp_path):
     sample = Sample(id="s-1", name="Sample1", path=tmp_path, search_maps=maps)
     session = Session(
         id="sess-1",
-        name="Reference_Collection_B_20260319",
+        name="Srujan_20260319",
         path=tmp_path,
         kind=SessionKind.MULTIGRID,
         samples=[sample],
@@ -226,9 +224,7 @@ def test_window_has_one_header_above_every_page(tmp_path) -> None:
     window, _maps = _live_window(tmp_path)
 
     assert isinstance(window.context_header, ContextHeader)
-    assert window.context_header.scope_text().startswith(
-        "Reference_Collection_B_20260319"
-    )
+    assert window.context_header.scope_text().startswith("Srujan_20260319")
 
 
 def test_header_follows_the_tab_and_selection(tmp_path) -> None:

@@ -572,12 +572,16 @@ def test_search_map_focus_and_tracking_keep_same_recorded_relative_position() ->
         tracking.x - exposure.x,
         tracking.y - exposure.y,
     )
-    assert displayed_delta == pytest.approx((-raw_delta[0], -raw_delta[1]))
-    assert "local_rotation_anchor" not in tracking.metadata
-    assert "local_rotation_anchor" not in focus.metadata
+    assert displayed_delta == pytest.approx(raw_delta)
+    assert tracking.metadata["tracking_orientation_transform"] == (
+        "local_180_about_primary_exposure"
+    )
+    assert focus.metadata["focus_orientation_transform"] == (
+        "local_180_about_primary_exposure"
+    )
 
 
-def test_search_map_distinct_focus_is_rotated_about_primary_exposure() -> None:
+def test_search_map_distinct_focus_and_tracking_are_rotated_about_primary_exposure() -> None:
     batch = _batch()
     batch.metadata["TrackingTemplateAreaParameters"] = {
         "Name": "Tracking",
@@ -604,14 +608,23 @@ def test_search_map_distinct_focus_is_rotated_about_primary_exposure() -> None:
         marker for marker in markers if marker.marker_type == MarkerType.TRACKING_AREA
     )
 
-    before = focus.metadata["focus_orientation_before"]
+    focus_before = focus.metadata["focus_orientation_before"]
     assert (focus.x, focus.y) == pytest.approx(
-        (2 * exposure.x - before[0], 2 * exposure.y - before[1])
+        (2 * exposure.x - focus_before[0], 2 * exposure.y - focus_before[1])
     )
     assert focus.metadata["focus_orientation_transform"] == (
         "local_180_about_primary_exposure"
     )
-    assert "focus_orientation_transform" not in tracking.metadata
+    tracking_before = tracking.metadata["tracking_orientation_before"]
+    assert (tracking.x, tracking.y) == pytest.approx(
+        (
+            2 * exposure.x - tracking_before[0],
+            2 * exposure.y - tracking_before[1],
+        )
+    )
+    assert tracking.metadata["tracking_orientation_transform"] == (
+        "local_180_about_primary_exposure"
+    )
 
 
 def test_overview_focus_and_tracking_at_same_offset_stay_coincident() -> None:
@@ -648,6 +661,12 @@ def test_overview_focus_and_tracking_at_same_offset_stay_coincident() -> None:
     assert (tracking.x, tracking.y) == pytest.approx((focus.x, focus.y))
     assert tracking.metadata["legacy_overlay_transform"] == "global_reflection"
     assert focus.metadata["legacy_overlay_transform"] == "global_reflection"
+    assert tracking.metadata["tracking_orientation_transform"] == (
+        "local_180_about_primary_exposure"
+    )
+    assert focus.metadata["focus_orientation_transform"] == (
+        "local_180_about_primary_exposure"
+    )
 
 
 def test_search_tile_projection_includes_corrected_edge_exposure() -> None:

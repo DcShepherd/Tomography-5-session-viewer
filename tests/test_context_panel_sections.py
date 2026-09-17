@@ -348,3 +348,53 @@ def test_acquisition_provenance_renders_as_tooltips_not_inline_text() -> None:
         assert "(" not in displayed
         assert ")" not in displayed
         assert tooltip.startswith("Source: ")
+
+
+def test_metadata_descriptor_aliases_keep_scientific_meaning_and_reduce_wrapping() -> None:
+    app = _app()
+    panel = MetadataPanel()
+    # The 300 px context dock has 10 px shell margins on each side.
+    panel.resize(280, 500)
+    panel.set_text(
+        "Summary:\n"
+        "  Batch positions: 12\n"
+        "  Linked data collections: 2\n"
+        "Acquisition:\n"
+        "  Acquisition spot size: 6\n"
+        "  Expected source: session metadata\n"
+        "  Number of frames: 35"
+    )
+    panel.show()
+    app.processEvents()
+
+    labels = panel.findChildren(QLabel, "metaKey")
+    displayed = {label.text() for label in labels}
+    assert "Batch targets:" in displayed
+    assert "Collections:" in displayed
+    assert "Spot size:" in displayed
+    assert "Count source:" in displayed
+    assert "Frames:" in displayed
+    assert "Batch positions: 12" in panel.toPlainText()
+    assert len({label.width() for label in labels}) == 1
+    assert all(label.heightForWidth(label.width()) <= label.fontMetrics().lineSpacing() + 2 for label in labels)
+    panel.close()
+
+
+def test_metadata_descriptor_column_expands_with_available_panel_width() -> None:
+    app = _app()
+    panel = MetadataPanel()
+    panel.set_text("Summary:\n  Batch positions: 12\n  Linked data collections: 2")
+    panel.resize(260, 400)
+    panel.show()
+    app.processEvents()
+    narrow_width = panel.findChildren(QLabel, "metaKey")[0].width()
+
+    panel.resize(420, 400)
+    app.processEvents()
+    labels = panel.findChildren(QLabel, "metaKey")
+    wide_width = labels[0].width()
+
+    assert wide_width >= narrow_width
+    assert len({label.width() for label in labels}) == 1
+    assert all(label.heightForWidth(label.width()) <= label.fontMetrics().lineSpacing() + 2 for label in labels)
+    panel.close()

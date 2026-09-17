@@ -13,14 +13,52 @@ from tomography_session_browser.domain.models import (
     SearchTile,
     TiltSeries,
 )
+from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.services.navigation_service import (
     STATE_AMBIGUOUS,
     STATE_NAVIGABLE,
     NavigationResolution,
     resolve_batch_position_overview,
     resolve_batch_position_search_map,
+    resolve_exposure_tilt_series,
     resolve_tilt_series_navigation_targets,
 )
+
+
+def test_exposure_resolver_rejects_conflicting_explicit_tilt_ids(tmp_path: Path) -> None:
+    batch = BatchPosition(id="batch", name="position_1", linked_tilt_series_ids=["a", "b"])
+    first = _tilt(tmp_path, tilt_id="a", name="position_1", linked_batch_position_id=batch.id)
+    second = _tilt(tmp_path, tilt_id="b", name="position_1_2", linked_batch_position_id=batch.id)
+    marker = ImageMarker(
+        id="exposure",
+        marker_type=MarkerType.EXPOSURE_AREA,
+        linked_object_id=batch.id,
+        source_object_id=batch.id,
+        metadata={"tilt_series_id": first.id, "raw": {"TiltSeriesId": second.id}},
+    )
+
+    result = resolve_exposure_tilt_series(marker, batch=batch, tilt_series=[first, second])
+
+    assert result.tilt_series is None
+    assert result.ambiguous is True
+    assert result.resolution.candidate_ids == ("a", "b")
+
+
+def test_exposure_resolver_uses_one_consistent_explicit_tilt_id(tmp_path: Path) -> None:
+    batch = BatchPosition(id="batch", name="position_1")
+    tilt = _tilt(tmp_path, tilt_id="a", name="position_1", linked_batch_position_id=batch.id)
+    marker = ImageMarker(
+        id="exposure",
+        marker_type=MarkerType.EXPOSURE_AREA,
+        linked_object_id=batch.id,
+        source_object_id=batch.id,
+        metadata={"tilt_series_id": tilt.id, "raw": {"TiltSeriesId": tilt.id}},
+    )
+
+    result = resolve_exposure_tilt_series(marker, batch=batch, tilt_series=[tilt])
+
+    assert result.tilt_series is tilt
+    assert result.resolution.navigable is True
 
 
 def _tilt(
@@ -376,7 +414,95 @@ def _c_batch_map_reciprocal_many(_tmp_path: Path) -> NavigationResolution:
     ).resolution
 
 
+def _exposure_marker(batch: BatchPosition, **metadata: object) -> ImageMarker:
+    return ImageMarker(
+        id="exposure",
+        marker_type=MarkerType.EXPOSURE_AREA,
+        linked_object_id=batch.id,
+        source_object_id=batch.id,
+        metadata=metadata,
+    )
+
+
+def _c_exposure_tilt_none(_tmp_path: Path) -> NavigationResolution:
+    batch = BatchPosition(id="batch-1", name="position")
+    return resolve_exposure_tilt_series(
+        _exposure_marker(batch), batch=batch, tilt_series=()
+    ).resolution
+
+
+def _c_exposure_tilt_explicit_one(tmp_path: Path) -> NavigationResolution:
+    batch = BatchPosition(id="batch-1", name="position")
+    tilt = _tilt(
+        tmp_path,
+        tilt_id="tilt-1",
+        name="position",
+        linked_batch_position_id=batch.id,
+    )
+    return resolve_exposure_tilt_series(
+        _exposure_marker(batch, tilt_series_id=tilt.id),
+        batch=batch,
+        tilt_series=(tilt,),
+    ).resolution
+
+
+def _c_exposure_tilt_explicit_many(tmp_path: Path) -> NavigationResolution:
+    batch = BatchPosition(id="batch-1", name="position")
+    first = _tilt(tmp_path, tilt_id="tilt-1", linked_batch_position_id=batch.id)
+    second = _tilt(tmp_path, tilt_id="tilt-2", linked_batch_position_id=batch.id)
+    marker = _exposure_marker(
+        batch,
+        tilt_series_id=first.id,
+        raw={"TiltSeriesId": second.id},
+    )
+    return resolve_exposure_tilt_series(
+        marker, batch=batch, tilt_series=(first, second)
+    ).resolution
+
+
+def _partial_exposure_case(tmp_path: Path, names: tuple[str, ...], selected: int = 1) -> NavigationResolution:
+    batch = BatchPosition(id="batch", name="target_1", metadata={
+        "ExposureTemplateAreaParameters": {},
+        "AdditionalExposureTemplateAreas": {"ExposureTemplateAreaParameters": [{}, {}]},
+    })
+    tilts = [_tilt(tmp_path, tilt_id=f"t{i}", name=name, linked_batch_position_id=batch.id)
+             for i, name in enumerate(names)]
+    batch.linked_tilt_series_ids = [tilt.id for tilt in tilts]
+    return resolve_exposure_tilt_series(_exposure_marker(batch, exposure_index=selected), batch=batch, tilt_series=tilts).resolution
+
+
+def _c_exposure_missing_middle(tmp_path: Path) -> NavigationResolution:
+    return _partial_exposure_case(tmp_path, ("target_1", "target_1_3"))
+
+
+def _c_exposure_missing_singleton(tmp_path: Path) -> NavigationResolution:
+    return _partial_exposure_case(tmp_path, ("target_1",))
+
+
+def _c_exposure_unrelated_singleton(tmp_path: Path) -> NavigationResolution:
+    batch = BatchPosition(id="queued", name="queued_2", metadata={"ExposureTemplateAreaParameters": {}})
+    tilt = _tilt(tmp_path, tilt_id="t", name="target_1", linked_batch_position_id="other")
+    return resolve_exposure_tilt_series(_exposure_marker(batch, exposure_index=0), batch=batch, tilt_series=[tilt]).resolution
+
+
+def _c_exposure_explicit_collision(tmp_path: Path) -> NavigationResolution:
+    batch = BatchPosition(id="b", name="target_1")
+    first = _tilt(tmp_path, tilt_id="duplicate", name="target_1")
+    second = _tilt(tmp_path / "other", tilt_id="duplicate", name="unrelated")
+    return resolve_exposure_tilt_series(_exposure_marker(batch, exposure_index=0, tilt_series_id="duplicate"),
+                                      batch=batch, tilt_series=[first, second]).resolution
+
+
+def _c_exposure_complete_order(tmp_path: Path) -> NavigationResolution:
+    return _partial_exposure_case(tmp_path, ("custom_a", "custom_b", "custom_c"))
+
+
 CONTRACT_BUILDERS = {
+    "exposure_missing_middle": _c_exposure_missing_middle,
+    "exposure_missing_singleton": _c_exposure_missing_singleton,
+    "exposure_unrelated_singleton": _c_exposure_unrelated_singleton,
+    "exposure_explicit_collision": _c_exposure_explicit_collision,
+    "exposure_complete_order": _c_exposure_complete_order,
     "tilt_batch_none": _c_tilt_batch_none,
     "tilt_batch_explicit_one": _c_tilt_batch_explicit_one,
     "tilt_batch_explicit_absent": _c_tilt_batch_explicit_absent,
@@ -407,6 +533,9 @@ CONTRACT_BUILDERS = {
     "batch_map_explicit_absent_reciprocal_one": _c_batch_map_explicit_absent_reciprocal_one,
     "batch_map_explicit_absent_chained_only": _c_batch_map_explicit_absent_chained_only,
     "batch_map_reciprocal_many": _c_batch_map_reciprocal_many,
+    "exposure_tilt_none": _c_exposure_tilt_none,
+    "exposure_tilt_explicit_one": _c_exposure_tilt_explicit_one,
+    "exposure_tilt_explicit_many": _c_exposure_tilt_explicit_many,
 }
 
 

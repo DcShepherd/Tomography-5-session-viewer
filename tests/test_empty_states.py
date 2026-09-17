@@ -41,7 +41,7 @@ from tomography_session_browser.ui.empty_states import (
 
 ALL_STATES = [
     no_session_state(),
-    no_entities_state(scope_name="Reference collection B", entity_label="Search maps"),
+    no_entities_state(scope_name="Srujan", entity_label="Search maps"),
     filter_no_results_state(filter_text="vellio", total=20, entity_label="Search maps"),
     missing_preview_state(name="Map 1", expected_path="C:/x.jpg", metadata_available=True),
     load_failed_state(path="C:/broken", error="Not a Tomography 5 folder."),
@@ -83,13 +83,10 @@ def test_no_session_offers_opening_one() -> None:
 
 
 def test_an_empty_scope_names_the_scope_and_the_entity() -> None:
-    state = no_entities_state(
-        scope_name="Reference_Collection_B_20260319",
-        entity_label="Search maps",
-    )
+    state = no_entities_state(scope_name="Srujan_20260319", entity_label="Search maps")
 
     assert state.kind == KIND_NO_ENTITIES
-    assert "Reference_Collection_B_20260319" in state.title
+    assert "Srujan_20260319" in state.title
     assert "search maps" in state.title.lower()
     # It must not read as a failure: the scope loaded fine.
     assert "loaded successfully" in state.detail
@@ -179,7 +176,7 @@ def test_a_filter_that_matched_nothing_is_not_an_empty_scope() -> None:
         has_sessions=True,
         total_items=20,
         filter_text="vellio",
-        scope_name="Reference collection B",
+        scope_name="Srujan",
         entity_label="Search maps",
     )
 
@@ -191,7 +188,7 @@ def test_an_empty_scope_with_no_filter_says_so() -> None:
         has_sessions=True,
         total_items=0,
         filter_text="",
-        scope_name="Reference collection B",
+        scope_name="Srujan",
         entity_label="Search maps",
     )
 
@@ -210,11 +207,7 @@ def _tab(tmp_path: Path, *, with_maps: bool):
         id="s", name="Sample1", path=tmp_path, search_maps=maps if with_maps else []
     )
     session = Session(
-        id="sess",
-        name="Reference collection B",
-        path=tmp_path,
-        kind=SessionKind.MULTIGRID,
-        samples=[sample],
+        id="sess", name="Srujan", path=tmp_path, kind=SessionKind.MULTIGRID, samples=[sample]
     )
     window = MainWindow()
     window._sessions = [session]
@@ -247,4 +240,4 @@ def test_an_empty_scope_names_itself_in_the_viewer(tmp_path: Path) -> None:
     state = tab.empty_state()
 
     assert state.kind == KIND_NO_ENTITIES
-    assert "Reference collection B" in state.title
+    assert "Srujan" in state.title
