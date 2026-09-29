@@ -11,6 +11,7 @@ from tomography_session_browser.domain.display_names import format_overview_disp
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.domain.models import Atlas, BatchPosition, MrcMetadata, Overview, SearchMap, SearchTile, TiltSeries
 from tomography_session_browser.parsers.xml_parser import find_first
+from tomography_session_browser.services.atlas_metadata import atlas_projection_mismatch
 from tomography_session_browser.services.batch_label_service import (
     batch_label_markers,
     compact_batch_label_for_batch,
@@ -2550,6 +2551,8 @@ def _atlas_pixel_affine(atlas: Atlas) -> AtlasPixelAffine | None:
     fits too poorly to trust.
     """
 
+    if atlas_projection_mismatch(atlas):
+        return None
     metadata = atlas.metadata.get("Atlas.dm") if isinstance(atlas.metadata, dict) else None
     if not isinstance(metadata, dict):
         return None
@@ -2576,13 +2579,10 @@ def _atlas_pixel_affine(atlas: Atlas) -> AtlasPixelAffine | None:
         return None
 
     # The montage frame the AtlasPixelPosition values live in is the atlas image
-    # itself: its extent is the far corner of the furthest tile rectangle. This
-    # becomes the marker ``image_size`` so the viewer/report scale overlays onto
-    # the displayed atlas pixmap correctly (it differs from the camera
-    # ``ReadoutArea`` that ``_image_size`` reports for the atlas).
-    montage_w = max(rect[0] + rect[2] for _, rect in pairs)
-    montage_h = max(rect[1] + rect[3] for _, rect in pairs)
-    image_size = (int(round(montage_w)), int(round(montage_h)))
+    # itself. This becomes the marker ``image_size`` so the viewer/report scale
+    # overlays onto the displayed atlas pixmap correctly (it differs from the
+    # camera ``ReadoutArea`` that ``_image_size`` reports for the atlas).
+    image_size = _atlas_montage_size(atlas, pairs)
 
     a, b, _c, d, e, _g = coefficients
     pixel_size = (math.hypot(a, d) ** -1 + math.hypot(b, e) ** -1) / 2.0
@@ -2595,6 +2595,41 @@ def _atlas_pixel_affine(atlas: Atlas) -> AtlasPixelAffine | None:
         residual_px=residual_px,
         sample_count=len(pairs),
     )
+
+
+def _atlas_montage_size(
+    atlas: Atlas,
+    pairs: list[tuple[tuple[float, float], tuple[float, float, float, float]]],
+) -> tuple[int, int]:
+    """Size of the stitched atlas mosaic the node rectangles are placed in.
+
+    The Atlas MRC *is* that mosaic, so its ``nx``/``ny`` are exact. The far
+    corner of the furthest node rectangle is only a lower bound: an atlas
+    whose acquisition was aborted records nodes for the tiles it acquired,
+    while the mosaic keeps its full planned size. Using the node extent there
+    stretched every overlay away from the image origin, by up to the
+    unacquired fraction of the mosaic. The extent remains the fallback for a
+    JPG-only atlas, and for an MRC too small to hold the nodes (a frame the
+    node table was not recorded in).
+    """
+
+    extent = (
+        int(round(max(rect[0] + rect[2] for _, rect in pairs))),
+        int(round(max(rect[1] + rect[3] for _, rect in pairs))),
+    )
+    metadata = atlas.mrc_metadata
+    if metadata is not None and (metadata.nx or 0) > 0 and (metadata.ny or 0) > 0:
+        if extent[0] <= metadata.nx + 1 and extent[1] <= metadata.ny + 1:
+            return metadata.nx, metadata.ny
+        LOGGER.warning(
+            "Atlas node rectangles extend beyond the atlas MRC; using the node extent as the "
+            "overlay frame atlas=%s extent=%s mrc=%sx%s",
+            atlas.id,
+            extent,
+            metadata.nx,
+            metadata.ny,
+        )
+    return extent
 
 
 def _collect_atlas_node_pairs(
@@ -2792,6 +2827,8 @@ def _marker_intersects_image(image_size: tuple[int, int], marker: ImageMarker) -
 def _frame_diagnostic(source: Atlas | Overview | SearchMap | SearchTile) -> str:
     """Return a human-readable description of which frame field is missing."""
 
+    if isinstance(source, Atlas) and (reason := atlas_projection_mismatch(source)):
+        return reason
     issues: list[str] = []
     if _image_size(source) is None:
         issues.append("image dimensions unknown")
@@ -2805,6 +2842,10 @@ def _frame_diagnostic(source: Atlas | Overview | SearchMap | SearchTile) -> str:
 
 
 def _image_frame(source: Atlas | Overview | SearchMap | SearchTile) -> ImageFrame | None:
+    # A mismatched node table must not fall through to the legacy calibration:
+    # that geometry also comes from the other acquisition's Atlas.dm.
+    if isinstance(source, Atlas) and atlas_projection_mismatch(source):
+        return None
     image_size = _image_size(source)
     stage_position = _stage_position(source)
     pixel_size = _pixel_size(source)

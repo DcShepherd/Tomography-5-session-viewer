@@ -32,6 +32,7 @@ TILT_TO_OVERVIEW = "tilt_series -> overview"
 BATCH_TO_OVERVIEW = "batch_position -> overview"
 BATCH_TO_SEARCH_MAP = "batch_position -> search_map"
 EXPOSURE_TO_TILT = "exposure -> tilt_series"
+ITEM_TO_ATLAS = "item -> atlas"
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +285,39 @@ NAVIGATION_CONTRACT: tuple[ContractCase, ...] = (
         2,
         STATE_AMBIGUOUS,
         "Pre-existing behaviour, retained.",
+    ),
+    # --- any item -> atlas --------------------------------------------------
+    ContractCase(
+        "item_atlas_none",
+        ITEM_TO_ATLAS,
+        "no Atlas in the sample folder and no AtlasId match",
+        0,
+        STATE_UNRESOLVED,
+        "The item stays inspectable; its Atlas jump is inert and says why.",
+    ),
+    ContractCase(
+        "item_atlas_own_one",
+        ITEM_TO_ATLAS,
+        "the item's own sample folder holds an Atlas",
+        1,
+        STATE_NAVIGABLE,
+        "A multi-grid or screening sample carries its own Atlas.",
+    ),
+    ContractCase(
+        "item_atlas_linked_one",
+        ITEM_TO_ATLAS,
+        "the sample's AtlasId matches one atlas-screening sample",
+        1,
+        STATE_NAVIGABLE,
+        "The cross-session link the project tree already trusts.",
+    ),
+    ContractCase(
+        "item_atlas_linked_many",
+        ITEM_TO_ATLAS,
+        "the sample's AtlasId matches two atlas-screening samples",
+        2,
+        STATE_AMBIGUOUS,
+        "An ambiguous AtlasId never resolves to the first match.",
     ),
     # --- exposure area -> tilt series -------------------------------------
     ContractCase("exposure_missing_middle", EXPOSURE_TO_TILT, "compacted partial acquisition list", 0, STATE_UNRESOLVED,

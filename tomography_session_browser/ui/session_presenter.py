@@ -43,6 +43,7 @@ from tomography_session_browser.services.batch_inference import (
 from tomography_session_browser.services.marker_service import inferred_failed_tilt_ids_for_search_map
 from tomography_session_browser.services.item_status import (
     BatchPositionStatusCounts,
+    atlas_tile_count,
     batch_position_status_from_counts,
     planned_exposures_from_metadata,
 )
@@ -770,7 +771,8 @@ def _atlas_description(atlas: Atlas) -> str:
         [
             f"Pixel size: {_xml_pixel_size(metadata)}",
             f"Magnification: {_metadata_value(metadata, 'NominalMagnification')}",
-            f"Tiles: {len(atlas.tile_paths)}",
+            f"Tiles: {atlas_tile_count(atlas)}",
+            f"Tile image files: {len(atlas.tile_paths)}",
             f"Tile metadata files: {len(atlas.tile_metadata_paths)}",
             f"Alignment files: {len(atlas.alignment_paths)}",
         ],
@@ -1169,7 +1171,7 @@ def _atlas_group_description(label: str, values: list[Any]) -> str:
             f"{label}: {count_phrase(len(atlases), 'atlas', 'atlases')}",
             f"Pixel size: {_common_xml_pixel_size(metadata_values)}",
             f"Magnification: {_common_metadata_value(metadata_values, 'NominalMagnification')}",
-            f"Tiles: {sum(len(atlas.tile_paths) for atlas in atlases)}",
+            f"Tiles: {sum(atlas_tile_count(atlas) for atlas in atlases)}",
             "",
             _warning_block(warning for atlas in atlases for warning in atlas.warnings),
         ]
@@ -4554,7 +4556,7 @@ def _atlas_summary_from_scope(
                 image_path=str(atlas.image_path) if atlas.image_path else None,
                 image_size=size,
                 pixel_size_um=pixel_um,
-                tile_count=len(atlas.tile_paths),
+                tile_count=atlas_tile_count(atlas),
                 acquisition_time=_atlas_acquisition_time(atlas),
             )
         )
@@ -5099,7 +5101,9 @@ def _atlas_acquisition_time(atlas: Atlas) -> str | None:
         return None
     when = find_first(atlas.metadata, "acquisitionDateTime")
     if isinstance(when, str) and when:
-        return when
+        # Same wall-clock formatting as the context panel; the raw ISO string
+        # (``2026-03-19T12:18:58.3951038+11:00``) was shown verbatim here.
+        return _format_timestamp(when)
     return None
 
 

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from tomography_session_browser.domain.display_names import count_phrase as _count_phrase
-from tomography_session_browser.domain.models import BatchPosition, SearchMap, SearchTile, TiltSeries
+from tomography_session_browser.domain.models import Atlas, BatchPosition, SearchMap, SearchTile, TiltSeries
 from tomography_session_browser.domain.units import ANGSTROM_PER_PIXEL
 from tomography_session_browser.parsers.path_utils import natural_key
 from tomography_session_browser.parsers.xml_parser import find_first
@@ -504,6 +504,22 @@ def planned_exposures_from_metadata(metadata: dict[str, Any]) -> int:
         additional_count = 0
 
     return (1 if has_main else 0) + additional_count
+
+
+def atlas_tile_count(atlas: Atlas) -> int:
+    """Number of acquired tiles in ``atlas``.
+
+    ``Atlas.tile_paths`` holds both the ``.mrc`` and the ``.jpg`` of each tile
+    so a viewer can choose a display source; counting it directly doubles the
+    tiles. Tomography 5 writes one ``Tile_*.xml`` per acquired tile, so its
+    unique stems are the count, with unique image stems as the fallback when
+    no tile XML exists.
+    """
+
+    metadata_count = len({path.stem for path in atlas.tile_metadata_paths})
+    if metadata_count:
+        return metadata_count
+    return len({path.stem for path in atlas.tile_paths})
 
 
 def _search_map_tile_counts(search_map: SearchMap) -> tuple[int, int]:

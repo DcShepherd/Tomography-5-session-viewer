@@ -16,7 +16,7 @@ palettes stay correct and `tests/test_theme_style_guide.py` keeps passing.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QBoxLayout,
     QHBoxLayout,
@@ -34,13 +34,54 @@ from tomography_session_browser.ui.theme import (
     TIER_SUPPORTING,
     apply_tier,
 )
-from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
+from tomography_session_browser.ui.widgets.elided_label import ElidedLabel, WrappedElidedLabel
 
 EMPTY_SCOPE_TEXT = "No session loaded"
+
+#: The notes row wraps onto this many lines before eliding.
+NOTES_MAX_LINES = 2
+NOTE_SEPARATOR = "  ·  "
 
 #: The scope keeps this much room before it starts to elide, so the crumb tail
 #: is what gives way in a cramped workspace.
 SCOPE_MIN_WIDTH_PX = 160
+
+
+class _ScopeLabel(ElidedLabel):
+    """The scope: keeps up to ``SCOPE_MIN_WIDTH_PX`` before it elides, but
+    never more room than its own text needs.
+
+    A flat 160 px floor left a shorter scope such as ``Demo_Collection (LS)``
+    sitting in a wider box, with a visible gap before ``› Section`` (plan
+    C10). The floor now follows the text up to that cap, so a long name still
+    cannot widen the window, and a short one sits flush against its crumbs.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("", tooltip=False, prefer_full_width=True)
+        self._update_floor()
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt API
+        super().setText(text)
+        self._update_floor()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().changeEvent(event)
+        # The sheet's font lands on polish; the floor must follow it.
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._update_floor()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        # A layout sizes an item by the larger of its hint and its *minimum*
+        # hint, and QLabel's minimum hint stayed at the width of an earlier,
+        # longer text, which kept the gap open. The floor is the minimum.
+        return QSize(self.minimumWidth(), super().minimumSizeHint().height())
+
+    def _update_floor(self) -> None:
+        # Safe from ElidedLabel's constructor, which calls setText: the hint
+        # needs only state that constructor has already set.
+        self.setMinimumWidth(min(SCOPE_MIN_WIDTH_PX, self.sizeHint().width()))
+        self.updateGeometry()
 
 
 class ContextHeader(QWidget):
@@ -57,7 +98,10 @@ class ContextHeader(QWidget):
         # rendering, which callers and tests must not have to reason about.
         self._scope_text = ""
         self._crumb_text = ""
+        self._crumb_tail = ""
         self._notes_text = ""
+        # The width given by ``fit_to_width``; None until the window says.
+        self._available_width: int | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 6, 12, 6)
@@ -66,7 +110,10 @@ class ContextHeader(QWidget):
         self._narrow = False
         crumb_row = QHBoxLayout()
         crumb_row.setContentsMargins(0, 0, 0, 0)
-        crumb_row.setSpacing(8)
+        # No gap of its own: on one line the crumb text starts with the spaced
+        # separator (" › "), and 8 px more made the first step wider than the
+        # rest (plan C10). Stacked, the lines sit directly under each other.
+        crumb_row.setSpacing(0)
         self._crumb_row = crumb_row
 
         # Elided, like the rest of the strip. A plain QLabel sized itself to
@@ -75,10 +122,9 @@ class ContextHeader(QWidget):
         # shortening. It keeps a generous floor so that when space does run
         # out the crumb tail gives way first: the scope answers "what am I
         # even looking at?" and must never be the thing squeezed out.
-        self.scope_label = ElidedLabel("", tooltip=False)
+        self.scope_label = _ScopeLabel()
         self.scope_label.setObjectName("contextScope")
         apply_tier(self.scope_label, TIER_LANDMARK)
-        self.scope_label.setMinimumWidth(SCOPE_MIN_WIDTH_PX)
         self.scope_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         crumb_row.addWidget(self.scope_label)
 
@@ -93,7 +139,10 @@ class ContextHeader(QWidget):
         note_row.setContentsMargins(0, 0, 0, 0)
         note_row.setSpacing(8)
 
-        self.notes_label = ElidedLabel("")
+        # Two lines before eliding: the unavailable-action reasons must be
+        # readable inline (navigation contract), and a single elided line cut
+        # them off after the first one.
+        self.notes_label = WrappedElidedLabel("", max_lines=NOTES_MAX_LINES)
         self.notes_label.setObjectName("contextNotes")
         apply_tier(self.notes_label, TIER_SUPPORTING)
         self.notes_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -130,12 +179,33 @@ class ContextHeader(QWidget):
         self._crumb_row.setDirection(
             QBoxLayout.Direction.TopToBottom if narrow else QBoxLayout.Direction.LeftToRight
         )
-        self._crumb_row.setSpacing(0 if narrow else 8)
         self.clear_filter_button.setText("Clear" if narrow else "Clear filter")
         self._refresh()
 
     def is_narrow(self) -> bool:
         return self._narrow
+
+    def fit_to_width(self, available: int) -> None:
+        """Stack the crumbs under the scope only when one line cannot hold both.
+
+        This replaces a fixed workspace breakpoint (plan F3, D1), under which
+        the header took a second line on any laptop even when the scope and a
+        short crumb trail fitted with room to spare. It is re-checked whenever
+        the crumbs change, because a long selection name can tip the balance.
+        """
+
+        self._available_width = available
+        self._refit()
+
+    def _one_line_width(self) -> int:
+        margins = self.layout().contentsMargins()
+        tail = f"{CRUMB_SEPARATOR}{self._crumb_tail}" if self._crumb_tail else ""
+        crumbs = self.crumb_label.fontMetrics().horizontalAdvance(tail) + 6 if tail else 0
+        return margins.left() + margins.right() + self.scope_label.sizeHint().width() + crumbs
+
+    def _refit(self) -> None:
+        if self._available_width is not None:
+            self.set_narrow(self._one_line_width() > self._available_width)
 
     def set_context_stack(self, stack: ContextStack | None) -> None:
         self._stack = stack or ContextStack()
@@ -188,6 +258,7 @@ class ContextHeader(QWidget):
         # carries only what follows it.
         tail = [part for part in (stack.section, stack.selection_label) if part]
         crumbs = CRUMB_SEPARATOR.join(tail)
+        self._crumb_tail = crumbs
         # Stacked under the scope in narrow mode, so drop the leading separator
         # that only makes sense when the two sit on one line.
         if not crumbs:
@@ -200,14 +271,23 @@ class ContextHeader(QWidget):
         self.crumb_label.setToolTip(stack.to_text())
 
         notes = list(stack.view_state_notes())
-        notes.extend(f"Unavailable: {reason}" for reason in self._reasons)
-        text = "   ·   ".join(notes)
+        # "Unavailable:" once, followed by each distinct reason, instead of the
+        # prefix repeated before every reason in one run-on line.
+        if self._reasons:
+            notes.append(f"Unavailable: {NOTE_SEPARATOR.join(self._reasons)}")
+        text = NOTE_SEPARATOR.join(notes)
         self._notes_text = text
         self.notes_label.setText(text)
-        self.notes_label.setToolTip("\n".join(notes))
+        tooltip_lines = list(stack.view_state_notes())
+        if self._reasons:
+            tooltip_lines.append("Unavailable:")
+            tooltip_lines.extend(f"  • {reason}" for reason in self._reasons)
+        self.notes_label.setToolTip("\n".join(tooltip_lines))
         self.notes_label.setVisible(bool(text))
         self.clear_filter_button.setVisible(stack.has_filter)
 
         self.setAccessibleDescription(
             " ".join(part for part in (stack.to_text(), text) if part) or EMPTY_SCOPE_TEXT
         )
+        # New crumbs may no longer fit on the scope's line, or may now fit.
+        self._refit()

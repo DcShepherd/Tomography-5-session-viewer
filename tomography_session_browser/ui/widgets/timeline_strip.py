@@ -1166,7 +1166,7 @@ class TimelineStrip(QWidget):
 
     @staticmethod
     def _style_density_menu(menu: QMenu) -> None:
-        from tomography_session_browser.ui.theme import current_palette
+        from tomography_session_browser.ui.theme import RADIUS_CONTROL, current_palette
 
         theme = current_palette()
         if hasattr(menu, "setStyleSheet"):
@@ -1179,7 +1179,7 @@ class TimelineStrip(QWidget):
                 "}"
                 "QMenu::item {"
                 "padding: 6px 14px 6px 10px;"
-                "border-radius: 4px;"
+                f"border-radius: {RADIUS_CONTROL}px;"
                 "background: transparent;"
                 "}"
                 "QMenu::item:selected {"

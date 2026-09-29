@@ -25,6 +25,50 @@ from tomography_session_browser.services.loading_profiler import LoadingProfiler
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
 
+#: ``(label, current, total)``: what is being read now, e.g.
+#: ("Reading samples", 4, 13) or ("Reading tilt series", 5, 7).
+ScanProgress = Callable[[str, int, int], None]
+#: The parts of a collection sample, in the order they are read.
+COLLECTION_SAMPLE_PARTS = (
+    "atlas",
+    "overviews",
+    "search maps",
+    "batch positions",
+    "tilt series",
+    "links",
+    "search tiles",
+)
+
+
+class _ProgressReporter:
+    """Tells an optional progress callback what is being read.
+
+    For display only: the callback's errors are logged and ignored, so a
+    progress display can never change or stop what is parsed.
+    """
+
+    def __init__(self, callback: ScanProgress | None) -> None:
+        self._callback = callback
+
+    def _tell(self, label: str, current: int, total: int) -> None:
+        if self._callback is None:
+            return
+        try:
+            self._callback(label, current, total)
+        except Exception:  # noqa: BLE001 - display only; never break a load
+            LOGGER.debug("Load progress callback failed", exc_info=True)
+
+    def each(self, label: str, items: list[T]):
+        """Yield ``items``, telling the callback which one (1-based) is next."""
+
+        for index, item in enumerate(items, 1):
+            self._tell(label, index, len(items))
+            yield item
+
+    def part(self, name: str) -> None:
+        index = COLLECTION_SAMPLE_PARTS.index(name) + 1
+        self._tell(f"Reading {name}", index, len(COLLECTION_SAMPLE_PARTS))
+
 
 class SessionScanner:
     """Read-only scanner for Tomography 5 session-like folders."""
@@ -42,7 +86,22 @@ class SessionScanner:
             return SessionKind.SINGLE_COLLECTION
         return SessionKind.UNKNOWN
 
-    def load(self, path: Path, *, profile: LoadingProfiler | None = None) -> Session:
+    def load(
+        self,
+        path: Path,
+        *,
+        profile: LoadingProfiler | None = None,
+        progress: ScanProgress | None = None,
+    ) -> Session:
+        """Parse the session folder at ``path``.
+
+        ``progress(label, current, total)`` is told what is being read
+        ("Reading samples", 4, 13): the samples of a multi-sample session, or
+        the parts of a single sample. Display only; it changes nothing parsed,
+        and an error in it never stops a load.
+        """
+
+        report = _ProgressReporter(progress)
         root = Path(path)
         with _profile_phase(profile, "classify_layout"):
             kind = self.classify(root)
@@ -55,7 +114,10 @@ class SessionScanner:
                 _append_xml_warning(session.warnings, metadata, "ScreeningSession.dm")
             sample_dirs = self._sample_dirs(root)
             with _profile_phase(profile, "load_screening_samples", count=len(sample_dirs)):
-                session.samples = [self._load_screening_sample(sample_dir, profile=profile) for sample_dir in sample_dirs]
+                session.samples = [
+                    self._load_screening_sample(sample_dir, profile=profile)
+                    for sample_dir in report.each("Reading samples", sample_dirs)
+                ]
             root_atlas = _safe_parse(
                 "Root Atlas",
                 lambda: _profiled_parse(profile, "parse_root_atlas", lambda: parse_atlas_folder(root / "Atlas")),
@@ -71,9 +133,16 @@ class SessionScanner:
                 _append_xml_warning(session.warnings, metadata, "Session.dm")
             sample_dirs = self._sample_dirs(root)
             with _profile_phase(profile, "load_collection_samples", count=len(sample_dirs)):
-                session.samples = [self._load_collection_sample(sample_dir, profile=profile) for sample_dir in sample_dirs]
+                if len(sample_dirs) == 1:
+                    # One sample: its parts are what there is to count.
+                    session.samples = [self._load_collection_sample(sample_dirs[0], profile=profile, report=report)]
+                else:
+                    session.samples = [
+                        self._load_collection_sample(sample_dir, profile=profile)
+                        for sample_dir in report.each("Reading samples", sample_dirs)
+                    ]
         elif kind in {SessionKind.COLLECTION, SessionKind.SINGLE_COLLECTION}:
-            sample = self._load_collection_sample(root, profile=profile)
+            sample = self._load_collection_sample(root, profile=profile, report=report)
             session.samples = [sample]
             session.atlas = sample.atlas
             session.overviews = sample.overviews
@@ -111,7 +180,15 @@ class SessionScanner:
             sample.warnings.append("Screening sample has no parseable Atlas folder.")
         return sample
 
-    def _load_collection_sample(self, path: Path, *, profile: LoadingProfiler | None = None) -> Sample:
+    def _load_collection_sample(
+        self,
+        path: Path,
+        *,
+        profile: LoadingProfiler | None = None,
+        report: _ProgressReporter | None = None,
+    ) -> Sample:
+        # ``report`` counts this sample's parts, for a session of one sample.
+        part = report.part if report is not None else (lambda _label: None)
         sample = Sample(id=safe_id(path), name=path.name, path=path)
         session_dm = path / "Session.dm"
         if session_dm.exists():
@@ -120,16 +197,23 @@ class SessionScanner:
                 sample.metadata["Session.dm"] = metadata
                 _append_xml_warning(sample.warnings, metadata, "Session.dm")
 
+        part("atlas")
         sample.atlas = _safe_parse("Atlas", lambda: _profiled_parse(profile, "parse_atlas", lambda: parse_atlas_folder(path / "Atlas")), None, sample.warnings)
+        part("overviews")
         sample.overviews = _safe_parse("Overviews", lambda: self._parse_overviews(path, sample.warnings, profile=profile), [], sample.warnings)
+        part("search maps")
         sample.search_maps = _safe_parse("Search maps", lambda: self._parse_search_maps(path, sample.warnings, profile=profile), [], sample.warnings)
         sample.overviews.extend(search_map.overview for search_map in sample.search_maps if search_map.overview is not None)
+        part("batch positions")
         sample.batch_positions = _safe_parse("Batch positions", lambda: _profiled_parse(profile, "parse_batch_positions", lambda: parse_batch_folder(path / "Batch", sample.warnings)), [], sample.warnings)
+        part("tilt series")
         sample.tilt_series = _safe_parse("Tilt series", lambda: _profiled_parse(profile, "parse_tilt_series", lambda: parse_tilt_series_in_folder(path, sample.warnings)), [], sample.warnings)
         sample.name = self._sample_display_name(path, sample.metadata.get("Session.dm"), [tilt.name for tilt in sample.tilt_series])
+        part("links")
         with _profile_phase(profile, "link_batch_positions"):
             self._link_batch_positions_to_search_maps(sample)
             self._link_batch_positions_to_tilt_series(sample)
+        part("search tiles")
         sample.search_tiles = _safe_parse(
             "Search tiles",
             lambda: _profiled_parse(

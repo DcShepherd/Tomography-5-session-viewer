@@ -154,6 +154,14 @@ _RULES: tuple[_Rule, ...] = (
         patterns=(r"atlas markers unavailable",),
     ),
     _Rule(
+        category="Atlas re-acquired",
+        severity="info",
+        explanation="The Atlas folder holds more than one acquisition of this grid's atlas. "
+                    "Only the one Atlas.dm names (or the latest) is shown, because the "
+                    "overlay projection describes that acquisition.",
+        patterns=(r"atlas was re-acquired",),
+    ),
+    _Rule(
         category="Atlas files not found",
         severity="warning",
         explanation="The Atlas folder or Atlas.dm/atlas.xml file is missing.",

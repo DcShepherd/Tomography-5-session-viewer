@@ -5,21 +5,30 @@ from pathlib import Path
 from tomography_session_browser.domain.models import Session
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.services.loading_profiler import LoadingProfiler
-from tomography_session_browser.parsers.session_scanner import SessionScanner
+from tomography_session_browser.parsers.session_scanner import ScanProgress, SessionScanner
 
 
 class SessionLoader:
     def __init__(self, scanner: SessionScanner | None = None) -> None:
         self._scanner = scanner or SessionScanner()
 
-    def load(self, path: str | Path, *, profile: LoadingProfiler | None = None) -> Session:
+    def load(
+        self,
+        path: str | Path,
+        *,
+        profile: LoadingProfiler | None = None,
+        progress: ScanProgress | None = None,
+    ) -> Session:
+        """Load the session at ``path``; ``progress`` hears what is being read
+        (display only, see ``SessionScanner.load``)."""
+
         source = Path(path)
         with (profile.phase("validate_session_folder") if profile is not None else _null_phase()):
             if not source.exists():
                 raise FileNotFoundError(f"Session folder does not exist: {source}")
             if not source.is_dir():
                 raise NotADirectoryError(f"Session path is not a folder: {source}")
-        return self._scanner.load(source, profile=profile)
+        return self._scanner.load(source, profile=profile, progress=progress)
 
     def classify(self, path: str | Path) -> SessionKind:
         source = Path(path)

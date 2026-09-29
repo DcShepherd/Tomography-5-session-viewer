@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 import logging
 import math
+import os
 from pathlib import Path
 import time
 from typing import Any
 
 from PIL import Image
-from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, QStandardPaths, Qt, QThreadPool, QTimer, Signal, Slot
-from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QIcon, QImage, QKeyEvent, QKeySequence, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRegion, QShortcut, QWheelEvent
+import shiboken6
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, QStandardPaths, Qt, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QFontMetricsF, QIcon, QImage, QKeyEvent, QKeySequence, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRegion, QShortcut, QTransform, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -22,12 +24,15 @@ from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
+    QGraphicsTextItem,
     QGraphicsView,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QHeaderView,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -58,9 +63,29 @@ from tomography_session_browser.ui.empty_states import (
 )
 from tomography_session_browser.ui.widgets.empty_state_panel import EmptyStatePanel
 from tomography_session_browser.ui.list_decorations import paint_selection_marker
+from tomography_session_browser.ui.motion import (
+    DURATION_CAMERA_MS,
+    MOTION_PANEL,
+    MOTION_ZOOM,
+    ItemHoverAnimator,
+    MarkerPulse,
+    PictureFade,
+    SectionReveal,
+    Spring,
+    Tween,
+    ZoomPanPath,
+    blend,
+    camera_duration_ms,
+    ease_in_out_cubic,
+    live_section_reveal,
+    motion_enabled,
+    settle_layouts,
+    veil,
+    zoom_pan_path,
+)
 from tomography_session_browser.parsers.mrc_parser import MrcPreviewSource, NORMALISATION
 from tomography_session_browser.parsers.xml_parser import find_first
-from tomography_session_browser.services.item_status import ItemListStatus, display_status_label
+from tomography_session_browser.services.item_status import ItemListStatus, atlas_tile_count, display_status_label
 from tomography_session_browser.services.status_taxonomy import acquisition_state
 from tomography_session_browser.services.batch_label_service import (
     LABEL_STROKE_WIDTH_PX,
@@ -107,9 +132,11 @@ from tomography_session_browser.services.marker_clustering import (
 )
 from tomography_session_browser.services.tilt_angle_service import explicit_stack_order_tilt_angles, stack_order_tilt_angles
 from tomography_session_browser.services.timeline_service import build_acquisition_timeline
-from tomography_session_browser.ui.animations import fade_in
+from tomography_session_browser.services.navigation_service import tab_label_for_object
 from tomography_session_browser.ui.icons import themed_icon
+from tomography_session_browser.ui.theme import RADIUS_CARD, SPACE_M, SPACE_S, SPACE_XS
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
+from tomography_session_browser.ui.widgets.smooth_tree import SmoothScrollTree
 
 
 VIEWER_OBJECT_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -122,12 +149,46 @@ MAX_PREVIEW_DIMENSION = 2048
 # stay short because the strip is dense; these carry the full phrasing to
 # assistive technology and tooltips.
 NAVIGATION_ACTION_NAMES: dict[str, str] = {
+    "atlas": open_action_label("Atlas"),
     "batch": open_action_label("Batch position"),
     "search": open_action_label("Search"),
     "search_map": open_action_label("Search map"),
     "overview": open_action_label("Overview"),
     "tilt_series": open_action_label("Tilt series"),
 }
+# Broadest to finest: each image lies within the one before it. A jump to an
+# earlier one steps out to a broader view, to a later one steps in to detail,
+# and its button's arrow says which (display only; links are unaffected).
+IMAGE_HIERARCHY = ("Atlas", "Overview", "Search map", "Search", "Batch position", "Tilt series")
+_NAVIGATION_TARGET_TABS = {
+    "atlas": "Atlas",
+    "overview": "Overview",
+    "search_map": "Search map",
+    "search": "Search",
+    "batch": "Batch position",
+    "tilt_series": "Tilt series",
+}
+JUMP_STEP_OUT = "out"
+JUMP_STEP_IN = "in"
+_JUMP_ICONS = {JUMP_STEP_OUT: "step-out", JUMP_STEP_IN: "step-in"}
+_JUMP_DESCRIPTIONS = {
+    JUMP_STEP_OUT: "Steps out to a broader view.",
+    JUMP_STEP_IN: "Steps in to more detail.",
+}
+# The jump buttons, in the order of the tabs (``IMAGE_HIERARCHY``), so a row
+# reads from the broadest view to the finest wherever it appears.
+NAVIGATION_BUTTONS = (
+    ("atlas", "Atlas"),
+    ("overview", "Overview"),
+    ("search_map", "Search map"),
+    ("search", "Search"),
+    ("batch", "Batch"),
+    ("tilt_series", "Tilt series"),
+)
+# A framed arrival (``arrive_at_marker(frame=True)``: where every jump button
+# lands) zooms until the marker spans this share of the view's shorter side,
+# up to the Atlas zoom limit on any image.
+ARRIVAL_FRAME_SHARE = 0.4
 # How many logical images keep a remembered crop. Four proportional floats
 # each, so the cap is about memory discipline rather than size.
 VIEWPORT_MEMORY_LIMIT = 32
@@ -141,15 +202,74 @@ PYRAMID_LEVELS = (2048, 4096, 8192)
 LOGGER = logging.getLogger(__name__)
 MEDIUM_DETAIL_SCALE = 0.9
 HIGH_DETAIL_SCALE = 1.6
+# Wheel zoom per unit of angle delta: one 120-unit mouse notch is about 1.2×,
+# and a precision touchpad's small deltas zoom by as little as they scroll.
+# Every image now zooms this way; only the Atlas did, and the rest jumped
+# 1.25× or 0.8× per event whatever its size, which lurched on touchpads.
+WHEEL_ZOOM_BASE = 1.0015
+# One click of a zoom button: 1.25×, eased like a wheel notch (1.2×).
+BUTTON_ZOOM_STEP = 1.25
+# Angle units per pixel for a trackpad that reports only a pixel delta. A
+# notch (120 units) scrolls three lines, about 60 px, so a swipe zooms about
+# as much as it would scroll a list.
+WHEEL_ZOOM_UNITS_PER_PIXEL = 2.0
+# A refilled list says so: a veil in the list's colour lifts off it, starting
+# this opaque (the old fade began the list at 82%).
+LIST_REFILL_VEIL_OPACITY = 0.18
+LIST_REFILL_VEIL_MS = 140
+# How long after ``ease_next_refit`` a resize still counts as the side panel's
+# (plan F5.2). The layout runs within the same event-loop turn or the next; a
+# window drag a moment later must still refit at once.
+REFIT_EASE_ARM_S = 0.25
+# QGraphicsView.fitInView keeps this many pixels clear on every side; an eased
+# refit aims at the same scale so its last frame matches the real fit.
+_FIT_IN_VIEW_MARGIN_PX = 2
+# Selecting another item dissolves the previous image into the new one over
+# this long (plan F5.4), instead of cutting.
+IMAGE_CROSSFADE_MS = 120
+# The ring a jump's target pulses with starts just outside the marker as
+# drawn, within these bounds: a pinpoint marker still gets a ring the eye can
+# find, and a search-map footprint does not get one the size of the canvas.
+PULSE_MIN_RADIUS_PX = 10.0
+PULSE_MAX_RADIUS_PX = 120.0
 MIN_SCALE_BAR_SCREEN_PX = 58.0
 MAX_SCALE_BAR_SCREEN_PX = 190.0
 ZOOM_LABEL_MIN_WIDTH_PX = 48
-ZOOM_PANEL_HORIZONTAL_PADDING_PX = 6
-FLOATING_CONTROL_INSET_PX = 18
+# The viewer header's title keeps at least this much room (or its full text,
+# if shorter) before chips fold away; it used to shrink to a bare "…".
+HEADER_TITLE_MIN_PX = 140
+ZOOM_PANEL_HORIZONTAL_PADDING_PX = 2 * SPACE_XS
+# One inset, one size and one radius (RADIUS_CARD) for everything floating over
+# the canvas: the image badge, Overlays, the scale bar and legend, and the
+# zoom-and-export stack (plan C5). The corners used to sit 18 px in at the
+# top and 24 px at the bottom, and the controls ranged from 28 to 38 px tall.
+FLOATING_CONTROL_INSET_PX = SPACE_M
+FLOATING_CONTROL_SIZE_PX = 32
+# Qt's QWIDGETSIZE_MAX, which PySide6 does not export.
+_QWIDGETSIZE_MAX = (1 << 24) - 1
 VIEWER_LIST_MIN_WIDTH_PX = 268
+# The list keeps VIEWER_LIST_MIN_WIDTH_PX whenever the viewer beside it still
+# gets its own minimum, and gives up width down to this floor only when both
+# cannot fit (plan F3.5). In a 960 px window, with both side panels at their
+# floors, the splitter squeezed the list's panel below the list and its right
+# edge, status pills included, was cut off; names now elide instead.
+VIEWER_LIST_FLOOR_PX = 200
+# Beside a list, the canvas keeps at least this much: room for an image
+# between its floating controls, which sit 12 px in and 32 px wide. They are
+# moved, not laid out (F5.1), so they no longer set the canvas's minimum;
+# without this, a 960 px window gave the list its full width and squeezed the
+# image to ~70 px (found validating F7).
+VIEWER_CANVAS_MIN_WIDTH_PX = 200
+# Viewer list rows on the 4 px grid: 8 px padding, an 18 px name line, a 4 px
+# gap, a 16 px summary line and 8 px padding, inside a 1 px inset each side.
+# (58 px before, with a 7 px top pad and a 23 px summary offset.)
+LIST_ROW_HEIGHT_PX = 56
+_LIST_ROW_NAME_HEIGHT_PX = 18
+_LIST_ROW_SUMMARY_HEIGHT_PX = 16
 # Keep every bottom-floating viewer control on the same baseline so the scale
 # bar and zoom strip feel anchored to one frame edge instead of separate panes.
-FLOATING_CONTROL_BOTTOM_INSET_PX = 24
+# The same inset as the sides and top since C5; kept as a name for callers.
+FLOATING_CONTROL_BOTTOM_INSET_PX = FLOATING_CONTROL_INSET_PX
 EXPORT_RENDER_SCALE = 2.0
 MAX_EXPORT_DIMENSION_PX = 8192
 MAX_EXPORT_PIXELS = 50_000_000
@@ -680,10 +800,15 @@ class AtlasMarkerLegend(QWidget):
         ("failed", "Failed"),
         ("unattributed", "Unattributed"),
     )
+    WIDTH = 228
+    HEADER_HEIGHT = 34
+    EXPANDED_HEIGHT = 184
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._expanded = False
+        self._concealed = False
+        self._toggle_handler: Callable[[bool], None] | None = None
         self._counts = {status: 0 for status, _label in self._ROW_ORDER}
         self.setObjectName("atlasMarkerLegend")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -693,6 +818,41 @@ class AtlasMarkerLegend(QWidget):
     @property
     def expanded(self) -> bool:
         return self._expanded
+
+    def set_expanded(self, expanded: bool) -> None:
+        """Open or close the legend at once."""
+
+        if expanded == self._expanded:
+            return
+        self._expanded = expanded
+        self._sync_size()
+        self.update()
+
+    def set_toggle_handler(self, handler: Callable[[bool], None] | None) -> None:
+        """Route a click through ``handler(expanded)``, which may animate it."""
+
+        self._toggle_handler = handler
+
+    def set_concealed(self, concealed: bool) -> None:
+        """Paint nothing while a reveal shows the legend's picture (plan F5.6)."""
+
+        if concealed != self._concealed:
+            self._concealed = concealed
+            self.update()
+
+    def picture(self) -> QPixmap:
+        """The open legend, its arrow showing the current state."""
+
+        ratio = self.devicePixelRatioF() or 1.0
+        pixmap = QPixmap(round(self.WIDTH * ratio), round(self.EXPANDED_HEIGHT * ratio))
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        try:
+            self._paint(painter, self.WIDTH, self.EXPANDED_HEIGHT, rows=True, arrow_up=self._expanded)
+        finally:
+            painter.end()
+        return pixmap
 
     def set_markers(self, markers: list[ImageMarker]) -> None:
         counts = {status: 0 for status, _label in self._ROW_ORDER}
@@ -715,90 +875,96 @@ class AtlasMarkerLegend(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            self._expanded = not self._expanded
-            self._sync_size()
-            self.update()
+            if self._toggle_handler is not None:
+                self._toggle_handler(not self._expanded)
+            else:
+                self.set_expanded(not self._expanded)
             event.accept()
             return
         super().mousePressEvent(event)
 
     def _sync_size(self) -> None:
-        self.setFixedSize(228, 184 if self._expanded else 34)
+        self.setFixedSize(self.WIDTH, self.EXPANDED_HEIGHT if self._expanded else self.HEADER_HEIGHT)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt signature
         super().paintEvent(event)
-        from tomography_session_browser.ui.theme import DARK_PALETTE, MONO_FONT_NAME, SANS_FONT_NAME
-
+        if self._concealed:
+            return
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         try:
-            painter.setPen(QPen(QColor(DARK_PALETTE.border_strong), 1.0))
-            painter.setBrush(QColor(DARK_PALETTE.surface))
-            painter.drawRoundedRect(
-                QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0),
-                8.0,
-                8.0,
-            )
-            painter.setPen(QColor(DARK_PALETTE.safe_text_light))
-            title_font = QFont(SANS_FONT_NAME)
-            title_font.setPixelSize(12)
-            painter.setFont(title_font)
-            painter.drawText(
-                QRectF(34.0, 0.0, 160.0, 34.0),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                "Marker legend",
-            )
-            _paint_legend_cluster_glyph(painter, QPointF(17.0, 17.0))
-            painter.setPen(QColor(DARK_PALETTE.text_muted))
-            painter.drawText(
-                QRectF(196.0, 0.0, 18.0, 34.0),
-                Qt.AlignmentFlag.AlignCenter,
-                "▴" if self._expanded else "▾",
-            )
-            if not self._expanded:
-                return
-
-            y = 34.0
-            label_font = QFont(SANS_FONT_NAME)
-            label_font.setPixelSize(12)
-            count_font = QFont(MONO_FONT_NAME)
-            count_font.setPixelSize(11)
-            for status, label in self._ROW_ORDER:
-                _paint_chrome_leaf_glyph(
-                    painter,
-                    QPointF(17.0, y + 12.0),
-                    status,
-                    diameter=12.0,
-                    halo=True,
-                )
-                painter.setFont(label_font)
-                painter.setPen(QColor(MARKER_LABEL_TEXT))
-                painter.drawText(
-                    QRectF(34.0, y, 140.0, 24.0),
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                    label,
-                )
-                painter.setFont(count_font)
-                painter.setPen(QColor(DARK_PALETTE.text_muted))
-                painter.drawText(
-                    QRectF(174.0, y, 38.0, 24.0),
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                    str(self._counts[status]),
-                )
-                y += 24.0
-
-            painter.setPen(QPen(QColor(DARK_PALETTE.border_strong), 1.0))
-            painter.drawLine(QPointF(12.0, y + 1.0), QPointF(216.0, y + 1.0))
-            _paint_legend_cluster_glyph(painter, QPointF(17.0, y + 15.0))
-            painter.setFont(label_font)
-            painter.setPen(QColor(DARK_PALETTE.safe_text_light))
-            painter.drawText(
-                QRectF(34.0, y + 3.0, 178.0, 24.0),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                "n = members, ring = mix",
-            )
+            self._paint(painter, self.width(), self.height(), rows=self._expanded, arrow_up=self._expanded)
         finally:
             painter.end()
+
+    def _paint(self, painter: QPainter, width: int, height: int, *, rows: bool, arrow_up: bool) -> None:
+        from tomography_session_browser.ui.theme import DARK_PALETTE, MONO_FONT_NAME, RADIUS_CARD, SANS_FONT_NAME
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(DARK_PALETTE.border_strong), 1.0))
+        painter.setBrush(QColor(DARK_PALETTE.surface))
+        painter.drawRoundedRect(
+            QRectF(0.5, 0.5, width - 1.0, height - 1.0),
+            RADIUS_CARD,
+            RADIUS_CARD,
+        )
+        painter.setPen(QColor(DARK_PALETTE.safe_text_light))
+        title_font = QFont(SANS_FONT_NAME)
+        title_font.setPixelSize(12)
+        painter.setFont(title_font)
+        painter.drawText(
+            QRectF(34.0, 0.0, 160.0, 34.0),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            "Marker legend",
+        )
+        _paint_legend_cluster_glyph(painter, QPointF(17.0, 17.0))
+        painter.setPen(QColor(DARK_PALETTE.text_muted))
+        painter.drawText(
+            QRectF(196.0, 0.0, 18.0, 34.0),
+            Qt.AlignmentFlag.AlignCenter,
+            "▴" if arrow_up else "▾",
+        )
+        if not rows:
+            return
+
+        y = 34.0
+        label_font = QFont(SANS_FONT_NAME)
+        label_font.setPixelSize(12)
+        count_font = QFont(MONO_FONT_NAME)
+        count_font.setPixelSize(11)
+        for status, label in self._ROW_ORDER:
+            _paint_chrome_leaf_glyph(
+                painter,
+                QPointF(17.0, y + 12.0),
+                status,
+                diameter=12.0,
+                halo=True,
+            )
+            painter.setFont(label_font)
+            painter.setPen(QColor(MARKER_LABEL_TEXT))
+            painter.drawText(
+                QRectF(34.0, y, 140.0, 24.0),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                label,
+            )
+            painter.setFont(count_font)
+            painter.setPen(QColor(DARK_PALETTE.text_muted))
+            painter.drawText(
+                QRectF(174.0, y, 38.0, 24.0),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                str(self._counts[status]),
+            )
+            y += 24.0
+
+        painter.setPen(QPen(QColor(DARK_PALETTE.border_strong), 1.0))
+        painter.drawLine(QPointF(12.0, y + 1.0), QPointF(216.0, y + 1.0))
+        _paint_legend_cluster_glyph(painter, QPointF(17.0, y + 15.0))
+        painter.setFont(label_font)
+        painter.setPen(QColor(DARK_PALETTE.safe_text_light))
+        painter.drawText(
+            QRectF(34.0, y + 3.0, 178.0, 24.0),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            "n = members, ring = mix",
+        )
 
 
 class _AtlasClusterRow(QPushButton):
@@ -881,13 +1047,13 @@ class AtlasClusterPopup(QFrame):
         parent: QWidget,
     ) -> None:
         super().__init__(parent)
-        from tomography_session_browser.ui.theme import DARK_PALETTE
+        from tomography_session_browser.ui.theme import DARK_PALETTE, RADIUS_CARD
 
         self.setObjectName("atlasClusterPopup")
         self.setFixedWidth(216)
         self.setStyleSheet(
             f"#atlasClusterPopup {{ background: {DARK_PALETTE.surface}; "
-            f"border: 1px solid {DARK_PALETTE.border_strong}; border-radius: 8px; }}"
+            f"border: 1px solid {DARK_PALETTE.border_strong}; border-radius: {RADIUS_CARD}px; }}"
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1016,11 +1182,28 @@ class ImagePreviewView(QGraphicsView):
         self._current_image_key: Any | None = None
         self._has_user_interacted = False
         self._pending_initial_fit = False
+        # True while the view tracks fit-to-viewport: after the initial fit or
+        # the Fit button, until the user zooms or actually pans. Resizing the
+        # viewer (window resize, maximise, dock toggle) re-fits in this mode,
+        # so the image never keeps a stale scale. Separate from
+        # ``_has_user_interacted``, which a plain click also sets.
+        self._fit_mode = False
+        self._refitting = False
+        self._press_scroll: tuple[int, int] | None = None
+        # The canvas message ("Loading MRC preview...", "Preview unavailable").
+        # Hidden whenever the viewer tab's empty-state panel is showing, so the
+        # two never say the same thing on top of each other.
+        self._placeholder_item: QGraphicsTextItem | None = None
+        self._placeholder_visible = True
         self._last_view_range: tuple[tuple[float, float], tuple[float, float]] | None = None
         # Viewport memory, keyed by *logical image* rather than by tab, so a
         # different image can never inherit another's crop. Stores only the
         # scene-space rectangle the user was looking at.
         self._view_memory: OrderedDict[Any, tuple[float, float, float, float]] = OrderedDict()
+        # Tilt series: one crop for all the frames of the series on show (the
+        # active group), and none for a series already left.
+        self._view_group_of: Callable[[Any], Any] | None = None
+        self._active_view_group: Any = None
         self._current_image_shape: tuple[int, int] | None = None
         self._markers: list[ImageMarker] = []
         self._marker_items: list[QGraphicsItem] = []
@@ -1028,6 +1211,9 @@ class ImagePreviewView(QGraphicsView):
         self._marker_opened: Callable[[ImageMarker], None] | None = None
         self._cluster_member_activated: Callable[[ImageMarker], None] | None = None
         self._visible_marker_types: set[str] = set(DEFAULT_VISIBLE_MARKER_TYPES)
+        # Marker types a single press passes through, so it pans the image
+        # like a press on empty image; double-click still opens them.
+        self._pan_through_marker_types: frozenset[str] = frozenset()
         self._atlas_lod_enabled = False
         self._atlas_lod_options = {
             ATLAS_LOD_CLUSTER: True,
@@ -1047,6 +1233,68 @@ class ImagePreviewView(QGraphicsView):
         self._marker_redraw_debounce.setSingleShot(True)
         self._marker_redraw_debounce.setInterval(ZOOM_DEBOUNCE_MS)
         self._marker_redraw_debounce.timeout.connect(self._redraw_markers)
+        # Wheel zoom eases toward a retargetable target (plan F5.1). The spring
+        # runs in log-zoom, so a notch takes the same time at any scale, and it
+        # moves only the view transform. The anchor is the cursor's viewport
+        # position and the scene point under it when the notch arrived.
+        self._wheel_zoom = Spring(0.0, spec=MOTION_ZOOM, on_update=self._wheel_zoom_step, widget=self)
+        self._wheel_anchor: tuple[QPointF, QPointF] | None = None
+        # A side panel opening or closing eases a fitted image to its new fit
+        # rather than snapping (plan F5.2). The spring runs 0 → 1 between the
+        # (scale, scene centre) pairs below; ``ease_next_refit`` arms it.
+        self._refit_ease = Spring(
+            0.0,
+            spec=MOTION_PANEL,  # the same spring as the panel's slide
+            on_update=self._refit_ease_step,
+            on_settled=self._refit_ease_done,
+            widget=self,
+            # The last frame lands on the exact fit, so the tail can stop a
+            # fraction of a pixel short.
+            settle_distance=2e-3,
+            settle_velocity=0.05,
+        )
+        self._refit_ease_armed_until = 0.0
+        self._refit_from: tuple[float, QPointF] | None = None
+        self._refit_to: tuple[float, QPointF] | None = None
+        self._scroll_policies: tuple[Qt.ScrollBarPolicy, Qt.ScrollBarPolicy] | None = None
+        # Selecting another item arms a crossfade for the next new image
+        # (plan F5.4); frame scrubbing never arms it, so it stays crisp.
+        self._crossfade_armed = False
+        self._crossfade: PictureFade | None = None
+        # The camera flies to a target instead of cutting to it, and a jump's
+        # target pulses once where it landed (plan F5.7). Only the view
+        # transform moves; markers and their projection are untouched.
+        self._flight = Tween(
+            DURATION_CAMERA_MS,
+            on_update=self._flight_step,
+            on_finished=self._land_flight,
+            widget=self,
+            easing=ease_in_out_cubic,
+        )
+        self._flight_path: ZoomPanPath | None = None
+        self._flight_from: tuple[float, float] | None = None  # scale and zoom at take-off
+        self._flight_to: tuple[float, QPointF, float] | None = None  # scale, scene centre, zoom
+        self._flight_landed: Callable[[], None] | None = None
+        self._arrival_in_flight: str | None = None
+        self._pending_arrival: str | None = None
+        self._arrival_ready: Callable[[], bool] | None = None
+        self._arrival_frames = False
+        self._arrival_timer = QTimer(self)
+        self._arrival_timer.setSingleShot(True)
+        self._arrival_timer.timeout.connect(self._try_arrival)
+        self._pulse: MarkerPulse | None = None
+
+        # The shared ticker must never step a view that has been destroyed
+        # mid-motion; the handler holds the springs, not the view. Only while
+        # they animate: at exit the ticker's own timer may already be gone.
+        def _stop_springs(*_args, springs=(self._wheel_zoom, self._refit_ease), flight=self._flight) -> None:
+            for spring in springs:
+                if spring.is_animating:
+                    spring.reset(spring.value)
+            if flight.is_animating:
+                flight.stop()
+
+        self.destroyed.connect(_stop_springs)
         self.setScene(self._scene)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -1056,6 +1304,11 @@ class ImagePreviewView(QGraphicsView):
         self.setBackgroundBrush(Qt.GlobalColor.black)
 
     def clear(self, message: str = "") -> None:
+        self._stop_view_motion()
+        # Nothing to dissolve into: a message or an empty canvas is not an image.
+        self._crossfade_armed = False
+        self._dismiss_crossfade()
+        self._dismiss_pulse()
         # Bank the crop before the key is dropped, so a rebuild that lands the
         # user back on the same image returns them to where they were.
         self.remember_current_view()
@@ -1071,14 +1324,54 @@ class ImagePreviewView(QGraphicsView):
         self._current_image_key = None
         self._has_user_interacted = False
         self._pending_initial_fit = False
+        self._fit_mode = False
         self._last_view_range = None
         self._current_image_shape = None
+        self._placeholder_item = None
+        # Drop the outgoing image's scale. Without this the message below was
+        # drawn through the previous shrink-to-fit transform and rendered a
+        # few pixels high in the corner of the canvas.
+        self.resetTransform()
         if message:
             from tomography_session_browser.ui.theme import SANS_FONT_NAME, current_palette
 
             theme = current_palette()
             text_item = self._scene.addText(message, QFont(SANS_FONT_NAME, 10))
             text_item.setDefaultTextColor(QColor(theme.text_muted))
+            text_item.setVisible(self._placeholder_visible)
+            self._placeholder_item = text_item
+            # The scene rect still described the old image; shrink it to the
+            # message so the view centres the text instead of a stale corner.
+            self._scene.setSceneRect(text_item.boundingRect())
+        else:
+            self._scene.setSceneRect(QRectF())
+
+    def refresh_theme(self) -> None:
+        """Redraw the markers already shown in the new palette (plan F5.8a).
+
+        Marker items bake their colours in when drawn, so they are drawn
+        again from the same markers; nothing is derived again. The canvas
+        message keeps the colour it was made with, so it is recoloured too.
+        """
+
+        from tomography_session_browser.ui.theme import current_palette
+
+        if self._placeholder_item is not None:
+            self._placeholder_item.setDefaultTextColor(QColor(current_palette().text_muted))
+        self._redraw_markers()
+        self.viewport().update()
+
+    def set_placeholder_visible(self, visible: bool) -> None:
+        """Show or hide the canvas message without changing the image state."""
+
+        self._placeholder_visible = bool(visible)
+        if self._placeholder_item is not None:
+            self._placeholder_item.setVisible(self._placeholder_visible)
+
+    @property
+    def placeholder_text(self) -> str:
+        item = self._placeholder_item
+        return item.toPlainText() if item is not None and item.isVisible() else ""
 
     def load_raster_path(
         self,
@@ -1141,6 +1434,16 @@ class ImagePreviewView(QGraphicsView):
         self._atlas_lod_enabled = bool(enabled)
         self._cluster_cache.clear()
         self._redraw_markers()
+
+    def set_pan_through_marker_types(self, marker_types: Iterable[str]) -> None:
+        """Let a single press on these markers pan instead of selecting.
+
+        For large area overlays, such as the search-map tile grid on an
+        Overview, where selecting on press would leave most of the image
+        impossible to drag. Double-click still opens the marker.
+        """
+
+        self._pan_through_marker_types = frozenset(marker_types)
 
     def set_atlas_lod_option(self, key: str, enabled: bool) -> None:
         if key not in self._atlas_lod_options:
@@ -1207,10 +1510,42 @@ class ImagePreviewView(QGraphicsView):
         )
 
     def zoom_in(self) -> None:
-        self._scale_by_center(1.25)
+        self._scale_by_center(BUTTON_ZOOM_STEP)
 
     def zoom_out(self) -> None:
-        self._scale_by_center(0.8)
+        self._scale_by_center(1.0 / BUTTON_ZOOM_STEP)
+
+    def ease_zoom_by(self, factor: float) -> None:
+        """A zoom button's step, eased as the wheel's is, about the centre.
+
+        The buttons cut while the wheel eased (plan F5.1 kept them instant).
+        Clicks during a step add up, as notches do, and the zoom goes on from
+        wherever a refit or flight had got to; reduced motion jumps. The
+        instant ``zoom_in``/``zoom_out`` remain for code that needs the view
+        changed at once.
+        """
+
+        if self._pixmap_item is None:
+            return
+        self._zoom_toward(factor, QPointF(self.viewport().rect().center()))
+
+    def ease_to_fit(self) -> None:
+        """The Fit button: ease back to the fit and land exactly on it.
+
+        As a side panel's ride-along does (plan F5.2): only the view
+        transform moves. ``fit_image`` stays instant for code.
+        """
+
+        if self._pixmap_item is None:
+            return
+        if not motion_enabled(self) or self.is_fit_mode:
+            self.fit_image()
+            return
+        self._mark_user_interacted("fit")
+        self._stop_view_motion()
+        self._close_cluster_popup()
+        self._fit_mode = True
+        self._ease_to_fit()
 
     def set_atlas_zoom(self, zoom: float) -> None:
         if not self._atlas_lod_enabled or self._pixmap_item is None:
@@ -1247,8 +1582,11 @@ class ImagePreviewView(QGraphicsView):
 
         if self._current_image_key is None or self._pixmap_item is None:
             return
-        if not self._has_user_interacted:
-            self._view_memory.pop(self._current_image_key, None)
+        memory_key = self._view_memory_key(self._current_image_key)
+        if self._view_group_of is not None and memory_key != self._active_view_group:
+            return  # a series already left is not remembered
+        if not self._has_user_interacted or self.is_fit_mode:
+            self._view_memory.pop(memory_key, None)
             return
         rect = self.mapToScene(self.viewport().rect()).boundingRect()
         item_rect = self._pixmap_item.boundingRect()
@@ -1257,20 +1595,58 @@ class ImagePreviewView(QGraphicsView):
         # Stored proportionally so a resized window, or a different pyramid
         # level of the same image, restores the same region rather than the
         # same pixel coordinates.
-        self._view_memory[self._current_image_key] = (
+        self._view_memory[memory_key] = (
             rect.left() / item_rect.width(),
             rect.top() / item_rect.height(),
             rect.width() / item_rect.width(),
             rect.height() / item_rect.height(),
         )
-        self._view_memory.move_to_end(self._current_image_key)
+        self._view_memory.move_to_end(memory_key)
         while len(self._view_memory) > VIEWPORT_MEMORY_LIMIT:
             self._view_memory.popitem(last=False)
+
+    def share_view_within_groups(self, group_of: Callable[[Any], Any]) -> None:
+        """Carry the crop between the images of one group, and only there.
+
+        For the frames of a tilt series: a reviewer zooms in on something
+        small and follows it through the tilt, so each frame opens where the
+        last was left. ``group_of`` maps a logical image key to its group
+        (the series). Another group opens fitted, and a group that was left
+        is not remembered, so returning to a series shows it fitted. Without
+        this, each image keeps its own crop.
+        """
+
+        self._view_group_of = group_of
+        self._view_memory.clear()
+
+    def begin_view_group(self, group: Any) -> None:
+        """Another group (a tilt series) is being shown: forget the last one's crop."""
+
+        if group != self._active_view_group:
+            self._active_view_group = group
+            self._view_memory.clear()
+
+    def discard_user_view(self) -> None:
+        """Forget every remembered crop and show the current image fitted,
+        as if it had just been opened."""
+
+        self._view_memory.clear()
+        if self._pixmap_item is None or self._pending_initial_fit:
+            return
+        if self.is_fit_mode and not self._has_user_interacted:
+            return
+        self._has_user_interacted = False
+        self._fit_image()
+
+    def _view_memory_key(self, logical_image_key: Any) -> Any:
+        if self._view_group_of is None:
+            return logical_image_key
+        return self._view_group_of(logical_image_key)
 
     def _restore_remembered_view(self, logical_image_key: Any) -> bool:
         """Re-apply a remembered crop for ``logical_image_key``."""
 
-        remembered = self._view_memory.get(logical_image_key)
+        remembered = self._view_memory.get(self._view_memory_key(logical_image_key))
         if remembered is None or self._pixmap_item is None:
             return False
         item_rect = self._pixmap_item.boundingRect()
@@ -1302,6 +1678,8 @@ class ImagePreviewView(QGraphicsView):
         self.centerOn(target.center())
         self._pending_initial_fit = False
         self._has_user_interacted = True
+        # A remembered crop is the user's own framing, not a fit to follow.
+        self._fit_mode = False
         visible = self.mapToScene(viewport_rect).boundingRect()
         self._zoom = item_rect.width() / visible.width() if visible.width() > 0 else 1.0
         return True
@@ -1398,6 +1776,12 @@ class ImagePreviewView(QGraphicsView):
         return self._current_image_key
 
     @property
+    def markers(self) -> tuple[ImageMarker, ...]:
+        """Every marker given for the image, shown at this zoom or not."""
+
+        return tuple(self._markers)
+
+    @property
     def has_user_interacted(self) -> bool:
         return self._has_user_interacted
 
@@ -1405,13 +1789,21 @@ class ImagePreviewView(QGraphicsView):
     def pending_initial_fit(self) -> bool:
         return self._pending_initial_fit
 
+    @property
+    def is_fit_mode(self) -> bool:
+        """Whether an image is shown and the view is tracking fit-to-viewport."""
+
+        return self._fit_mode and self._pixmap_item is not None
+
     def _fit_image(self) -> None:
         if self._pixmap_item is None:
             return
+        self._stop_view_motion()
         self._close_cluster_popup()
         LOGGER.debug("fit_to_view logical_key=%s", self._current_image_key)
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
         self._zoom = 1.0
+        self._fit_mode = True
         self._last_view_range = self.view_range()
         self._schedule_marker_redraw()
         if self._zoom_changed is not None:
@@ -1419,23 +1811,48 @@ class ImagePreviewView(QGraphicsView):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt signature
         super().resizeEvent(event)
+        if self.is_fit_mode and not self._refitting and (
+            self._refit_ease.is_animating or time.monotonic() < self._refit_ease_armed_until
+        ):
+            # A side panel opened or closed: ride along to the new fit, and
+            # retarget if the layout resizes the viewport again mid-way.
+            self._refit_ease_armed_until = 0.0
+            self._ease_to_fit()
+        elif self.is_fit_mode and not self._refitting:
+            # The viewport changed size (window resize, maximise, dock toggle)
+            # while the user was looking at the fitted image: keep it fitted.
+            # Only the view transform changes; marker scene coordinates and
+            # projection are untouched. Markers are redrawn once the resize
+            # settles rather than on every intermediate size.
+            self._refitting = True
+            try:
+                self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+                self._zoom = 1.0
+                self._last_view_range = self.view_range()
+            finally:
+                self._refitting = False
+            self._marker_redraw_debounce.start()
         if self._zoom_changed is not None:
             QTimer.singleShot(0, lambda: self._zoom_changed(self._zoom))
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        delta = event.angleDelta().y()
-        factor = (
-            math.pow(1.0015, delta)
-            if self._atlas_lod_enabled
-            else (1.25 if delta > 0 else 0.8)
-        )
+        # The angle delta where there is one: wheels and most touchpads, and
+        # Qt calls the pixel delta unreliable on X11. Some trackpads report
+        # only pixels, which used to be accepted without zooming.
+        delta = float(event.angleDelta().y()) or event.pixelDelta().y() * WHEEL_ZOOM_UNITS_PER_PIXEL
+        if delta == 0:
+            # A horizontal tilt or swipe, or a gesture's empty start or end.
+            # It used to zoom out by 0.8.
+            event.accept()
+            return
+        factor = math.pow(WHEEL_ZOOM_BASE, delta)
         LOGGER.debug(
             "wheel zoom logical_key=%s factor=%s position=%s",
             self._current_image_key,
             factor,
             event.position(),
         )
-        self._scale_by(factor, self.mapToScene(event.position().toPoint()))
+        self._zoom_toward(factor, event.position())
         event.accept()
 
     def _set_pixmap(
@@ -1446,6 +1863,15 @@ class ImagePreviewView(QGraphicsView):
         logical_image_key: Any | None = None,
         pyramid_level: int | None = None,
     ) -> None:
+        # A new level of the same image (a pyramid upgrade) moves the scene
+        # coordinates under a flight to a jump's target; fly on from here once
+        # the new level is in.
+        resume_arrival = (
+            self._arrival_in_flight
+            if logical_image_key is not None and logical_image_key == self._current_image_key
+            else None
+        )
+        self._stop_view_motion()
         self._close_cluster_popup()
         old_shape = self._current_image_shape
         old_range = self.view_range()
@@ -1455,15 +1881,26 @@ class ImagePreviewView(QGraphicsView):
         old_relative_center = _relative_point(old_rect, old_center) if old_rect is not None and old_center is not None else None
         same_logical_image = logical_image_key is not None and logical_image_key == self._current_image_key
         is_new_logical_image = logical_image_key is None or not same_logical_image
+        # An armed crossfade is spent on this image whatever it is, so it can
+        # never carry over to a later frame change.
+        dissolve_from = None
+        if self._crossfade_armed:
+            self._crossfade_armed = False
+            if is_new_logical_image and self.isVisible():
+                dissolve_from = self._image_layer_snapshot()
         if is_new_logical_image:
+            # The ring belonged to the outgoing image.
+            self._dismiss_pulse()
             # Bank the outgoing image's crop before its key is replaced.
             self.remember_current_view()
             self._current_image_key = logical_image_key
             self._has_user_interacted = False
             self._pending_initial_fit = True
+            self._fit_mode = False
             self._zoom = 1.0
         preserve_current_view = (preserve_view or same_logical_image) and old_center is not None
         self._scene.clear()
+        self._placeholder_item = None
         self._marker_items = []
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._pixmap_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
@@ -1504,6 +1941,12 @@ class ImagePreviewView(QGraphicsView):
         self._redraw_markers()
         if self._zoom_changed is not None:
             self._zoom_changed(self._zoom)
+        if dissolve_from is not None:
+            self._start_crossfade(dissolve_from)
+        if resume_arrival is not None and self._pending_arrival is None:
+            self._pending_arrival = resume_arrival
+        if self._pending_arrival is not None:
+            self._arrival_timer.start(0)
         LOGGER.debug(
             "set_image: logical_key=%s pyramid_level=%s new_logical=%s "
             "user_interacted=%s pending_initial_fit=%s preserve_view=%s "
@@ -1520,38 +1963,554 @@ class ImagePreviewView(QGraphicsView):
             new_range,
         )
 
-    def _scale_by(self, factor: float, anchor_scene: QPointF) -> None:
+    def _zoom_toward(self, factor: float, anchor_view: QPointF) -> None:
+        """Ease the zoom by ``factor``, keeping the point under ``anchor_view``.
+
+        Retargetable: a notch that arrives mid-animation extends the target
+        from where it was heading rather than from where the view is, so fast
+        scrolling never loses notches, and the anchor follows the cursor.
+        With reduced motion the spring jumps, which is the old instant zoom.
+        """
+
         if self._pixmap_item is None:
             return
+        self._dismiss_crossfade()  # the zoom must show at once
+        self._stop_flight()  # the wheel takes the camera from wherever it is
+        if self._refit_from is not None:
+            self._end_refit_ease()  # zoom on from wherever the refit had got to
         self._close_cluster_popup()
+        was_fit = self._fit_mode
         self._mark_user_interacted("wheel_zoom")
+        spring = self._wheel_zoom
+        if not spring.is_animating:
+            spring.reset(math.log(max(self._zoom, 1e-6)))
+        target = spring.target + math.log(factor)
         if self._atlas_lod_enabled:
-            target_zoom = min(MAX_ATLAS_ZOOM, max(1.0, self._zoom * factor))
-            factor = target_zoom / max(self._zoom, 0.01)
-            if abs(factor - 1.0) < 1e-6:
+            target = min(math.log(MAX_ATLAS_ZOOM), max(0.0, target))
+            if abs(target - spring.target) < 1e-9 and not spring.is_animating:
+                # Zooming out at the Atlas floor changes nothing; stay fitted.
+                self._fit_mode = was_fit
                 return
-            self._zoom = target_zoom
-        else:
-            self._zoom *= factor
-        anchor_view = self.mapFromScene(anchor_scene)
+        self._wheel_anchor = (QPointF(anchor_view), self.mapToScene(anchor_view.toPoint()))
+        spring.set_target(target)
+
+    def _wheel_zoom_step(self, log_zoom: float) -> None:
+        if self._pixmap_item is None or self._wheel_anchor is None:
+            return
+        zoom = math.exp(log_zoom)
+        factor = zoom / max(self._zoom, 1e-6)
+        self._zoom = zoom
+        anchor_view, anchor_scene = self._wheel_anchor
         self.scale(factor, factor)
-        shifted_anchor = self.mapToScene(anchor_view)
-        delta = shifted_anchor - anchor_scene
-        current_center = self.mapToScene(self.viewport().rect().center())
-        self.centerOn(current_center - delta)
+        # Re-anchor against the fixed viewport point every step, so scroll-bar
+        # rounding cannot accumulate into a drift across the animation.
+        drift = self.mapToScene(anchor_view.toPoint()) - anchor_scene
+        self.centerOn(self.mapToScene(self.viewport().rect().center()) - drift)
         if self._zoom_changed is not None:
             self._zoom_changed(self._zoom)
         self._schedule_marker_redraw()
 
+    def _stop_wheel_zoom(self) -> None:
+        """Leave an eased wheel zoom where it is; something else moves the view now."""
+
+        if self._wheel_zoom.is_animating:
+            self._wheel_zoom.reset(math.log(max(self._zoom, 1e-6)))
+            self._wheel_anchor = None
+
+    # -- eased refit when a side panel moves (plan F5.2) ---------------------
+
+    def ease_next_refit(self) -> None:
+        """Ease, rather than snap, the fit-mode refit of the coming resize.
+
+        For a side panel opening or closing: the fitted image rides along to
+        its new fit. Only in fit mode and with motion on, and only for a
+        resize within ``REFIT_EASE_ARM_S``, so a later window drag still
+        refits at once. Only the view transform changes.
+        """
+
+        if self.is_fit_mode and motion_enabled(self):
+            self._refit_ease_armed_until = time.monotonic() + REFIT_EASE_ARM_S
+
+    def _fit_target(self) -> tuple[float, QPointF] | None:
+        """The (scale, scene centre) ``fitInView`` would produce now."""
+
+        if self._pixmap_item is None:
+            return None
+        margin = _FIT_IN_VIEW_MARGIN_PX
+        view_rect = QRectF(self.viewport().rect()).adjusted(margin, margin, -margin, -margin)
+        item_rect = self._pixmap_item.sceneBoundingRect()
+        if view_rect.width() <= 0 or view_rect.height() <= 0 or item_rect.width() <= 0 or item_rect.height() <= 0:
+            return None
+        scale = min(view_rect.width() / item_rect.width(), view_rect.height() / item_rect.height())
+        return scale, item_rect.center()
+
+    def _ease_to_fit(self) -> None:
+        target = self._fit_target()
+        if target is None:
+            return
+        self._refit_from = (self._zoom_scale(), self.mapToScene(self.viewport().rect().center()))
+        self._refit_to = target
+        # A shrinking viewport briefly shows the old, larger image; scroll
+        # bars appearing for that moment would resize the viewport again.
+        self._hold_scroll_bars()
+        self._refit_ease.reset(0.0)
+        self._refit_ease.set_target(1.0)
+
+    def _refit_ease_step(self, progress: float) -> None:
+        if self._pixmap_item is None or self._refit_from is None or self._refit_to is None:
+            return
+        (from_scale, from_centre), (to_scale, to_centre) = self._refit_from, self._refit_to
+        t = min(1.0, max(0.0, progress))
+        # Geometric in scale, so the image grows or shrinks at an even pace.
+        scale = from_scale * (to_scale / from_scale) ** t
+        self._refitting = True
+        try:
+            self.setTransform(QTransform.fromScale(scale, scale))
+            self.centerOn(from_centre + (to_centre - from_centre) * t)
+        finally:
+            self._refitting = False
+        self._last_view_range = self.view_range()
+        if self._zoom_changed is not None:
+            self._zoom_changed(self._zoom)
+        self._schedule_marker_redraw()
+
+    def _refit_ease_done(self) -> None:
+        if self._refit_from is None:
+            return
+        self._end_refit_ease()
+        if self.is_fit_mode:
+            # Land exactly where a snap would have, whatever rounding the
+            # eased frames accumulated.
+            self._refitting = True
+            try:
+                self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+                self._zoom = 1.0
+                self._last_view_range = self.view_range()
+            finally:
+                self._refitting = False
+            self._schedule_marker_redraw()
+            if self._zoom_changed is not None:
+                self._zoom_changed(self._zoom)
+
+    def _end_refit_ease(self) -> None:
+        if self._refit_to is not None:
+            # Zoom is relative to the fit; part-way there, say how far.
+            self._zoom = self._zoom_scale() / max(self._refit_to[0], 1e-9)
+        self._refit_ease.reset(self._refit_ease.value)
+        self._refit_ease_armed_until = 0.0
+        self._refit_from = self._refit_to = None
+        self._release_scroll_bars()
+
+    def _hold_scroll_bars(self) -> None:
+        """Keep scroll bars off while the view animates its transform: one
+        showing for a frame would resize the viewport under the motion."""
+
+        if self._scroll_policies is None:
+            self._scroll_policies = (self.horizontalScrollBarPolicy(), self.verticalScrollBarPolicy())
+            self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    def _release_scroll_bars(self) -> None:
+        if self._scroll_policies is not None:
+            horizontal, vertical = self._scroll_policies
+            self._scroll_policies = None
+            self.setHorizontalScrollBarPolicy(horizontal)
+            self.setVerticalScrollBarPolicy(vertical)
+
+    def _stop_view_motion(self, *, finish_fit: bool = False) -> None:
+        """Stop any eased zoom, refit or flight; something else moves the view now.
+
+        ``finish_fit`` lands an interrupted refit on the exact fit, for
+        interruptions that leave fit mode on (a press).
+        """
+
+        self._stop_wheel_zoom()
+        self._stop_flight()
+        # A dissolving picture covers the canvas; it must never hide a live
+        # change the reviewer just made.
+        self._dismiss_crossfade()
+        if self._refit_from is not None:
+            if finish_fit:
+                self._refit_ease_done()
+            else:
+                self._end_refit_ease()
+
+    # -- the camera: flights and a jump's arrival (plan F5.7) ----------------
+
+    def fly_to(
+        self,
+        centre: QPointF,
+        scale: float | None = None,
+        *,
+        zoom: float | None = None,
+        on_landed: Callable[[], None] | None = None,
+    ) -> None:
+        """Move the camera to ``centre`` (scene) at ``scale`` instead of cutting.
+
+        The path pans with a little zoom when the target is near, and zooms
+        out, crosses and zooms back in when it is far (never further out than
+        the whole image), so the reviewer sees where the camera went. It lands
+        exactly on ``scale`` and ``centre``; ``zoom`` is the zoom to report
+        there (relative to fit), by default the current one scaled along.
+        Reduced motion, a hidden view or an interruption end it at once or
+        where it is. Only the view transform moves.
+        """
+
+        if self._pixmap_item is None:
+            return
+        self._stop_view_motion()
+        self._close_cluster_popup()
+        from_scale = self._zoom_scale()
+        to_scale = from_scale if scale is None else max(float(scale), 1e-6)
+        from_centre = self.mapToScene(self.viewport().rect().center())
+        width = float(max(1, self.viewport().width()))
+        path = zoom_pan_path(
+            (from_centre.x(), from_centre.y()), width / from_scale, (centre.x(), centre.y()), width / to_scale
+        )
+        if path.length < 1e-3 and abs(to_scale - from_scale) <= 1e-9 * from_scale:
+            # Already there (as far as the view can go): nothing to move.
+            if on_landed is not None:
+                on_landed()
+            return
+        self._flight_from = (from_scale, self._zoom)
+        self._flight_to = (to_scale, QPointF(centre), zoom if zoom is not None else self._zoom * to_scale / from_scale)
+        self._flight_landed = on_landed
+        # A camera the program moved is not a fit to follow on resize.
+        self._fit_mode = False
+        if not motion_enabled(self) or not self.isVisible():
+            self._land_flight()
+            return
+        self._flight_path = path
+        self._hold_scroll_bars()
+        self._flight.duration_s = camera_duration_ms(path.length) / 1000.0
+        self._flight.start()
+
+    @property
+    def is_flying(self) -> bool:
+        return self._flight.is_animating
+
+    def _flight_step(self, progress: float) -> None:
+        path, start, end = self._flight_path, self._flight_from, self._flight_to
+        if path is None or start is None or end is None or self._pixmap_item is None:
+            return
+        x, y, visible_width = path.at(progress * path.length)
+        scale = self.viewport().width() / max(visible_width, 1e-9)
+        fit = self._fit_target()
+        if fit is not None:
+            # Out to the whole image at most: further out, Qt centres the
+            # smaller scene and the camera would leave its path.
+            scale = max(scale, min(fit[0], start[0], end[0]))
+        self.setTransform(QTransform.fromScale(scale, scale))
+        self.centerOn(QPointF(x, y))
+        self._zoom = start[1] * scale / start[0]
+        self._last_view_range = self.view_range()
+        if self._zoom_changed is not None:
+            self._zoom_changed(self._zoom)
+        self._schedule_marker_redraw()
+
+    def _land_flight(self) -> None:
+        target, landed = self._flight_to, self._flight_landed
+        self._flight_path = self._flight_from = self._flight_to = None
+        self._flight_landed = None
+        self._arrival_in_flight = None
+        self._release_scroll_bars()
+        if target is None or self._pixmap_item is None:
+            return
+        scale, centre, zoom = target
+        self.setTransform(QTransform.fromScale(scale, scale))
+        self.centerOn(centre)
+        self._zoom = zoom
+        self._last_view_range = self.view_range()
+        if self._zoom_changed is not None:
+            self._zoom_changed(self._zoom)
+        self._redraw_markers()
+        if landed is not None:
+            landed()
+
+    def _stop_flight(self) -> None:
+        """Leave a flight where it is: the reviewer, or a new image, has the camera."""
+
+        if self._flight.is_animating:
+            self._flight.stop()
+        if self._flight_to is not None:
+            self._flight_path = self._flight_from = self._flight_to = None
+            self._flight_landed = None
+            self._arrival_in_flight = None
+            self._release_scroll_bars()
+            self._schedule_marker_redraw()
+
+    def arrive_at_marker(
+        self,
+        marker_id: str | None,
+        *,
+        ready: Callable[[], bool] | None = None,
+        frame: bool = False,
+    ) -> None:
+        """Show where a jump landed: bring its marker into view, then pulse it.
+
+        At fit the marker is already in view, so only the ring shows; on a
+        zoomed view with the marker outside it, the camera flies there first.
+        ``frame`` flies in until the marker fills part of the view, for a
+        marker too small to find at fit (an Overview on its Atlas).
+        Waits for the image (it may still be decoding; ``ready`` says whether
+        the image shown is the destination's, and not the one it replaces),
+        for the view to be shown, and for a crossfade to finish. ``None``
+        cancels.
+        """
+
+        self._pending_arrival = marker_id or None
+        self._arrival_ready = ready if self._pending_arrival is not None else None
+        self._arrival_frames = frame and self._pending_arrival is not None
+        if self._pending_arrival is not None:
+            self._arrival_timer.start(0)
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        super().showEvent(event)
+        if self._pending_arrival is not None:
+            self._arrival_timer.start(0)
+
+    def _try_arrival(self) -> None:
+        marker_id = self._pending_arrival
+        if marker_id is None or self._pixmap_item is None or not self.isVisible():
+            return  # _set_pixmap and showEvent try again
+        if self._arrival_ready is not None and not self._arrival_ready():
+            return  # still the previous item's image; _set_pixmap tries again
+        if self.crossfade_in_progress:
+            # Dissolve first, then move: a picture over the canvas would hide
+            # the flight and freeze the ring.
+            self._arrival_timer.start(20)
+            return
+        self._pending_arrival = None
+        found = self._arrival_target(marker_id)
+        if found is None:
+            return
+        centre, radius = found
+        framing = None
+        if self._arrival_frames:
+            # Frame the marker itself, not the cluster that holds it at fit:
+            # the cluster breaks up as the camera flies in.
+            own = self._own_marker_geometry(marker_id)
+            if own is not None:
+                centre, radius = own
+            framing = self._framing_for(radius)
+        if framing is not None:
+            scale, zoom = framing
+            self.fly_to(centre, scale, zoom=zoom, on_landed=lambda: self._pulse_marker(marker_id))
+            if self.is_flying:
+                self._arrival_in_flight = marker_id
+        elif not self.is_fit_mode and not self._comfortably_in_view(centre):
+            self.fly_to(centre, on_landed=lambda: self._pulse_marker(marker_id))
+            if self.is_flying:
+                self._arrival_in_flight = marker_id
+        else:
+            self._pulse_marker(marker_id)
+
+    def _own_marker_geometry(self, marker_id: str) -> tuple[QPointF, float] | None:
+        for marker in self._markers:
+            if marker.id == marker_id:
+                return _marker_scene_geometry(self._project_marker(marker))
+        return None
+
+    def _framing_for(self, radius: float) -> tuple[float, float] | None:
+        """The scale, and zoom from fit, at which a marker of ``radius`` fills
+        ``ARRIVAL_FRAME_SHARE`` of the view: never past the Atlas zoom limit,
+        never further out than the fit or than the view already is. A point
+        marker (a batch position) frames at the limit."""
+
+        if self._pixmap_item is None:
+            return None
+        viewport = self.viewport().rect()
+        bounds = self._pixmap_item.boundingRect()
+        if min(viewport.width(), viewport.height(), bounds.width(), bounds.height()) <= 0:
+            return None
+        fit_scale = min(viewport.width() / bounds.width(), viewport.height() / bounds.height())
+        wanted = min(viewport.width(), viewport.height()) * ARRIVAL_FRAME_SHARE / (2.0 * max(radius, 1.0))
+        scale = max(min(max(wanted, fit_scale), fit_scale * MAX_ATLAS_ZOOM), self._zoom_scale())
+        return scale, scale / fit_scale
+
+    def _arrival_target(self, marker_id: str) -> tuple[QPointF, float] | None:
+        """The marker's scene centre and radius, or its cluster's on the Atlas."""
+
+        for marker in self._last_display_markers:
+            if marker.id == marker_id:
+                return _marker_scene_geometry(marker)
+        for marker in self._last_display_markers:
+            if marker.marker_type == MarkerType.BATCH_CLUSTER and marker_id in tuple(
+                marker.metadata.get("member_ids", ())
+            ):
+                return _marker_scene_geometry(marker)
+        for marker in self._markers:
+            if marker.id == marker_id:
+                return _marker_scene_geometry(self._project_marker(marker))
+        return None
+
+    def _marker_screen_radius(self, marker_id: str) -> float:
+        """The fixed on-screen radius of an Atlas marker (or its cluster), else 0."""
+
+        for marker in self._last_display_markers:
+            if marker.id == marker_id or (
+                marker.marker_type == MarkerType.BATCH_CLUSTER
+                and marker_id in tuple(marker.metadata.get("member_ids", ()))
+            ):
+                diameter = marker.metadata.get("diameter_px")
+                return float(diameter) / 2.0 if isinstance(diameter, int | float) else 0.0
+        return 0.0
+
+    def _comfortably_in_view(self, scene_point: QPointF) -> bool:
+        rect = self.viewport().rect()
+        margin = max(24, round(0.08 * min(rect.width(), rect.height())))
+        return rect.adjusted(margin, margin, -margin, -margin).contains(self.mapFromScene(scene_point))
+
+    def _reveal_marker(self, marker: ImageMarker) -> None:
+        """Pan to a marker the keyboard moved to off-screen."""
+
+        found = _marker_scene_geometry(marker)
+        if found is not None and not self.is_fit_mode and not self._comfortably_in_view(found[0]):
+            self.fly_to(found[0])
+
+    def _pulse_marker(self, marker_id: str) -> None:
+        if not motion_enabled(self) or self._pixmap_item is None:
+            return
+        found = self._arrival_target(marker_id)
+        if found is None:
+            return
+        from tomography_session_browser.ui.theme import current_palette
+
+        centre, scene_radius = found
+        rect = self._pixmap_item.boundingRect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        # Relative to the image, so a new level of the same image (a pyramid
+        # upgrade) keeps the ring on its marker.
+        relative = ((centre.x() - rect.left()) / rect.width(), (centre.y() - rect.top()) / rect.height())
+        relative_radius = scene_radius / rect.width()
+        screen_radius = self._marker_screen_radius(marker_id)
+
+        def locate() -> tuple[QPointF, float] | None:
+            item = self._pixmap_item
+            if item is None:
+                return None
+            bounds = item.boundingRect()
+            point = self.viewportTransform().map(
+                QPointF(bounds.left() + relative[0] * bounds.width(), bounds.top() + relative[1] * bounds.height())
+            )
+            radius = relative_radius * bounds.width() * self._zoom_scale()
+            return point, min(PULSE_MAX_RADIUS_PX, max(PULSE_MIN_RADIUS_PX, radius, screen_radius)) + 4.0
+
+        self._dismiss_pulse()
+        self._pulse = MarkerPulse(self.viewport(), locate, QColor(current_palette().overlay_selected))
+
+    def _dismiss_pulse(self) -> None:
+        pulse, self._pulse = self._pulse, None
+        if pulse is not None and shiboken6.isValid(pulse):
+            pulse.dismiss()
+
+    @property
+    def pulse(self) -> MarkerPulse | None:
+        pulse = self._pulse
+        return pulse if pulse is not None and shiboken6.isValid(pulse) and pulse.isVisible() else None
+
+    # -- crossfade between items (plan F5.4) ---------------------------------
+
+    def crossfade_next_image(self) -> None:
+        """Dissolve into the next new image instead of cutting to it.
+
+        For selecting another item: the image on screen stays while the next
+        one decodes (as before), then fades out over it. Spent by the very
+        next image set, whatever it is, so a later frame change never fades.
+        """
+
+        self._crossfade_armed = self._pixmap_item is not None and motion_enabled(self)
+
+    def _image_layer_snapshot(self) -> QPixmap | None:
+        """The displayed image alone, exactly as the viewport shows it now.
+
+        Markers are left out on purpose: the next item's markers are set
+        before its image arrives, so a grab of the viewport would show them
+        over the wrong image. They appear with the new image instead.
+        """
+
+        if self._pixmap_item is None:
+            return None
+        viewport = self.viewport()
+        ratio = viewport.devicePixelRatioF()
+        picture = QPixmap(max(1, round(viewport.width() * ratio)), max(1, round(viewport.height() * ratio)))
+        picture.setDevicePixelRatio(ratio)
+        picture.fill(self.backgroundBrush().color())
+        painter = QPainter(picture)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setTransform(self._pixmap_item.sceneTransform() * self.viewportTransform())
+        painter.drawPixmap(QPointF(0.0, 0.0), self._pixmap_item.pixmap())
+        painter.end()
+        return picture
+
+    def _start_crossfade(self, picture: QPixmap) -> None:
+        self._dismiss_crossfade()
+        viewport = self.viewport()
+        fade = PictureFade(viewport, viewport.rect(), picture, duration_ms=IMAGE_CROSSFADE_MS)
+        self._crossfade = fade
+        # One turn later, once the caller has finished with the new image
+        # (its marker selection), picture the new scene and begin. Until then
+        # the fade shows the old image, which is exactly what was on screen.
+        QTimer.singleShot(0, lambda: self._begin_crossfade(fade))
+
+    def _begin_crossfade(self, fade: PictureFade) -> None:
+        if self._crossfade is not fade:
+            return  # dismissed or replaced in the meantime
+        try:
+            fade.start(self._scene_picture())
+        except RuntimeError:
+            self._crossfade = None  # the view went away
+
+    def _scene_picture(self) -> QPixmap:
+        """The scene (image and markers) as the viewport shows it, without
+        the widgets floating over it."""
+
+        viewport = self.viewport()
+        ratio = viewport.devicePixelRatioF()
+        picture = QPixmap(max(1, round(viewport.width() * ratio)), max(1, round(viewport.height() * ratio)))
+        picture.setDevicePixelRatio(ratio)
+        picture.fill(self.backgroundBrush().color())
+        painter = QPainter(picture)
+        painter.setRenderHints(
+            QPainter.RenderHint.Antialiasing
+            | QPainter.RenderHint.TextAntialiasing
+            | QPainter.RenderHint.SmoothPixmapTransform,
+            True,
+        )
+        self.render(painter, QRectF(0.0, 0.0, viewport.width(), viewport.height()), viewport.rect())
+        painter.end()
+        return picture
+
+    def _dismiss_crossfade(self) -> None:
+        fade, self._crossfade = self._crossfade, None
+        if fade is not None:
+            try:
+                fade.dismiss()
+            except RuntimeError:
+                pass  # it had already finished and deleted itself
+
+    @property
+    def crossfade_in_progress(self) -> bool:
+        fade = self._crossfade
+        try:
+            return fade is not None and fade.isVisible()
+        except RuntimeError:
+            return False
+
     def _scale_by_center(self, factor: float) -> None:
         if self._pixmap_item is None:
             return
+        self._stop_view_motion()
         self._close_cluster_popup()
+        was_fit = self._fit_mode
         self._mark_user_interacted("button_zoom")
         if self._atlas_lod_enabled:
             target_zoom = min(MAX_ATLAS_ZOOM, max(1.0, self._zoom * factor))
             factor = target_zoom / max(self._zoom, 0.01)
             if abs(factor - 1.0) < 1e-6:
+                # Zooming out at the Atlas floor changes nothing; stay fitted.
+                self._fit_mode = was_fit
                 return
             self._zoom = target_zoom
         else:
@@ -1570,6 +2529,9 @@ class ImagePreviewView(QGraphicsView):
             self._redraw_markers()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        # A press (the start of a pan) takes the view from an easing zoom; a
+        # refit still in flight lands on the fit it promised.
+        self._stop_view_motion(finish_fit=True)
         if self._pixmap_item is None:
             super().mousePressEvent(event)
             return
@@ -1606,7 +2568,10 @@ class ImagePreviewView(QGraphicsView):
                 )
             ):
                 self._close_cluster_popup()
-            if isinstance(marker, ImageMarker):
+            if (
+                isinstance(marker, ImageMarker)
+                and marker.marker_type not in self._pan_through_marker_types
+            ):
                 if marker.marker_type == MarkerType.BATCH_CLUSTER:
                     self._activate_cluster(marker)
                     event.accept()
@@ -1618,7 +2583,19 @@ class ImagePreviewView(QGraphicsView):
             if self._image_contains_view_position(event.position().toPoint()):
                 self._clear_marker_interaction()
             self._mark_user_interacted("pan")
+            self._press_scroll = self._scroll_position()
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt signature
+        super().mouseReleaseEvent(event)
+        # A click is not a pan. Leave fit mode only when a drag actually moved
+        # the view; a fitted image usually has nothing to scroll at all.
+        if self._press_scroll is not None and self._press_scroll != self._scroll_position():
+            self._fit_mode = False
+        self._press_scroll = None
+
+    def _scroll_position(self) -> tuple[int, int]:
+        return (self.horizontalScrollBar().value(), self.verticalScrollBar().value())
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if self._pixmap_item is not None and event.button() == Qt.MouseButton.LeftButton:
@@ -1652,6 +2629,8 @@ class ImagePreviewView(QGraphicsView):
                 if selected is not None:
                     self._keyboard_marker_id = selected.id
                     self._redraw_markers()
+                    # Zoomed in, the next marker may be off-screen: go to it.
+                    self._reveal_marker(selected)
                     if (
                         self._marker_selected is not None
                         and selected.marker_type != MarkerType.BATCH_CLUSTER
@@ -1732,10 +2711,23 @@ class ImagePreviewView(QGraphicsView):
         relation to where they are on the image — pressing Right could jump
         across the micrograph. Movement now follows the overlay's geometry, so
         the keyboard order matches what the reviewer sees.
+
+        Area overlays (a search-map tile on an Overview, a template area) are
+        a ``bbox`` or ``polygon`` with no ``x``/``y``; they are placed by their
+        centre. Reading ``x``/``y`` directly raised a TypeError on the first
+        arrow press over such a marker.
         """
 
+        positioned: list[tuple[ImageMarker, float, float]] = []
+        for marker in markers:
+            found = _marker_scene_geometry(marker)
+            if found is not None:
+                positioned.append((marker, found[0].x(), found[0].y()))
+        if not positioned:
+            return None
+
         current = next(
-            (m for m in markers if m.id == self._keyboard_marker_id),
+            (entry for entry in positioned if entry[0].id == self._keyboard_marker_id),
             None,
         )
         if current is None:
@@ -1743,20 +2735,21 @@ class ImagePreviewView(QGraphicsView):
             reverse = key in {Qt.Key.Key_Left, Qt.Key.Key_Up}
             vertical = key in {Qt.Key.Key_Up, Qt.Key.Key_Down}
             return sorted(
-                markers,
-                key=lambda m: (m.y, m.x) if vertical else (m.x, m.y),
+                positioned,
+                key=lambda entry: (entry[2], entry[1]) if vertical else (entry[1], entry[2]),
                 reverse=reverse,
-            )[0]
+            )[0][0]
 
+        current_marker, current_x, current_y = current
         dx_sign = {Qt.Key.Key_Left: -1, Qt.Key.Key_Right: 1}.get(key, 0)
         dy_sign = {Qt.Key.Key_Up: -1, Qt.Key.Key_Down: 1}.get(key, 0)
 
         candidates: list[tuple[float, ImageMarker]] = []
-        for marker in markers:
-            if marker.id == current.id:
+        for marker, x, y in positioned:
+            if marker.id == current_marker.id:
                 continue
-            dx = marker.x - current.x
-            dy = marker.y - current.y
+            dx = x - current_x
+            dy = y - current_y
             # Must lie predominantly in the direction of travel.
             along = dx * dx_sign + dy * dy_sign
             across = abs(dy if dx_sign else dx)
@@ -1767,7 +2760,7 @@ class ImagePreviewView(QGraphicsView):
         if candidates:
             return min(candidates, key=lambda item: item[0])[1]
         # Nothing that way — stay put rather than wrapping to the far side.
-        return current
+        return current_marker
 
     def _activate_cluster(self, marker: ImageMarker) -> None:
         bounds = marker.metadata.get("member_bounds_scene")
@@ -1790,13 +2783,10 @@ class ImagePreviewView(QGraphicsView):
             max(2.2, self._zoom * 2.2),
         )
         factor = target_zoom / max(self._zoom, 0.01)
-        self._zoom = target_zoom
-        self.scale(factor, factor)
-        self.centerOn(center)
         self._keyboard_marker_id = marker.id
-        if self._zoom_changed is not None:
-            self._zoom_changed(self._zoom)
-        self._redraw_markers()
+        # Flies in rather than cutting (plan F5.7), and lands where the cut
+        # did: this scale, this centre, this zoom.
+        self.fly_to(center, self._zoom_scale() * factor, zoom=target_zoom)
 
     def _show_cluster_member_popup(self, marker: ImageMarker) -> None:
         self._close_cluster_popup()
@@ -1937,6 +2927,8 @@ class ImagePreviewView(QGraphicsView):
             )
         self._has_user_interacted = True
         self._pending_initial_fit = False
+        if reason in {"wheel_zoom", "button_zoom"}:
+            self._fit_mode = False
 
     def _redraw_markers(self) -> None:
         for item in self._marker_items:
@@ -2721,6 +3713,24 @@ def _marker_label_anchor(marker: ImageMarker) -> QPointF:
     return QPointF(0, 0)
 
 
+def _marker_scene_geometry(marker: ImageMarker) -> tuple[QPointF, float] | None:
+    """A displayed marker's centre and radius, in scene units."""
+
+    if marker.bbox is not None:
+        x, y, width, height = marker.bbox
+        return QPointF(x + width / 2.0, y + height / 2.0), max(width, height) / 2.0
+    if marker.polygon:
+        xs = [point[0] for point in marker.polygon]
+        ys = [point[1] for point in marker.polygon]
+        return (
+            QPointF((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0),
+            max(max(xs) - min(xs), max(ys) - min(ys)) / 2.0,
+        )
+    if marker.x is not None and marker.y is not None:
+        return QPointF(float(marker.x), float(marker.y)), float(marker.radius or 0.0)
+    return None
+
+
 def _relative_point(rect, point: QPointF) -> QPointF:
     width = rect.width() or 1.0
     height = rect.height() or 1.0
@@ -2795,12 +3805,64 @@ class FrameSelectionSlider(QSlider):
         return handle.center().x()
 
 
+SHARED_NAME_PREFIX_PROPERTY = "sharedNamePrefix"
+_NAME_PREFIX_BOUNDARIES = "_- ."
+_MIN_SHARED_PREFIX_CHARS = 4
+
+
+def shared_name_prefix(names: list[str]) -> str:
+    """The leading words every name in a list shares, e.g. ``SearchMap_``.
+
+    Cut back to a word boundary so the prefix never splits a token such as a
+    date (``SearchMap_202603`` becomes ``SearchMap_``). Empty when the list is
+    too small, the prefix is too short to be worth dropping, or dropping it
+    would leave some name with almost nothing.
+    """
+
+    distinct = {name for name in names if name}
+    if len(distinct) < 2:
+        return ""
+    common = os.path.commonprefix(sorted(distinct))
+    cut = max(common.rfind(boundary) for boundary in _NAME_PREFIX_BOUNDARIES)
+    prefix = common[: cut + 1] if cut >= 0 else ""
+    if len(prefix) < _MIN_SHARED_PREFIX_CHARS:
+        return ""
+    if any(len(name) - len(prefix) < 2 for name in distinct):
+        return ""
+    return prefix
+
+
+def fit_list_name(name: str, metrics: QFontMetrics, width: int, shared_prefix: str = "") -> str:
+    """Fit a list-row name into ``width``, keeping the part that tells rows apart.
+
+    Middle-elision alone wasted the kept characters on the prefix every row
+    shares: every search-map row read ``Searc…21641``. When a name does not
+    fit and starts with the list's shared prefix, that prefix gives way first
+    (``…20260320_021641``); the full name stays in the tooltip and the
+    context header. Display only.
+    """
+
+    if metrics.horizontalAdvance(name) <= width:
+        return name
+    if shared_prefix and name.startswith(shared_prefix):
+        remainder = name[len(shared_prefix):]
+        # The leading "…" is the only sign that the shared prefix was dropped.
+        if metrics.horizontalAdvance("…" + remainder) <= width:
+            return "…" + remainder
+        # Past the shared prefix, the tail is what differs between rows (for
+        # acquisitions it is the time), so keep the tail: "…320_021641".
+        return metrics.elidedText(remainder, Qt.TextElideMode.ElideLeft, width)
+    return metrics.elidedText(name, Qt.TextElideMode.ElideMiddle, width)
+
+
 class _ViewerListDelegate(QStyledItemDelegate):
+    hover_animator: ItemHoverAnimator | None = None
+
     def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:  # noqa: N802 - Qt API
-        return QSize(super().sizeHint(option, index).width(), 58)
+        return QSize(super().sizeHint(option, index).width(), LIST_ROW_HEIGHT_PX)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:  # noqa: N802 - Qt API
-        from tomography_session_browser.ui.theme import current_palette
+        from tomography_session_browser.ui.theme import RADIUS_CONTROL, TYPE_BODY, TYPE_CAPTION, current_palette
 
         theme = current_palette()
         primary = str(index.data(LIST_PRIMARY_ROLE) or index.data(Qt.ItemDataRole.DisplayRole) or "")
@@ -2813,10 +3875,16 @@ class _ViewerListDelegate(QStyledItemDelegate):
         rect = option.rect.adjusted(0, 1, 0, -1)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
-        fill = QColor(theme.selection if selected else theme.surface_alt if hovered else theme.panel)
+        # Hover fades in and out (plan F4) instead of snapping between fills.
+        hover = self.hover_animator.progress(index) if self.hover_animator is not None else float(hovered)
+        fill = (
+            QColor(theme.selection)
+            if selected
+            else blend(QColor(theme.panel), QColor(theme.surface_alt), hover)
+        )
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(fill)
-        painter.drawRoundedRect(rect.adjusted(2, 1, -2, -1), 7, 7)
+        painter.drawRoundedRect(rect.adjusted(2, 1, -2, -1), RADIUS_CONTROL, RADIUS_CONTROL)
         if selected:
             # The selection fill is ~1.2:1 against the panel; the accent bar
             # is what actually makes the current row findable.
@@ -2825,7 +3893,7 @@ class _ViewerListDelegate(QStyledItemDelegate):
         painter.setPen(QPen(QColor(theme.border), 1))
         painter.drawLine(rect.bottomLeft(), rect.bottomRight())
 
-        left = rect.left() + 12
+        left = rect.left() + SPACE_M
         decoration = index.data(Qt.ItemDataRole.DecorationRole)
         if isinstance(decoration, QIcon) and not decoration.isNull():
             icon_size = 16
@@ -2839,58 +3907,114 @@ class _ViewerListDelegate(QStyledItemDelegate):
                 icon_rect,
                 decoration.pixmap(QSize(icon_size, icon_size)),
             )
-            left += icon_size + 8
-        right = rect.right() - 12
-        top = rect.top() + 7
+            left += icon_size + SPACE_S
+        right = rect.right() - SPACE_M
+        top = rect.top() + SPACE_S
 
         badge_font = QFont(option.font)
-        badge_font.setPointSizeF(max(option.font.pointSizeF() - 0.5, 8.0))
-        badge_metrics = painter.fontMetrics()
+        badge_font.setPointSizeF(TYPE_CAPTION)
         painter.setFont(badge_font)
-        badge_metrics = painter.fontMetrics()
-        badge_w = max(54, badge_metrics.horizontalAdvance(status) + 22) if status else 0
-        badge_h = 26
-        badge_rect = QRectF(right - badge_w, rect.center().y() - badge_h / 2, badge_w, badge_h)
+        mark = list_status_mark(status)
+        mark_rect = list_status_mark_rect(status, right, rect.center().y(), painter.fontMetrics())
 
-        text_right = badge_rect.left() - 12 if status else right
+        text_right = mark_rect.left() - (SPACE_S if mark == "glyph" else SPACE_M) if mark else right
         text_width = max(int(text_right - left), 16)
 
         name_font = QFont(option.font)
         name_font.setBold(True)
-        name_font.setPointSizeF(max(option.font.pointSizeF(), 10.0))
+        name_font.setPointSizeF(TYPE_BODY)
         painter.setFont(name_font)
         name_metrics = painter.fontMetrics()
         painter.setPen(QColor(theme.selection_text if selected else theme.text_strong))
+        prefix = option.widget.property(SHARED_NAME_PREFIX_PROPERTY) if option.widget is not None else None
         painter.drawText(
-            QRectF(left, top, text_width, 20),
+            QRectF(left, top, text_width, _LIST_ROW_NAME_HEIGHT_PX),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            # Middle-elide: Tomography 5 names share a long common prefix
-            # ("SearchMap_2026...") and differ only in the tail, so eliding
-            # the right made every row in the list read identically.
-            name_metrics.elidedText(primary, Qt.TextElideMode.ElideMiddle, text_width),
+            fit_list_name(primary, name_metrics, text_width, str(prefix or "")),
         )
 
         summary_font = QFont(option.font)
-        summary_font.setPointSizeF(max(option.font.pointSizeF() - 1.0, 8.0))
+        summary_font.setPointSizeF(TYPE_CAPTION)
         painter.setFont(summary_font)
         summary_metrics = painter.fontMetrics()
         painter.setPen(QColor(theme.text_muted))
         painter.drawText(
-            QRectF(left, top + 23, text_width, 18),
+            QRectF(
+                left,
+                top + _LIST_ROW_NAME_HEIGHT_PX + SPACE_XS,
+                text_width,
+                _LIST_ROW_SUMMARY_HEIGHT_PX,
+            ),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             summary_metrics.elidedText(summary, Qt.TextElideMode.ElideRight, text_width),
         )
 
-        if status:
+        if mark == "glyph":
+            _paint_list_status_glyph(painter, mark_rect, status)
+        elif mark == "pill":
             semantic_color, bg = _status_badge_colors(status)
             painter.setPen(QPen(semantic_color, 1))
             painter.setBrush(bg)
-            painter.drawRoundedRect(badge_rect, badge_h / 2, badge_h / 2)
+            painter.drawRoundedRect(mark_rect, mark_rect.height() / 2, mark_rect.height() / 2)
             painter.setPen(QColor(theme.text_strong))
             painter.setFont(badge_font)
-            _draw_centered_badge_text(painter, badge_rect, status)
+            _draw_centered_badge_text(painter, mark_rect, status)
 
         painter.restore()
+
+
+#: A normal outcome gets a glyph on a list row, not a pill (plan C6): a list
+#: of seventeen "Complete" pills hid its one "Failed". Pills stay for the
+#: exceptions (Failed, Incomplete, Unavailable, Warning, and any word with no
+#: glyph), so those stand out. The shapes are V1's, as on the Atlas: a filled
+#: disc in a ring for a complete or available item, a plain ring for a
+#: pending one. The word itself stays in the row's tooltip, its accessible
+#: text and the list filter. Display only: no status is renamed.
+NORMAL_STATUS_GLYPHS = {"complete": "disc", "available": "disc", "pending": "ring"}
+LIST_STATUS_GLYPH_PX = 14
+LIST_STATUS_PILL_MIN_PX = 54
+LIST_STATUS_PILL_HEIGHT_PX = 26
+
+
+def list_status_mark(status: str) -> str:
+    """How a list row shows its status word: "glyph", "pill", or "" (none)."""
+
+    if not status:
+        return ""
+    return "glyph" if status.strip().lower() in NORMAL_STATUS_GLYPHS else "pill"
+
+
+def list_status_mark_rect(status: str, right: float, centre_y: float, metrics: QFontMetrics) -> QRectF:
+    """Where a row's glyph or pill sits, flush with ``right``."""
+
+    mark = list_status_mark(status)
+    if mark == "glyph":
+        size = LIST_STATUS_GLYPH_PX
+        return QRectF(right - size, centre_y - size / 2, size, size)
+    if mark == "pill":
+        width = max(LIST_STATUS_PILL_MIN_PX, metrics.horizontalAdvance(status) + 22)
+        height = LIST_STATUS_PILL_HEIGHT_PX
+        return QRectF(right - width, centre_y - height / 2, width, height)
+    return QRectF(right, centre_y, 0, 0)
+
+
+def _paint_list_status_glyph(painter: QPainter, rect: QRectF, status: str) -> None:
+    """V1's glyph for a normal status, in the colour its pill would have had."""
+
+    colour, _fill = _status_badge_colors(status)
+    centre = rect.center()
+    # As the Atlas leaf: a ring, and for a disc a fill just inside it.
+    ring = rect.width() / 2.0 - 1.0
+    painter.save()
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(colour, LEAF_STATUS_WIDTH_DP))
+    painter.drawEllipse(centre, ring, ring)
+    if NORMAL_STATUS_GLYPHS[status.strip().lower()] == "disc":
+        fill = ring - 1.6
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(colour)
+        painter.drawEllipse(centre, fill, fill)
+    painter.restore()
 
 
 def _draw_centered_badge_text(painter: QPainter, rect: QRectF, text: str) -> None:
@@ -2911,23 +4035,27 @@ def _draw_centered_badge_text(painter: QPainter, rect: QRectF, text: str) -> Non
     painter.drawText(QPointF(x, baseline), elided)
 
 
-def _status_badge_colors(status: str) -> tuple[QColor, QColor]:
-    from tomography_session_browser.ui.theme import current_palette
+def _status_tone(status: str) -> str:
+    """The ``theme.STATUS_TONE_COLOURS`` tone a status word is drawn in."""
 
-    theme = current_palette()
     raw = status.strip().lower()
     if raw in {"done", "ok", "acquired", "complete", "completed", "available"}:
-        fg = QColor(theme.chart_green)
-    elif raw in {"partial", "incomplete", "warning", "warn"}:
-        fg = QColor(theme.chart_amber)
-    elif raw in {"failed", "fail", "error", "missing"}:
-        fg = QColor(theme.chart_red)
-    elif raw in {"queued", "pending", "selected"}:
-        fg = QColor(theme.chart_blue)
-    else:
-        fg = QColor(theme.chart_grey)
+        return "good"
+    if raw in {"partial", "incomplete", "warning", "warn"}:
+        return "warn"
+    if raw in {"failed", "fail", "error", "missing"}:
+        return "bad"
+    if raw in {"queued", "pending", "selected"}:
+        return "info"
+    return "neutral"
+
+
+def _status_badge_colors(status: str) -> tuple[QColor, QColor]:
+    from tomography_session_browser.ui.theme import STATUS_TONE_COLOURS, STATUS_TONE_FILL_ALPHA, current_palette
+
+    fg = QColor(getattr(current_palette(), STATUS_TONE_COLOURS[_status_tone(status)]))
     bg = QColor(fg)
-    bg.setAlpha(40)
+    bg.setAlpha(STATUS_TONE_FILL_ALPHA)
     return fg, bg
 
 
@@ -3208,6 +4336,20 @@ def _viewer_object_id(value: Any) -> str | None:
     return str(identifier) if identifier else None
 
 
+def jump_direction(value: Any, key: str) -> str | None:
+    """Whether a jump from ``value`` to the ``key`` tab steps out or in.
+
+    ``JUMP_STEP_OUT`` towards the Atlas, ``JUMP_STEP_IN`` towards the tilt
+    series (``IMAGE_HIERARCHY``); ``None`` when either end is not on it.
+    """
+
+    source = tab_label_for_object(value)
+    target = _NAVIGATION_TARGET_TABS.get(key)
+    if source not in IMAGE_HIERARCHY or target not in IMAGE_HIERARCHY or source == target:
+        return None
+    return JUMP_STEP_OUT if IMAGE_HIERARCHY.index(target) < IMAGE_HIERARCHY.index(source) else JUMP_STEP_IN
+
+
 class ViewerTab(QWidget):
     #: A command from the empty-state panel, e.g. ``open_session`` or
     #: ``clear_filter``. The main window decides what each one does.
@@ -3230,6 +4372,8 @@ class ViewerTab(QWidget):
         on_marker_selection_cleared: Callable[[], None] | None = None,
         show_marker_controls: bool = True,
         atlas_lod: bool = False,
+        pan_through_marker_types: Iterable[str] = (),
+        frames_share_zoom: bool = False,
         navigation_actions_for: Callable[[Any], list[ViewerNavigationAction]] | None = None,
         on_navigation_requested: Callable[[Any, str], None] | None = None,
     ) -> None:
@@ -3252,6 +4396,8 @@ class ViewerTab(QWidget):
         self._item_status_for: Callable[[Any], ItemListStatus] | None = None
         self._selected_marker_id_override: str | None = None
         self._marker_selection_explicitly_cleared = False
+        # The theme changed while this tab was hidden: recolour on show.
+        self._canvas_theme_stale = False
         self._show_tilt_controls = show_tilt_controls
         self._scale_bar_enabled = True
         self._current_value: Any | None = None
@@ -3290,6 +4436,12 @@ class ViewerTab(QWidget):
         layout.setSpacing(8)
         self.viewer = ImagePreviewView(self)
         self.viewer.set_atlas_lod_enabled(atlas_lod)
+        self.viewer.set_pan_through_marker_types(pan_through_marker_types)
+        self._frames_share_zoom = frames_share_zoom
+        if frames_share_zoom:
+            # One crop per item, whichever frame is shown: see
+            # ``_logical_image_key`` for the key's shape.
+            self.viewer.share_view_within_groups(lambda key: key[2] if isinstance(key, tuple) else key)
         self.viewer.set_zoom_changed_callback(self._zoom_changed)
         self.viewer.set_marker_selected_callback(self._marker_selected)
         self.viewer.set_marker_opened_callback(self._marker_opened)
@@ -3330,13 +4482,24 @@ class ViewerTab(QWidget):
             ZOOM_LABEL_MIN_WIDTH_PX,
             self.zoom_label.fontMetrics().horizontalAdvance("9999%") + 8,
         )
-        self.zoom_label.setFixedWidth(zoom_label_width)
+        # Fixed in both directions: Qt passes a label's text change up the
+        # layout chain unless its size is fully fixed, and with only the width
+        # fixed every zoom step re-laid out and repainted the whole window.
+        # An eased wheel zoom (plan F5.1) ran at ~34 fps because of it.
+        self.zoom_label.ensurePolished()
+        self.zoom_label.setFixedSize(zoom_label_width, self.zoom_label.sizeHint().height())
         self.image_badge = QLabel("", self)
         self.image_badge.setObjectName("viewerImageBadge")
         self.image_badge.setVisible(False)
+        # Whether there is a badge to show, separate from whether it fits
+        # beside Overlays; see ``_fit_top_floating_controls``.
+        self._image_badge_wanted = False
+        self._overlay_button_compact = False
+        self._overlay_button_full_width = 0
         self.scale_bar = ScaleBarWidget(self)
         self.atlas_marker_legend = AtlasMarkerLegend(self)
         self.atlas_marker_legend.setVisible(atlas_lod)
+        self.atlas_marker_legend.set_toggle_handler(self._set_atlas_legend_expanded)
         self.zoom_in_button.setToolTip("Zoom in")
         self.zoom_out_button.setToolTip("Zoom out")
         self.fit_button.setToolTip("Fit preview to the available space")
@@ -3353,10 +4516,12 @@ class ViewerTab(QWidget):
             button.setIconSize(QSize(16, 16))
         for button in (self.zoom_in_button, self.zoom_out_button):
             button.setObjectName("viewerZoomButton")
-            button.setFixedSize(30, 28)
+            button.setFixedSize(FLOATING_CONTROL_SIZE_PX, FLOATING_CONTROL_SIZE_PX)
         self.export_image_button.setObjectName("viewerZoomButton")
-        self.export_image_button.setFixedSize(30, 28)
+        self.export_image_button.setFixedSize(FLOATING_CONTROL_SIZE_PX, FLOATING_CONTROL_SIZE_PX)
         self.export_image_button.setEnabled(False)
+        self.overlay_button.setFixedHeight(FLOATING_CONTROL_SIZE_PX)
+        self.image_badge.setFixedHeight(FLOATING_CONTROL_SIZE_PX)
         self.status = QLabel(empty_text, self)
         self.status.setObjectName("viewerStatus")
         self.status.setWordWrap(True)
@@ -3494,15 +4659,11 @@ class ViewerTab(QWidget):
         self.overlay_button.toggled.connect(self._overlay_panel_toggled)
 
         self._navigation_buttons: dict[str, QPushButton] = {}
+        # Each button's arrow: a step out or in from the item shown.
+        self._navigation_icon_names: dict[str, str] = {}
         if self._navigation_actions_for is not None:
             controls.addSpacing(8)
-            for key, label in (
-                ("batch", "Batch"),
-                ("search", "Search"),
-                ("search_map", "Search map"),
-                ("overview", "Overview"),
-                ("tilt_series", "Tilt series"),
-            ):
+            for key, label in NAVIGATION_BUTTONS:
                 button = QPushButton(label, self)
                 button.setObjectName("viewerNavButton")
                 button.setIcon(themed_icon("arrow-right", size=14))
@@ -3512,9 +4673,32 @@ class ViewerTab(QWidget):
                 self._navigation_buttons[key] = button
                 controls.addWidget(button)
 
-        self.zoom_in_button.clicked.connect(self.viewer.zoom_in)
-        self.zoom_out_button.clicked.connect(self.viewer.zoom_out)
-        self.fit_button.clicked.connect(self.viewer.fit_image)
+        # F1.8: when the header cannot fit the title, its chips and every
+        # navigation button on one row, the buttons collapse into this single
+        # menu instead of the row clipping at both ends.
+        self._navigation_available: dict[str, bool] = {}
+        self._navigation_menu_button = QPushButton("Go to", self)
+        self._navigation_menu_button.setObjectName("viewerNavButton")
+        self._navigation_menu_button.setIcon(themed_icon("arrow-right", size=14))
+        self._navigation_menu_button.setAccessibleName("Go to a linked item")
+        navigation_menu = QMenu(self._navigation_menu_button)
+        navigation_menu.setToolTipsVisible(True)
+        navigation_menu.aboutToShow.connect(self._populate_navigation_menu)
+        self._navigation_menu_button.setMenu(navigation_menu)
+        self._navigation_menu_button.setVisible(False)
+        controls.addWidget(self._navigation_menu_button)
+        # Chips that do not fit are summarised by one "+N" chip.
+        self._overflow_chip = QLabel("", self)
+        self._overflow_chip.setObjectName("viewerChip")
+        self._overflow_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._overflow_chip.setVisible(False)
+        header.addWidget(self._overflow_chip)
+        self._header_layout = header
+
+        # Eased, as the wheel is (the instant methods remain for code).
+        self.zoom_in_button.clicked.connect(lambda: self.viewer.ease_zoom_by(BUTTON_ZOOM_STEP))
+        self.zoom_out_button.clicked.connect(lambda: self.viewer.ease_zoom_by(1.0 / BUTTON_ZOOM_STEP))
+        self.fit_button.clicked.connect(self.viewer.ease_to_fit)
         self.export_image_button.clicked.connect(self._export_current_view)
         self._export_shortcut = QShortcut(
             QKeySequence.StandardKey.Save,
@@ -3529,16 +4713,24 @@ class ViewerTab(QWidget):
         self._export_shortcut.setEnabled(False)
         self._export_shortcut.activated.connect(self._export_current_view)
 
-        self.list = QTreeWidget(self)
+        # Per-pixel, eased scrolling, including the scroll to a row selected
+        # from elsewhere (plan F5.5).
+        self.list = SmoothScrollTree(self)
         self.list.setObjectName("viewerList")
         self.list.setColumnCount(1)
         self.list.setHeaderHidden(True)
         self.list.setIconSize(QSize(16, 16))
-        self.list.setIndentation(12)
+        # A flat list: no row ever has children. The branch column it used to
+        # reserve took the selection colour as a separate block beside the
+        # row's own fill (plan C9), and cost the names 12 px.
+        self.list.setRootIsDecorated(False)
+        self.list.setIndentation(0)
         self.list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.list.header().setStretchLastSection(False)
         self.list.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.list.setItemDelegate(_ViewerListDelegate(self.list))
+        list_delegate = _ViewerListDelegate(self.list)
+        list_delegate.hover_animator = ItemHoverAnimator(self.list)
+        self.list.setItemDelegate(list_delegate)
         self.list.setAlternatingRowColors(False)
         self.list.setMouseTracking(True)
         self.list.currentItemChanged.connect(self._item_changed)
@@ -3612,6 +4804,7 @@ class ViewerTab(QWidget):
             0,
             alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
         )
+        self._overlay_anchor = top_right_anchor
 
         zoom_panel = QWidget(viewer_shell)
         self.zoom_panel = zoom_panel
@@ -3620,8 +4813,16 @@ class ViewerTab(QWidget):
             zoom_label_width + ZOOM_PANEL_HORIZONTAL_PADDING_PX
         )
         zoom_layout = QVBoxLayout(zoom_panel)
-        zoom_layout.setContentsMargins(3, 5, 3, 5)
-        zoom_layout.setSpacing(3)
+        zoom_layout.setContentsMargins(SPACE_XS, SPACE_XS, SPACE_XS, SPACE_XS)
+        zoom_layout.setSpacing(SPACE_XS)
+        # Export shares the zoom panel (plan C5): it used to float in a box of
+        # its own a few pixels above, one more surface for the same corner.
+        zoom_layout.addWidget(self.export_image_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        divider = QFrame(zoom_panel)
+        divider.setObjectName("viewerControlDivider")
+        divider.setFrameShape(QFrame.Shape.NoFrame)
+        divider.setFixedHeight(1)
+        zoom_layout.addWidget(divider)
         zoom_layout.addWidget(self.zoom_in_button, alignment=Qt.AlignmentFlag.AlignHCenter)
         zoom_layout.addWidget(self.zoom_label, alignment=Qt.AlignmentFlag.AlignHCenter)
         zoom_layout.addWidget(self.zoom_out_button, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -3630,60 +4831,36 @@ class ViewerTab(QWidget):
         # the tooltip carries the name.
         self.fit_button.setText("")
         self.fit_button.setObjectName("viewerZoomButton")
+        self.fit_button.setFixedSize(FLOATING_CONTROL_SIZE_PX, FLOATING_CONTROL_SIZE_PX)
         zoom_layout.addWidget(self.fit_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        # The two bottom anchors follow the rendered image's edge, which moves
+        # on every zoom step of a letterboxed image. They are sized by their
+        # content and *moved* by ``_place_bottom_anchors`` rather than laid
+        # out in the shell's grid with changing margins: a margin change
+        # re-laid out the whole window, and squeezed the zoom stack for a frame
+        # while its anchor caught up (plan F5.1).
         zoom_anchor = QWidget(viewer_shell)
         zoom_anchor.setObjectName("viewerFloatingBottomRightAnchor")
         zoom_anchor_layout = QVBoxLayout(zoom_anchor)
-        zoom_anchor_layout.setContentsMargins(
-            0,
-            0,
-            FLOATING_CONTROL_INSET_PX,
-            FLOATING_CONTROL_BOTTOM_INSET_PX,
-        )
-        export_panel = QWidget(viewer_shell)
-        export_panel.setObjectName("viewerZoomPanel")
-        export_panel.setFixedWidth(
-            zoom_label_width + ZOOM_PANEL_HORIZONTAL_PADDING_PX
-        )
-        export_layout = QVBoxLayout(export_panel)
-        export_layout.setContentsMargins(3, 5, 3, 5)
-        export_layout.addWidget(
-            self.export_image_button,
-            alignment=Qt.AlignmentFlag.AlignHCenter,
-        )
-        zoom_anchor_layout.addWidget(export_panel)
-        zoom_anchor_layout.addSpacing(6)
+        zoom_anchor_layout.setContentsMargins(0, 0, 0, 0)
+        zoom_anchor_layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
         zoom_anchor_layout.addWidget(zoom_panel)
-        # Kept alongside the scale-bar anchor so both share one baseline —
-        # see ``_reposition_floating_controls``.
-        self._zoom_anchor_layout = zoom_anchor_layout
-        viewer_shell_layout.addWidget(
-            zoom_anchor,
-            0,
-            0,
-            alignment=Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight,
-        )
+        self._zoom_anchor = zoom_anchor
         scale_bar_anchor = QWidget(viewer_shell)
         scale_bar_anchor.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents,
             not atlas_lod,
         )
         scale_bar_anchor_layout = QVBoxLayout(scale_bar_anchor)
-        scale_bar_anchor_layout.setContentsMargins(
-            FLOATING_CONTROL_INSET_PX,
-            0,
-            0,
-            FLOATING_CONTROL_BOTTOM_INSET_PX,
-        )
+        scale_bar_anchor_layout.setContentsMargins(0, 0, 0, 0)
+        scale_bar_anchor_layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
         if atlas_lod:
             scale_bar_anchor_layout.addWidget(self.atlas_marker_legend)
-            scale_bar_anchor_layout.addSpacing(12)
+            scale_bar_anchor_layout.addSpacing(SPACE_M)
         scale_bar_anchor_layout.addWidget(self.scale_bar)
-        # Kept so ``_reposition_scale_bar`` can pin the bar to the rendered
-        # image rather than to the canvas corner.
         self._scale_bar_anchor = scale_bar_anchor
-        self._scale_bar_anchor_layout = scale_bar_anchor_layout
-        viewer_shell_layout.addWidget(scale_bar_anchor, 0, 0, alignment=Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
+        for watched in (viewer_shell, zoom_anchor, scale_bar_anchor):
+            watched.installEventFilter(self)
         image_badge_anchor = QWidget(viewer_shell)
         image_badge_anchor.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         image_badge_anchor_layout = QVBoxLayout(image_badge_anchor)
@@ -3708,6 +4885,7 @@ class ViewerTab(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.setChildrenCollapsible(True)
         splitter.addWidget(viewer_panel)
+        self._list_splitter = splitter if show_list else None
         if show_list:
             list_panel = QWidget(splitter)
             list_panel.setObjectName("viewerListPanel")
@@ -3733,6 +4911,7 @@ class ViewerTab(QWidget):
             # name such as ``SearchMap_1`` beside the longest common status
             # badge, rather than introducing immediate elision.
             self.list.setMinimumWidth(VIEWER_LIST_MIN_WIDTH_PX)
+            viewer_panel.setMinimumWidth(VIEWER_CANVAS_MIN_WIDTH_PX)
             # Keep the right-side list wide enough for status summaries while
             # leaving the image viewer with most of the horizontal space. The
             # user can still drag or collapse the splitter handle.
@@ -3750,6 +4929,9 @@ class ViewerTab(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802 - Qt signature
         super().showEvent(event)
         self._export_shortcut.setEnabled(True)
+        self._fit_header()
+        if self._canvas_theme_stale:
+            self._recolour_canvas()  # the theme changed while this tab was hidden
 
     def hideEvent(self, event) -> None:  # noqa: N802 - Qt signature
         self._export_shortcut.setEnabled(False)
@@ -3778,9 +4960,133 @@ class ViewerTab(QWidget):
         if self._atlas_collection_section is not None:
             # The scroll area is what participates in the panel layout now, so
             # it is the thing that shows and hides.
-            self._set_atlas_collection_list_visible(
-                expanded and bool(self._atlas_collection_checks)
+            show = expanded and bool(self._atlas_collection_checks)
+            scroll = getattr(self, "_atlas_collection_scroll", None)
+            if scroll is None or scroll.isHidden() == (not show):  # nothing opens or closes
+                self._set_atlas_collection_list_visible(show)
+                return
+            self._reveal_overlay_panel(
+                lambda: self._set_atlas_collection_list_visible(show),
+                kind="collections",
+                opening=show,
             )
+
+    # -- sections opening and closing (plan F5.6) --------------------------
+
+    def _section_motion_allowed(self, section: QWidget) -> bool:
+        return motion_enabled(section) and self.isVisible() and self.window().isVisible()
+
+    def _rect_in_shell(self, widget: QWidget) -> QRect:
+        return QRect(widget.mapTo(self.viewer_shell, QPoint(0, 0)), widget.size())
+
+    def _set_atlas_legend_expanded(self, expanded: bool) -> None:
+        """Open or close the Atlas marker legend, growing up from the scale bar.
+
+        The legend changes size at once (one layout, as before); a picture of
+        it opens or closes on a spring meanwhile. A second click mid-way turns
+        the same motion around.
+        """
+
+        legend = self.atlas_marker_legend
+        if expanded == legend.expanded:
+            return
+        reveal = live_section_reveal(legend)
+        if not self._section_motion_allowed(legend) or legend.isHidden():
+            if reveal is not None:
+                reveal.dismiss()
+            legend.set_expanded(expanded)
+            return
+        legend.set_expanded(expanded)
+        settle_layouts(legend, self._scale_bar_anchor)
+        rect = self._rect_in_shell(legend)
+        if reveal is not None:
+            reveal.align_to(rect)
+            reveal.retarget(expanded, legend.picture())
+            return
+        SectionReveal(
+            legend,
+            self.viewer_shell,
+            QRect(rect.left(), rect.bottom() + 1 - legend.EXPANDED_HEIGHT, legend.WIDTH, legend.EXPANDED_HEIGHT),
+            legend.picture(),
+            grows_down=False,
+            fixed=RADIUS_CARD,
+            riding=legend.HEADER_HEIGHT,
+            closed=legend.HEADER_HEIGHT,
+            opening=expanded,
+            kind="legend",
+            conceal=legend.set_concealed,
+        )
+
+    def _reveal_overlay_panel(self, change: Callable[[], None], *, kind: str, opening: bool) -> None:
+        """Apply ``change`` to the Overlays panel, then open or close it along its height.
+
+        ``kind`` is ``"panel"`` (the whole panel shows or hides) or
+        ``"collections"`` (the Data collections list inside it does; the
+        controls below it ride its edge). The panel's real layout changes
+        once, inside ``change``.
+        """
+
+        panel = self.overlay_panel
+        shell = self.viewer_shell
+        reveal = live_section_reveal(panel)
+        if reveal is not None and reveal.kind != kind:
+            reveal.dismiss()
+            reveal = None
+        if not self._section_motion_allowed(panel) or (kind != "panel" and not panel.isVisible()):
+            if reveal is not None:
+                reveal.dismiss()
+            change()
+            return
+        if reveal is not None:
+            # A reversal mid-way. Turn first: hiding the panel must not read
+            # as the panel vanishing while it opens.
+            reveal.retarget(opening)
+            change()
+            settle_layouts(panel, shell)
+            # Heading open, the panel must be back where the picture is.
+            # Heading closed, the picture keeps the open place (a hidden
+            # panel's anchor narrows to the button, which moves the panel).
+            if opening and self._rect_in_shell(panel) != reveal.geometry():
+                reveal.dismiss()
+            return
+        before = self._rect_in_shell(panel)
+        picture = None if opening else panel.grab()
+        list_top = self._atlas_collection_scroll.y() if kind == "collections" and not opening else 0
+        change()
+        settle_layouts(panel, shell)
+        after = self._rect_in_shell(panel)
+        if opening:
+            open_rect, picture = after, panel.grab()
+        else:
+            open_rect = before
+        if kind == "panel":
+            fixed = riding = RADIUS_CARD + 1  # the rounded border at each end
+            closed = 0
+        else:
+            closed_rect = before if opening else after
+            if opening:
+                list_top = self._atlas_collection_scroll.y()
+            # The list opens below the controls above it; the ones below it
+            # ride its edge.
+            fixed = list_top
+            closed = closed_rect.height()
+            riding = closed - fixed
+            if closed_rect.width() != open_rect.width() or closed_rect.left() != open_rect.left() or riding < 0:
+                return
+        if open_rect.isEmpty() or picture is None or closed >= open_rect.height():
+            return
+        SectionReveal(
+            panel,
+            shell,
+            open_rect,
+            picture,
+            grows_down=True,
+            fixed=fixed,
+            riding=riding,
+            closed=closed,
+            opening=opening,
+            kind=kind,
+        )
 
     def _update_atlas_collection_overlay_controls(
         self,
@@ -3849,9 +5155,7 @@ class ViewerTab(QWidget):
         self._refresh_marker_selection()
 
     def _set_header_chips(self, values: list[str]) -> None:
-        from tomography_session_browser.ui.theme import current_palette
-
-        layout = self.layout().itemAt(0).layout() if self.layout() and self.layout().count() else None
+        layout = getattr(self, "_header_layout", None)
         if layout is None:
             return
         for chip in self.header_chips:
@@ -3870,22 +5174,117 @@ class ViewerTab(QWidget):
                 # The status chip used to be painted with the accent colour
                 # whatever the status was, so a failed tilt series showed a
                 # calm sage chip in the header while the list row beside it
-                # showed a red one. Reuse the list-row badge colours.
-                semantic_color, background = _status_badge_colors(value)
-                text_color = current_palette().text_strong
-                chip.setStyleSheet(
-                    f"color: {text_color};"
-                    f" border-color: {semantic_color.name()};"
-                    f" background: rgba({background.red()}, {background.green()},"
-                    f" {background.blue()}, {background.alpha()});"
-                )
+                # showed a red one. It takes the list-row badge's tone, which
+                # the stylesheet colours, so it follows a theme switch.
+                chip.setProperty("tone", _status_tone(value))
             chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
             chip.setToolTip(_status_chip_tooltip(value) if is_status else value)
             layout.insertWidget(1 + index, chip)
             self.header_chips.append(chip)
+        self._fit_header()
+
+    def _header_available_width(self) -> int | None:
+        """Width the header row can use, or ``None`` before a real layout.
+
+        An unshown tab has a placeholder geometry; fitting against it would
+        collapse the header of every tab that has never been looked at.
+        """
+
+        if not self.isVisible() or self.width() <= 0:
+            return None
+        margins = self.layout().contentsMargins() if self.layout() is not None else None
+        horizontal = (margins.left() + margins.right()) if margins is not None else 0
+        return self.width() - horizontal
+
+    def _fit_header(self) -> None:
+        """Keep the viewer header on one row without clipping (plan F1.8).
+
+        The title, its chips and up to four navigation buttons sat in one
+        fixed row; in a narrow workspace the row overflowed and clipped at both
+        ends while the title shrank to "…". Degrade in order until it fits:
+
+        1. the navigation buttons collapse into one "Go to" menu, whose items
+           keep each action's enabled state and reason;
+        2. trailing chips fold into a "+N" chip listing them (the first chip,
+           the status, always stays).
+
+        The title keeps a readable floor throughout.
+        """
+
+        if not hasattr(self, "_navigation_menu_button"):
+            return
+        available_keys = [key for key in self._navigation_buttons if self._navigation_available.get(key)]
+        collapse = False
+        hidden = 0
+        width = self._header_available_width()
+        if width is not None:
+            spacing = max(0, self._header_layout.spacing())
+            title_text = self.header_title.text_full()
+            title_width = min(
+                self.header_title.fontMetrics().horizontalAdvance(title_text) + 8,
+                HEADER_TITLE_MIN_PX,
+            )
+            chip_widths = [chip.sizeHint().width() for chip in self.header_chips]
+            button_widths = [self._navigation_buttons[key].sizeHint().width() for key in available_keys]
+            expanded_nav = (sum(button_widths) + 6 * max(0, len(button_widths) - 1) + 8) if button_widths else 0
+            collapsed_nav = (self._navigation_menu_button.sizeHint().width() + 8) if button_widths else 0
+            overflow_width = QFontMetrics(self._overflow_chip.font()).horizontalAdvance("+9") + 24
+
+            def needed(nav_width: int, shown_chips: int) -> int:
+                chips = chip_widths[:shown_chips]
+                extra = overflow_width if shown_chips < len(chip_widths) else 0
+                items = 1 + len(chips) + (1 if extra else 0) + (1 if nav_width else 0)
+                return title_width + sum(chips) + extra + nav_width + spacing * max(0, items - 1)
+
+            if needed(expanded_nav, len(chip_widths)) > width:
+                collapse = bool(button_widths)
+                nav_width = collapsed_nav if collapse else expanded_nav
+                while hidden < len(chip_widths) - 1 and needed(nav_width, len(chip_widths) - hidden) > width:
+                    hidden += 1
+
+        for key, button in self._navigation_buttons.items():
+            button.setVisible(bool(self._navigation_available.get(key)) and not collapse)
+        self._navigation_menu_button.setVisible(collapse)
+        if collapse:
+            labels = ", ".join(self._navigation_buttons[key].text() for key in available_keys)
+            self._navigation_menu_button.setToolTip(f"Go to a linked item: {labels}")
+            self._navigation_menu_button.setAccessibleDescription(f"Linked items: {labels}")
+        shown = len(self.header_chips) - hidden
+        for index, chip in enumerate(self.header_chips):
+            chip.setVisible(index < shown)
+        folded = [chip.text() for chip in self.header_chips[shown:]]
+        if folded:
+            self._overflow_chip.setText(f"+{len(folded)}")
+            self._overflow_chip.setToolTip("\n".join(folded))
+            self._overflow_chip.setAccessibleName(f"{len(folded)} more: {', '.join(folded)}")
+            # Keep "+N" directly after the last visible chip.
+            self._header_layout.removeWidget(self._overflow_chip)
+            self._header_layout.insertWidget(1 + len(self.header_chips), self._overflow_chip)
+        self._overflow_chip.setVisible(bool(folded))
+
+    def _populate_navigation_menu(self) -> None:
+        menu = self._navigation_menu_button.menu()
+        menu.clear()
+        for key, button in self._navigation_buttons.items():
+            if not self._navigation_available.get(key):
+                continue
+            label = button.text() if button.isEnabled() else f"{button.text()} (unavailable)"
+            action = menu.addAction(button.icon(), label)
+            action.setEnabled(button.isEnabled())
+            action.setToolTip(button.toolTip())
+            action.triggered.connect(lambda _checked=False, key=key: self._navigation_button_clicked(key))
 
     def refresh_theme(self) -> None:
-        """Refresh custom-painted and pixmap-based viewer controls after theme changes."""
+        """Refresh custom-painted and pixmap-based viewer controls after theme changes.
+
+        Recolour only (plan F5.8a). Markers, statuses and validation do not
+        depend on the theme, so nothing is derived again: the existing marker
+        items are redrawn in the new colours. That redraw waits until the tab
+        is shown when it is hidden; icons (cached pixmaps) change at once.
+        It used to re-run marker derivation and tilt validation for every tab
+        and redraw each tab's markers once per overlay checkbox, 350–570 ms of
+        a theme switch.
+        """
 
         self.overlay_button.setIcon(themed_icon("layers", size=16))
         self.export_image_button.setIcon(themed_icon("download", size=16))
@@ -3898,8 +5297,10 @@ class ViewerTab(QWidget):
                     0,
                     themed_icon(self._entity_icon, size=16),
                 )
-        for button in self._navigation_buttons.values():
-            button.setIcon(themed_icon("arrow-right", size=14))
+        for key, button in self._navigation_buttons.items():
+            button.setIcon(themed_icon(self._navigation_icon_names.get(key, "arrow-right"), size=14))
+        # The menu holds jumps both ways, so its own button keeps the plain arrow.
+        self._navigation_menu_button.setIcon(themed_icon("arrow-right", size=14))
         if self._atlas_lod:
             icon_by_key = {
                 key: icon_name
@@ -3907,12 +5308,18 @@ class ViewerTab(QWidget):
             }
             for key, checkbox in self._atlas_lod_checks.items():
                 checkbox.setIcon(themed_icon(icon_by_key[key], size=16))
-        if self._current_value is not None:
-            self._refresh_marker_selection()
-        self.viewer.viewport().update()
-        self.viewer.scene().update()
+        if self.isVisible():
+            self._recolour_canvas()
+        else:
+            self._canvas_theme_stale = True
+
+    def _recolour_canvas(self) -> None:
+        self._canvas_theme_stale = False
+        self.viewer.refresh_theme()
         self.image_badge.update()
         self.scale_bar.update()
+        self.atlas_marker_legend.update()
+        self.list.viewport().update()
         self.overlay_panel.update()
         self.update()
 
@@ -3957,26 +5364,37 @@ class ViewerTab(QWidget):
         for key, button in self._navigation_buttons.items():
             action = by_key.get(key)
             if action is None:
-                button.setVisible(False)
+                self._navigation_available[key] = False
                 continue
             button.setText(action.label.lstrip("↗ ").strip())
             button.setEnabled(action.enabled)
             button.setToolTip(action.tooltip)
+            direction = jump_direction(value, key)
+            icon_name = _JUMP_ICONS.get(direction, "arrow-right")
+            if self._navigation_icon_names.get(key) != icon_name:
+                self._navigation_icon_names[key] = icon_name
+                button.setIcon(themed_icon(icon_name, size=14))
             # The visible face stays terse — these sit in a dense strip. The
             # verb-plus-destination phrasing goes where it has room, and where
             # a screen reader will actually reach it. A disabled action states
-            # its reason here too, not only on hover.
+            # its reason here too, not only on hover; the arrow's direction is
+            # said as well as drawn.
             button.setAccessibleName(NAVIGATION_ACTION_NAMES.get(action.key, action.label))
-            button.setAccessibleDescription(
+            description = (
                 action.tooltip
                 if action.enabled
                 else f"Unavailable. {action.tooltip}".strip()
             )
-            button.setVisible(True)
+            step = _JUMP_DESCRIPTIONS.get(direction)
+            button.setAccessibleDescription(f"{description} {step}".strip() if step else description)
+            self._navigation_available[key] = True
             any_visible = True
         if not any_visible:
-            for button in self._navigation_buttons.values():
-                button.setVisible(False)
+            for key in self._navigation_buttons:
+                self._navigation_available[key] = False
+        # Visibility is decided by the header fit: expanded buttons, or the
+        # collapsed "Go to" menu when the row cannot hold them.
+        self._fit_header()
 
     def _navigation_button_clicked(self, key: str) -> None:
         if self._current_value is None or self._on_navigation_requested is None:
@@ -4051,6 +5469,9 @@ class ViewerTab(QWidget):
         summary = list_status.summary if list_status is not None else _summary_for_item(value)
         tooltip = list_status.tooltip if list_status is not None else ""
         tooltip_text = tooltip or (f"{label}\n{summary}" if summary else label)
+        if list_status_mark(status) == "glyph" and "status:" not in tooltip_text.lower():
+            # The row shows a glyph instead of the word (plan C6); name it here.
+            tooltip_text = f"{tooltip_text}\nStatus: {status}"
         tree_item.setToolTip(0, tooltip_text)
         tree_item.setData(0, LIST_PRIMARY_ROLE, label)
         tree_item.setData(0, LIST_SUMMARY_ROLE, summary)
@@ -4124,8 +5545,8 @@ class ViewerTab(QWidget):
         """Tell this tab what scope and entity type it is showing.
 
         ``entity_label`` matters when the list is *empty*: the type cannot be
-        inferred from zero items, and "No items in Srujan" is markedly less
-        useful than "No search maps in Srujan".
+        inferred from zero items, and "No items in Demo" is markedly less
+        useful than "No search maps in Demo".
         """
 
         self._has_sessions = has_sessions
@@ -4182,7 +5603,7 @@ class ViewerTab(QWidget):
             if not self.list.topLevelItem(index).isHidden()
         )
         if self.viewer.has_image():
-            panel.setVisible(False)
+            self._set_empty_state_panel_visible(panel, False)
             return
         # Precedence between a zero-result filter and an override depends on
         # what the override is *about*.
@@ -4202,12 +5623,28 @@ class ViewerTab(QWidget):
         elif override is not None:
             state = override
         elif visible_rows:
-            panel.setVisible(False)
+            self._set_empty_state_panel_visible(panel, False)
             return
         else:
             state = self.empty_state()
         panel.set_state(state)
-        panel.setVisible(True)
+        self._set_empty_state_panel_visible(panel, True)
+
+    def _set_empty_state_panel_visible(self, panel: EmptyStatePanel, visible: bool) -> None:
+        panel.setVisible(visible)
+        # While the panel shows, it carries the message; the canvas text would
+        # repeat it.
+        self.viewer.set_placeholder_visible(not visible)
+        # The zoom and export stack, Overlays, and the scale bar and legend act
+        # on an image. Over an empty canvas they read "Fit" beside nothing and,
+        # in a narrow viewer, sat on top of the panel's own text and buttons
+        # (plan B6, C5). Keyed to this panel rather than to ``has_image()``: an
+        # image still decoding is not an empty canvas, and hiding the controls
+        # for every asynchronous load would make them flicker on each selection.
+        for name in ("_zoom_anchor", "_overlay_anchor", "_scale_bar_anchor"):
+            anchor = getattr(self, name, None)
+            if anchor is not None:
+                anchor.setVisible(not visible)
 
     def capture_view_state(self) -> ViewerViewState:
         """Snapshot what this tab should get back after a rebuild."""
@@ -4314,7 +5751,7 @@ class ViewerTab(QWidget):
                 ).title
             self.viewer.clear(empty_text)
             self.export_image_button.setEnabled(False)
-            self.image_badge.setVisible(False)
+            self._set_image_badge_wanted(False)
             self.scale_bar.setVisible(False)
             self._set_status_text(empty_text)
             self.header_title.setText(empty_text)
@@ -4337,9 +5774,15 @@ class ViewerTab(QWidget):
                     )
                 tree_item.setData(0, VIEWER_OBJECT_ROLE, item)
                 self._decorate_row(tree_item, item, label)
-                tree_item.setSizeHint(0, QSize(0, 58))
+                tree_item.setSizeHint(0, QSize(0, LIST_ROW_HEIGHT_PX))
                 tree_items.append(tree_item)
             self.list.addTopLevelItems(tree_items)
+            self.list.setProperty(
+                SHARED_NAME_PREFIX_PROPERTY,
+                shared_name_prefix(
+                    [str(row.data(0, LIST_PRIMARY_ROLE) or row.text(0)) for row in tree_items]
+                ),
+            )
             # The filter must be applied before an initial preview is chosen,
             # otherwise the tab opens on a row the user has filtered out.
             #
@@ -4368,10 +5811,21 @@ class ViewerTab(QWidget):
             self.list.setUpdatesEnabled(True)
             self.list.blockSignals(False)
         self._refresh_empty_state_panel()
-        if items:
-            QTimer.singleShot(0, lambda: fade_in(self.viewer_shell, duration_ms=140, start_opacity=0.82))
-            if self.list.isVisible():
-                QTimer.singleShot(30, lambda: fade_in(self.list.viewport(), duration_ms=140, start_opacity=0.82))
+        if items and self.list.isVisible():
+            # The list was refilled, and says so. The image needs nothing: it
+            # dissolves into the new one (F5.4). Both used to fade through an
+            # opacity effect over the whole viewer, image view included.
+            QTimer.singleShot(0, self._veil_refilled_list)
+
+    def _veil_refilled_list(self) -> None:
+        from tomography_session_browser.ui.theme import current_palette
+
+        veil(
+            self.list.viewport(),
+            QColor(current_palette().panel),
+            start_opacity=LIST_REFILL_VEIL_OPACITY,
+            duration_ms=LIST_REFILL_VEIL_MS,
+        )
 
     def ensure_initial_preview_loaded(self, *, notify_selection: bool = True) -> None:
         pending = self._pending_view_state
@@ -4441,6 +5895,11 @@ class ViewerTab(QWidget):
         self._load_value(value, 0)
         return filter_cleared
 
+    def discard_zoom(self) -> None:
+        """Show the current image fitted and forget any zoom (the tab was left)."""
+
+        self.viewer.discard_user_view()
+
     def select_frame(self, frame_index: int) -> None:
         """Select a zero-based frame in the currently loaded stack, if any."""
 
@@ -4484,6 +5943,18 @@ class ViewerTab(QWidget):
         # waiting for its completion otherwise leaves the old panel stacked
         # over the canvas while the new section loads.
         self.clear_empty_state_override()
+        if self._frames_share_zoom:
+            # Another tilt series opens fitted, and the zoom on the one being
+            # left is dropped: coming back to it shows it fitted too.
+            self.viewer.begin_view_group(id(value))
+        if value is not self._current_value:
+            # Another item: dissolve into its image when it arrives (F5.4).
+            # Frame changes of the same item go through ``_load_path`` and
+            # stay a crisp cut.
+            self.viewer.crossfade_next_image()
+            # A jump still waiting to land belonged to the previous item; a
+            # jump to this one asks again once it is selected (F5.7).
+            self.viewer.arrive_at_marker(None)
         self._current_value = value
         self._selected_marker_id_override = None
         self._marker_selection_explicitly_cleared = False
@@ -4783,7 +6254,7 @@ class ViewerTab(QWidget):
             return
         self.viewer.clear("Preview unavailable")
         self.export_image_button.setEnabled(False)
-        self.image_badge.setVisible(False)
+        self._set_image_badge_wanted(False)
         self.scale_bar.setVisible(False)
         self._set_slice_state(slice_count, slice_index, valid_stack=False)
         self._set_status_text(
@@ -4854,11 +6325,32 @@ class ViewerTab(QWidget):
         if self._atlas_lod:
             self.atlas_marker_legend.set_markers(markers)
 
-    def select_marker(self, marker_id: str | None) -> None:
+    def select_marker(self, marker_id: str | None, *, arrive: bool = False, frame: bool = False) -> None:
+        """Select a marker; ``arrive`` marks it as where a jump landed.
+
+        An arrival also brings the marker into view and pulses it once (plan
+        F5.7), and ``frame`` zooms in on it. Which marker is selected is the
+        same either way.
+        """
+
         self._selected_marker_id_override = marker_id
         self._marker_selection_explicitly_cleared = marker_id is None
         self._refresh_marker_selection()
         self._update_navigation_actions(self._current_value)
+        if arrive and marker_id:
+            self.viewer.arrive_at_marker(marker_id, ready=self._current_value_image_shown, frame=frame)
+
+    def _current_value_image_shown(self) -> bool:
+        """Whether the viewer shows the current item's image yet, rather than
+        the previous item's while the new one decodes."""
+
+        key = self.viewer.current_logical_image_key
+        return (
+            self._current_value is not None
+            and isinstance(key, tuple)
+            and len(key) == 3
+            and key[2] == id(self._current_value)
+        )
 
     def _marker_selected(self, marker: ImageMarker) -> None:
         self.select_marker(marker.id)
@@ -5002,16 +6494,39 @@ class ViewerTab(QWidget):
         return True
 
     def _overlay_panel_toggled(self, checked: bool) -> None:
-        self.overlay_panel.setVisible(checked)
         self.overlay_button.setToolTip(
             "Hide overlay controls" if checked else "Show overlay controls"
         )
-        if checked:
-            self._constrain_overlay_panel()
+
+        def change() -> None:
+            self.overlay_panel.setVisible(checked)
+            if checked:
+                self._constrain_overlay_panel()
+
+        self._reveal_overlay_panel(change, kind="panel", opening=checked)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt signature
         super().resizeEvent(event)
+        self._fit_list_minimum()
         self._constrain_overlay_panel()
+        self._fit_header()
+
+    def _fit_list_minimum(self) -> None:
+        """Lower the list's minimum only as far as the viewer needs (plan F3.5).
+
+        Depends on the splitter's width alone, which the tab's layout sets, so
+        changing the minimum cannot feed back into the width it was fitted to.
+        """
+
+        splitter = getattr(self, "_list_splitter", None)  # None while being built
+        if splitter is None or splitter.count() < 2:
+            return
+        viewer = splitter.widget(0)
+        viewer_minimum = max(viewer.minimumWidth(), viewer.minimumSizeHint().width())
+        room = splitter.width() - splitter.handleWidth() - viewer_minimum
+        minimum = max(VIEWER_LIST_FLOOR_PX, min(VIEWER_LIST_MIN_WIDTH_PX, room))
+        if self.list.minimumWidth() != minimum:
+            self.list.setMinimumWidth(minimum)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt signature
         # Escape closes the overlay panel before anything else acts on it, and
@@ -5066,23 +6581,53 @@ class ViewerTab(QWidget):
     def _reposition_floating_controls(self) -> None:
         """Keep the scale bar and the zoom stack on a common baseline."""
 
-        scale_layout = getattr(self, "_scale_bar_anchor_layout", None)
-        zoom_layout = getattr(self, "_zoom_anchor_layout", None)
-        if scale_layout is None and zoom_layout is None:
-            return
+        # Runs after every viewer resize and zoom change, which is also when
+        # the top corners may start or stop colliding.
+        self._fit_top_floating_controls()
+        self._place_bottom_anchors()
 
+    def _place_bottom_anchors(self) -> None:
+        """Put the scale bar and the zoom stack on one baseline over the image.
+
+        Both use the same bottom inset from ``_floating_control_insets``, so
+        whatever the image geometry they sit on the same line. A move touches
+        no layout, so a zoom step re-lays out nothing.
+        """
+
+        shell = getattr(self, "viewer_shell", None)
+        scale_anchor = getattr(self, "_scale_bar_anchor", None)
+        zoom_anchor = getattr(self, "_zoom_anchor", None)
+        if shell is None or scale_anchor is None or zoom_anchor is None:
+            return
         left, right, bottom = self._floating_control_insets()
-        if scale_layout is not None:
-            margins = scale_layout.contentsMargins()
-            if (margins.left(), margins.bottom()) != (left, bottom):
-                scale_layout.setContentsMargins(left, 0, 0, bottom)
-        if zoom_layout is not None:
-            margins = zoom_layout.contentsMargins()
-            if (margins.right(), margins.bottom()) != (right, bottom):
-                zoom_layout.setContentsMargins(0, 0, right, bottom)
+        baseline = shell.height() - bottom
+        scale_anchor.move(left, baseline - scale_anchor.height())
+        zoom_anchor.move(shell.width() - right - zoom_anchor.width(), baseline - zoom_anchor.height())
+        # A legend opening or closing rides along with its anchor (a zoom
+        # step moves the anchor with a letterboxed image's edge).
+        legend = getattr(self, "atlas_marker_legend", None)
+        reveal = live_section_reveal(legend) if legend is not None else None
+        if reveal is not None:
+            reveal.align_to(self._rect_in_shell(legend))
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt API
+        # The canvas resized, or an anchor's content did (the Atlas legend
+        # expanding): the bottom anchors are placed by hand, so re-place them.
+        if event.type() == QEvent.Type.Resize and watched in (
+            getattr(self, "viewer_shell", None),
+            getattr(self, "_zoom_anchor", None),
+            getattr(self, "_scale_bar_anchor", None),
+        ):
+            self._place_bottom_anchors()
+        return super().eventFilter(watched, event)
 
     def _zoom_changed(self, zoom: float) -> None:
-        self.zoom_label.setText(f"{max(1, round(zoom * 100))}%")
+        # Zoom is measured relative to fit-to-view, so a fitted image used to
+        # read "100%", which looks like 1:1 pixels. Say "Fit" instead.
+        if self.viewer.is_fit_mode:
+            self.zoom_label.setText("Fit")
+        else:
+            self.zoom_label.setText(f"{max(1, round(zoom * 100))}%")
         self._update_scale_bar()
         self._reposition_floating_controls()
         if self._current_path is None or self._current_path.suffix.lower() != ".mrc":
@@ -5120,14 +6665,65 @@ class ViewerTab(QWidget):
     def _update_image_badge(self) -> None:
         self.export_image_button.setEnabled(self.viewer.has_image())
         if self._displayed_path is None or self._current_value is None or not self.viewer.has_image():
-            self.image_badge.setVisible(False)
+            self._set_image_badge_wanted(False)
             return
         kind = "MRC" if self._displayed_path.suffix.lower() == ".mrc" else self._displayed_path.suffix.lstrip(".").upper() or "Image"
         pixel_size = _pixel_size_meters_for_item(self._current_value, self._displayed_path)
         pixel_text = f" · {_format_pixel_size_label(pixel_size)}/px" if pixel_size is not None else ""
         self.image_badge.setText(f"{kind}{pixel_text}")
         self.image_badge.setToolTip(str(self._displayed_path))
-        self.image_badge.setVisible(True)
+        self._set_image_badge_wanted(True)
+
+    def _set_image_badge_wanted(self, wanted: bool) -> None:
+        self._image_badge_wanted = wanted
+        self._fit_top_floating_controls()
+
+    def _fit_top_floating_controls(self) -> None:
+        """Keep the image badge and Overlays from overlapping in a narrow canvas.
+
+        Fit-first, like the header (F1.8): Overlays drops its label and keeps
+        its icon, then the badge stands down. The badge repeats the header's
+        pixel-size chip and the context panel, so hiding it loses nothing;
+        Overlays is the only way to the marker toggles, so it always stays.
+        Display only: nothing here touches the image, markers or scale bar.
+        """
+
+        badge = getattr(self, "image_badge", None)
+        button = getattr(self, "overlay_button", None)
+        viewer = getattr(self, "viewer", None)
+        if badge is None or button is None or viewer is None:
+            return
+        wanted = bool(getattr(self, "_image_badge_wanted", False))
+        if not self._overlay_button_compact:
+            self._overlay_button_full_width = button.sizeHint().width()
+        available = viewer.viewport().width() - 2 * FLOATING_CONTROL_INSET_PX
+        badge_width = badge.sizeHint().width() + SPACE_S if wanted else 0
+        compact = badge_width + self._overlay_button_full_width > available
+        self._set_overlay_button_compact(compact)
+        button_width = FLOATING_CONTROL_SIZE_PX if compact else self._overlay_button_full_width
+        badge.setVisible(wanted and badge_width + button_width <= available)
+
+    def _set_overlay_button_compact(self, compact: bool) -> None:
+        if compact == self._overlay_button_compact:
+            return
+        self._overlay_button_compact = compact
+        button = self.overlay_button
+        # The ``compact`` rule drops the side padding so the icon keeps its
+        # room inside the square; the accessible name and tooltip still say
+        # what the button is.
+        button.setProperty("compact", compact)
+        button.setText("" if compact else "Overlays")
+        if not compact:
+            # Release the square before the repolish re-applies the sheet's
+            # own minimum width.
+            button.setMinimumWidth(0)
+            button.setMaximumWidth(_QWIDGETSIZE_MAX)
+        style = button.style()
+        if style is not None:
+            style.unpolish(button)
+            style.polish(button)
+        if compact:
+            button.setFixedWidth(FLOATING_CONTROL_SIZE_PX)
 
     def _export_current_view(self) -> None:
         rendered = self.viewer.render_current_view()
@@ -5191,6 +6787,11 @@ class ViewerTab(QWidget):
         if not self.scale_bar.isHidden():
             overlays.append((self.scale_bar, 0))
         if self._atlas_lod and not self.atlas_marker_legend.isHidden():
+            # A legend part-way open is painted by its reveal; the export
+            # takes the legend as it now is.
+            reveal = live_section_reveal(self.atlas_marker_legend)
+            if reveal is not None:
+                reveal.dismiss()
             overlays.append((self.atlas_marker_legend, 12))
         if not overlays:
             return
@@ -5436,8 +7037,9 @@ def _title_for_item(value: Any) -> str:
 def _chips_for_item(value: Any) -> list[str]:
     if isinstance(value, Atlas):
         chips: list[str] = []
-        if value.tile_paths:
-            chips.append(count_phrase(len(value.tile_paths), "tile"))
+        tile_count = atlas_tile_count(value)
+        if tile_count:
+            chips.append(count_phrase(tile_count, "tile"))
         if value.mrc_metadata and value.mrc_metadata.nx and value.mrc_metadata.ny:
             chips.append(f"{value.mrc_metadata.nx} × {value.mrc_metadata.ny}")
         return chips
@@ -5510,7 +7112,7 @@ def _summary_for_item(value: Any) -> str:
         frames = count_phrase(tilt_count, "frame") if tilt_count else "unknown frames"
         return f"{frames} · {_range_chip(value.tilt_range, DEGREE) if value.tilt_range else 'range unknown'}"
     if isinstance(value, Atlas):
-        return count_phrase(len(value.tile_paths), "tile")
+        return count_phrase(atlas_tile_count(value), "tile")
     return ""
 
 

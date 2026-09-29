@@ -79,6 +79,23 @@ def _themed_pixmap(name: str, color: str, size: int, dpr: float) -> QPixmap:
     return pixmap
 
 
+def undrawn_in(color: str, *, drawn_in: str) -> list[tuple[str, int, float]]:
+    """Icons drawn so far in ``drawn_in`` but not yet in ``color``.
+
+    The first switch to a theme drew every toolbar, tab and tree icon anew in
+    the new theme's icon colour, five pixel densities each: ~150 ms of the
+    switch. Drawing them while the app is idle takes that off the switch.
+    """
+
+    drawn = {(name, size, dpr) for name, drawn_color, size, dpr in _pixmap_cache if drawn_color == drawn_in}
+    return sorted(key for key in drawn if (key[0], color, key[1], key[2]) not in _pixmap_cache)
+
+
+def draw_in_advance(color: str, keys: list[tuple[str, int, float]]) -> None:
+    for name, size, dpr in keys:
+        _themed_pixmap(name, color, size, dpr)
+
+
 def _missing_svg() -> str:
     # Diamond placeholder so a typo in an icon name is visible at a glance
     # rather than silently rendering nothing.

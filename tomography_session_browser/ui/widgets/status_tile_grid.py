@@ -1,18 +1,23 @@
-"""Adaptive status-tile grid for the dashboard's count cards.
+"""Status band for the dashboard's count cards.
 
-Renders one rounded square per item, colour-coded by status. The widget
-chooses its own tile size based on the available width and the item count;
-when individual tiles would shrink below ``MIN_TILE_PX`` the grid hides
-itself and a grouped status summary is surfaced instead. Hover shows the
-item tooltip; clicking emits ``tile_clicked(item_id, destination)``.
+Every card shows one full-width band of the same height (plan C4). While each
+item can have a segment at least ``MIN_SEGMENT_PX`` wide, the band is one
+segment per item, colour-coded by status, stretched to fill the card;
+otherwise it is one proportional bar with the same breakdown. Hover shows an
+item's tooltip; clicking a segment emits ``tile_clicked(item_id, destination)``.
+
+It used to draw squares of at most 18 px, so 12 atlases filled a third of
+the card at 4K, and a card that fell back to a thinner bar sat beside one
+showing squares in the same row.
 
 Used by :class:`tomography_session_browser.ui.widgets.stat_card.StatCard`.
+The PDF report draws its own tile grid (``reports.graphics``), unchanged.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPen
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QHelpEvent, QKeyEvent, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 from tomography_session_browser.ui.session_presenter import (
@@ -26,27 +31,22 @@ from tomography_session_browser.ui.session_presenter import (
 from tomography_session_browser.ui.theme import current_palette
 
 
-# Smallest tile size (in CSS-pixel units) we will still render. Below this
-# the grid switches to the grouped-summary fallback so the user sees a
-# meaningful breakdown instead of unreadable specks.
-MIN_TILE_PX = 12
+# Height of the band, segmented or proportional, on every card.
+BAND_HEIGHT_PX = 12
 
-# Largest tile we render even with very few items — keeps the grid visually
-# proportional to the rest of the card.
-MAX_TILE_PX = 18
+# Narrowest segment still drawn per item. Below this the band becomes one
+# proportional bar, so the user sees a breakdown instead of specks.
+MIN_SEGMENT_PX = 6
 
-# Spacing between tiles in pixels.
+# Spacing between segments in pixels.
 TILE_GAP = 3
 
 
 class StatusTileGrid(QWidget):
-    """Waffle-style grid of status-coloured tiles.
+    """One status band: a segment per item, or a proportional bar.
 
-    Layout strategy: pick the largest tile size that allows ``items`` to fit
-    within the widget's current width using either one row (if they all fit)
-    or as many rows as needed. If the resulting size drops below
-    ``MIN_TILE_PX``, the widget reports ``has_visible_grid() == False`` so
-    the parent card can swap in a grouped summary instead.
+    ``has_visible_grid()`` is True while the band is segmented, that is
+    while every item has a segment at least ``MIN_SEGMENT_PX`` wide.
     """
 
     tile_clicked = Signal(str, str)  # (item_id, destination_tab_label)
@@ -61,24 +61,18 @@ class StatusTileGrid(QWidget):
         super().__init__(parent)
         self._items = list(items)
         self._tile_rects: list[tuple[QRect, StatusTileModel]] = []
-        self._tile_size = MAX_TILE_PX
+        self._tile_size = 0
         self._has_visible_grid = bool(self._items)
         self._columns = 1
         self._keyboard_index = 0
 
-        theme = current_palette()
-        self._palette_text = QColor(theme.text)
-        self._accent = QColor(accent) if accent is not None else QColor(theme.chart_blue)
-        self._color_complete = QColor(theme.chart_green)
-        self._color_warning = QColor(theme.chart_amber)
-        self._color_failed = QColor(theme.chart_red)
-        self._color_missing = QColor(theme.chart_red)
-        self._color_neutral = QColor(theme.chart_grey)
+        self._fixed_accent = accent
+        self._load_colours()
 
-        # The grid is fixed-height; the parent card decides how much vertical
-        # space it gets. Width expands to fill the card.
+        # The band is fixed-height and top-aligned; the parent card decides
+        # how much vertical space it gets. Width expands to fill the card.
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setMinimumHeight(MAX_TILE_PX + 2)
+        self.setMinimumHeight(BAND_HEIGHT_PX + 2)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setObjectName("statusTileGrid")
@@ -87,6 +81,24 @@ class StatusTileGrid(QWidget):
         self.setAccessibleDescription(
             f"{len(self._items)} items. Use the arrow keys to move and Enter to open an item."
         )
+
+    def _load_colours(self) -> None:
+        theme = current_palette()
+        self._palette_text = QColor(theme.text)
+        self._accent = QColor(self._fixed_accent) if self._fixed_accent is not None else QColor(theme.chart_blue)
+        self._color_complete = QColor(theme.chart_green)
+        self._color_warning = QColor(theme.chart_amber)
+        self._color_failed = QColor(theme.chart_red)
+        self._color_missing = QColor(theme.chart_red)
+        self._color_neutral = QColor(theme.chart_grey)
+
+    def refresh_theme(self, *, accent: QColor | str | None = None) -> None:
+        """Recolour for the current theme; ``accent`` replaces a fixed accent."""
+
+        if accent is not None:
+            self._fixed_accent = accent
+        self._load_colours()
+        self.update()
 
     # -------------------------------------------------------------------- API
 
@@ -104,39 +116,36 @@ class StatusTileGrid(QWidget):
         return self._has_visible_grid
 
     def tile_size(self) -> int:
-        """Last-computed tile edge length in pixels (after the most recent paint)."""
+        """Width of each segment in pixels at the last paint (0 when proportional)."""
 
         return self._tile_size
 
     def tile_rects(self) -> list[tuple[QRect, StatusTileModel]]:
-        """Read-only access to the painted tile rectangles. Used by tests."""
+        """Read-only access to the painted segment rectangles. Used by tests."""
 
         return list(self._tile_rects)
 
     # ----------------------------------------------------------------- layout
 
-    def _compute_layout(self, width: int, height: int) -> tuple[int, int, int]:
-        """Return ``(tile_size, columns, rows)`` for the current geometry.
-
-        Honors ``MAX_TILE_PX`` as a ceiling so a single item doesn't render
-        as a giant square, and clamps to ``MIN_TILE_PX`` for the
-        readability check.
-        """
+    def segment_width(self, width: int) -> float:
+        """Width each item's segment gets across ``width``, gaps included."""
 
         count = len(self._items)
-        if count == 0 or width <= 0 or height <= 0:
-            return 0, 0, 0
+        if count == 0 or width <= 0:
+            return 0.0
+        return (width - TILE_GAP * (count - 1)) / count
 
-        # Try larger sizes first; pick the largest that fits both axes.
-        for size in range(MAX_TILE_PX, MIN_TILE_PX - 1, -1):
-            cols = max(1, (width + TILE_GAP) // (size + TILE_GAP))
-            rows = (count + cols - 1) // cols
-            needed_height = rows * (size + TILE_GAP) - TILE_GAP
-            if needed_height <= height:
-                return size, int(cols), int(rows)
+    def segment_rects(self, width: int) -> list[QRect]:
+        """One rectangle per item, together spanning exactly ``width``."""
 
-        # Even at MIN_TILE_PX we can't fit — caller will hide the grid.
-        return 0, 0, 0
+        segment = self.segment_width(width)
+        step = segment + TILE_GAP
+        rects = []
+        for index in range(len(self._items)):
+            left = round(index * step)
+            right = round(index * step + segment)
+            rects.append(QRect(left, 0, max(1, right - left), BAND_HEIGHT_PX))
+        return rects
 
     # ------------------------------------------------------------------ paint
 
@@ -146,9 +155,8 @@ class StatusTileGrid(QWidget):
             self._has_visible_grid = False
             return
 
-        size, cols, rows = self._compute_layout(self.width(), self.height())
-        if size < MIN_TILE_PX or cols == 0:
-            # Too many items for one tile each. Previously the widget simply
+        if self.segment_width(self.width()) < MIN_SEGMENT_PX:
+            # Too many items for a segment each. Previously the widget simply
             # drew nothing, so a card with (say) 85 tilt series showed a
             # conspicuous blank where its neighbours showed a tile grid.
             # A single proportional bar carries the same breakdown.
@@ -158,30 +166,23 @@ class StatusTileGrid(QWidget):
             return
 
         self._has_visible_grid = True
-        self._tile_size = size
-        self._columns = cols
+        self._tile_size = int(self.segment_width(self.width()))
+        # Arrow keys move along the one row.
+        self._columns = len(self._items)
+        radius = min(3, BAND_HEIGHT_PX // 4)
 
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setPen(Qt.PenStyle.NoPen)
-            for index, tile in enumerate(self._items):
-                col = index % cols
-                row = index // cols
-                x = col * (size + TILE_GAP)
-                y = row * (size + TILE_GAP)
-                rect = QRect(x, y, size, size)
+            for index, (rect, tile) in enumerate(zip(self.segment_rects(self.width()), self._items)):
                 self._tile_rects.append((rect, tile))
                 painter.setBrush(self._color_for(tile.status))
-                painter.drawRoundedRect(rect, max(2, size // 4), max(2, size // 4))
+                painter.drawRoundedRect(rect, radius, radius)
                 if self.hasFocus() and index == self._keyboard_index:
                     painter.setBrush(Qt.BrushStyle.NoBrush)
                     painter.setPen(QPen(QColor(current_palette().text_strong), 2))
-                    painter.drawRoundedRect(
-                        rect.adjusted(1, 1, -1, -1),
-                        max(2, size // 4),
-                        max(2, size // 4),
-                    )
+                    painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), radius, radius)
                     painter.setPen(Qt.PenStyle.NoPen)
         finally:
             painter.end()
@@ -196,8 +197,10 @@ class StatusTileGrid(QWidget):
 
         if not self._items:
             return
-        height = min(10, max(6, self.height()))
-        top = max(0, (self.height() - height) // 2)
+        # The same height and position as a segmented band, so the two read
+        # as one kind of mark when cards in a row fall on either side.
+        height = BAND_HEIGHT_PX
+        top = 0
         full_width = self.width()
         if full_width <= 0:
             return
@@ -258,10 +261,25 @@ class StatusTileGrid(QWidget):
 
     # ------------------------------------------------------------- mouse / hover
 
+    def event(self, event: QEvent) -> bool:  # noqa: N802 — Qt signature
+        # Qt sends a ToolTip event once the pointer rests. The band has no
+        # tooltip of its own, so the event used to travel on to the parent
+        # StatCard, whose help text replaced the item's tooltip that
+        # mouseMoveEvent had just shown. Answering it here keeps the item's.
+        # Off the band it still travels on, so the card's help shows there.
+        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
+            hit = self._hit_at(event.pos())
+            if hit is not None:
+                zone, tile = hit
+                QToolTip.showText(event.globalPos(), tile.tooltip, self, zone)
+                return True
+        return super().event(event)
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802 — Qt signature
-        tile = self._tile_at(event.position().toPoint())
-        if tile is not None:
-            QToolTip.showText(event.globalPosition().toPoint(), tile.tooltip, self)
+        hit = self._hit_at(event.position().toPoint())
+        if hit is not None:
+            zone, tile = hit
+            QToolTip.showText(event.globalPosition().toPoint(), tile.tooltip, self, zone)
         else:
             QToolTip.hideText()
         super().mouseMoveEvent(event)
@@ -306,14 +324,38 @@ class StatusTileGrid(QWidget):
         super().keyPressEvent(event)
 
     def _tile_at(self, point: QPoint) -> StatusTileModel | None:
-        for rect, tile in self._tile_rects:
-            if rect.contains(point):
-                return tile
+        hit = self._hit_at(point)
+        return hit[1] if hit is not None else None
+
+    def _hit_at(self, point: QPoint) -> tuple[QRect, StatusTileModel] | None:
+        for zone, tile in self.hit_zones():
+            if zone.contains(point):
+                return zone, tile
         return None
+
+    def hit_zones(self) -> list[tuple[QRect, StatusTileModel]]:
+        """Each segment's hover and click area: its column of the band.
+
+        The gaps between segments are split between their neighbours, so the
+        pointer is always over some item while it is on the band. Hovering
+        used to drop the tooltip at every 3 px gap. Below the band belongs to
+        no item, and the card's own help shows there.
+        """
+
+        zones: list[tuple[QRect, StatusTileModel]] = []
+        left = 0
+        for index, (rect, tile) in enumerate(self._tile_rects):
+            if index + 1 < len(self._tile_rects):
+                right = (rect.right() + self._tile_rects[index + 1][0].left()) // 2
+            else:
+                right = max(rect.right(), self.width() - 1)
+            zones.append((QRect(QPoint(left, 0), QPoint(right, BAND_HEIGHT_PX - 1)), tile))
+            left = right + 1
+        return zones
 
     # --------------------------------------------------------------- size hint
 
     def sizeHint(self) -> QSize:  # noqa: N802 — Qt signature
         # A reasonable default; the parent layout always overrides this with
         # its own width via the setMinimumHeight + Expanding × Fixed policy.
-        return QSize(120, MAX_TILE_PX + 2)
+        return QSize(120, BAND_HEIGHT_PX + 2)

@@ -32,6 +32,8 @@ from tomography_session_browser.ui.session_presenter import (
 )
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.theme import (
+    SPACE_S,
+    SPACE_XS,
     TIER_PRIMARY,
     TIER_SUPPORTING,
     apply_tier,
@@ -78,10 +80,16 @@ _STATUS_LABELS = {
 }
 
 
-def _is_zero_value(value: object) -> bool:
+def _dot_pixmap(colour: str):
+    return themed_icon("shape-dot", color=colour, size=10).pixmap(10, 10)
+
+
+def is_zero_value(value: object) -> bool:
     """Whether a card's headline value means "there is nothing here".
 
     Tolerant of the string values some callers pass ("0", "—", "").
+    The dashboard uses the same test to fold zero-count cards into one line,
+    so a card and the line can never disagree about what counts as empty.
     """
 
     if value is None:
@@ -111,20 +119,26 @@ class StatCard(QFrame):
         model: StatCardModel,
         *,
         accent: str | None = None,
+        accent_role: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
+        """``accent`` is a fixed colour; ``accent_role`` a palette slot
+        (``"chart_green"``), which follows a theme switch (``refresh_theme``)."""
+
         super().__init__(parent)
         self._model = model
         self._destination = model.destination or model.label
         self._is_empty = False
-        from tomography_session_browser.ui.theme import current_palette
-
-        self._accent = accent or current_palette().accent
+        self._fixed_accent = accent
+        self._accent_role = accent_role or "accent"
+        # Status dots drawn from icons, with the palette slot of each colour.
+        self._status_dots: list[tuple[QLabel, str]] = []
+        self._accent = self._resolve_accent()
         self.setObjectName("dashboardCard")
         # A card with nothing in it has no list to open. Claiming otherwise —
         # a pointer cursor and "Press Enter or Space to open the list" — sent
         # the reviewer to an empty tab and told a screen reader the same lie.
-        self._is_empty = _is_zero_value(model.value)
+        self._is_empty = is_zero_value(model.value)
         self.setCursor(
             Qt.CursorShape.ArrowCursor if self._is_empty else Qt.CursorShape.PointingHandCursor
         )
@@ -198,7 +212,7 @@ class StatCard(QFrame):
         wrap = QWidget()
         row = QHBoxLayout(wrap)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(10)
+        row.setSpacing(SPACE_S)
 
         # Build the displayable chips in a stable order so the same status
         # always sits in the same position from one rebuild to the next.
@@ -207,12 +221,13 @@ class StatCard(QFrame):
         from tomography_session_browser.ui.theme import current_palette
 
         theme = current_palette()
+        # Palette slots, so ``refresh_theme`` can redraw the dots.
         color_map = {
-            TILE_STATUS_COMPLETE: theme.chart_green,
-            TILE_STATUS_WARNING: theme.chart_amber,
-            TILE_STATUS_FAILED: theme.chart_red,
-            TILE_STATUS_MISSING: theme.chart_red,
-            TILE_STATUS_NEUTRAL: theme.unknown,
+            TILE_STATUS_COMPLETE: "chart_green",
+            TILE_STATUS_WARNING: "chart_amber",
+            TILE_STATUS_FAILED: "chart_red",
+            TILE_STATUS_MISSING: "chart_red",
+            TILE_STATUS_NEUTRAL: "unknown",
         }
         for status in _STATUS_CHIP_ORDER:
             count = status_summary.get(status, 0)
@@ -227,17 +242,16 @@ class StatCard(QFrame):
             any_chip = True
             # A zero count is not a finding, so its dot stays neutral even
             # when the status category would normally carry a semantic colour.
-            dot_colour = theme.unknown if count == 0 else color_map[status]
+            dot_slot = "unknown" if count == 0 else color_map[status]
             chip = QWidget(wrap)
             chip_layout = QHBoxLayout(chip)
             chip_layout.setContentsMargins(0, 0, 0, 0)
-            chip_layout.setSpacing(4)
+            chip_layout.setSpacing(SPACE_XS)
             dot = QLabel(chip)
             dot.setObjectName("statStatusDot")
             dot.setFixedSize(10, 10)
-            dot.setPixmap(
-                themed_icon("shape-dot", color=dot_colour, size=10).pixmap(10, 10)
-            )
+            dot.setPixmap(_dot_pixmap(getattr(theme, dot_slot)))
+            self._status_dots.append((dot, dot_slot))
             dot.setAccessibleName("")
             chip_layout.addWidget(dot)
             text = QLabel(f"{count} {_STATUS_LABELS[status]}", chip)
@@ -257,6 +271,25 @@ class StatCard(QFrame):
 
         row.addStretch(1)
         return wrap
+
+    # ----- theme -------------------------------------------------------------
+
+    def _resolve_accent(self) -> str:
+        from tomography_session_browser.ui.theme import current_palette
+
+        return self._fixed_accent or getattr(current_palette(), self._accent_role)
+
+    def refresh_theme(self) -> None:
+        """Recolour in place after a theme switch (the style sheet does the rest)."""
+
+        from tomography_session_browser.ui.theme import current_palette
+
+        theme = current_palette()
+        self._accent = self._resolve_accent()
+        for dot, slot in self._status_dots:
+            dot.setPixmap(_dot_pixmap(getattr(theme, slot)))
+        if self._grid is not None:
+            self._grid.refresh_theme(accent=self._accent)
 
     # ----- click handling ----------------------------------------------------
 

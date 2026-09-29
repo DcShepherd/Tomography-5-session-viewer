@@ -19,7 +19,8 @@ class DoseInformationScatterPlot(DefocusScatterPlot):
         self.setAccessibleName("Camera dose plot")
         self.setAccessibleDescription(
             "Scatter plot of per-image camera dose values from MRC metadata. "
-            "Double-click a point to open the corresponding tilt series frame."
+            "Double-click a point to open the corresponding tilt series frame. "
+            "Right-click or press Escape to clear the highlight."
         )
 
     def set_model(self, model: DoseInformationPlotModel | None) -> None:

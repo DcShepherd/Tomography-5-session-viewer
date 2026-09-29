@@ -22,7 +22,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from PySide6.QtCore import QThreadPool
+from PySide6.QtCore import QCoreApplication, QEvent, QThreadPool
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication
 
@@ -42,7 +42,8 @@ from tomography_session_browser.domain.models import (
 from tomography_session_browser.parsers.session_scanner import SessionScanner
 from tomography_session_browser.services.settings_service import Settings
 from tomography_session_browser.ui import main_window as main_window_module
-from tomography_session_browser.ui.main_window import MainWindow, OpenSessionsDialog, TAB_LABELS
+from tomography_session_browser.ui.load_sessions_dialog import LoadSessionsDialog
+from tomography_session_browser.ui.main_window import MainWindow, TAB_LABELS
 from tomography_session_browser.ui.report_scope import ReportScopeDialog
 from tomography_session_browser.ui import theme as theme_module
 from tomography_session_browser.ui.theme import apply_theme, palette_for
@@ -293,6 +294,9 @@ def _process_events(app: QApplication, *, milliseconds: int = 300) -> None:
     deadline = time.monotonic() + (milliseconds / 1000)
     while time.monotonic() < deadline:
         app.processEvents()
+        # This harness does not enter app.exec(); processEvents alone leaves
+        # deleteLater widgets visible behind the newly rendered dashboard.
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         time.sleep(0.01)
 
 
@@ -326,10 +330,14 @@ def main() -> int:
     main_window_module.save_settings = lambda *_args, **_kwargs: None
     main_window_module.add_recent_session = lambda settings, *_args, **_kwargs: settings
 
-    folder_dialog = OpenSessionsDialog(SessionScanner(), "", None)
-    folder_dialog.atlas_path.setText(str(paths["atlas_root"].relative_to(REPOSITORY_ROOT)))
-    folder_dialog.collection_path.setText(str(paths["collection_root"].relative_to(REPOSITORY_ROOT)))
-    folder_dialog.resize(820, 290)
+    folder_dialog = LoadSessionsDialog(SessionScanner(), "", None)
+    folder_dialog.add_paths(
+        [
+            paths["atlas_root"].relative_to(REPOSITORY_ROOT),
+            paths["collection_root"].relative_to(REPOSITORY_ROOT),
+        ]
+    )
+    folder_dialog.resize(760, 520)
     _save_widget(folder_dialog, "01-select-session-folders.png", app)
     folder_dialog.close()
 

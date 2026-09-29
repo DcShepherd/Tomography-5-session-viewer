@@ -48,6 +48,11 @@ class _BarTrack(QWidget):
         self.setFixedHeight(_BAR_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
+    def set_colours(self, accent: QColor | str, track: QColor | str) -> None:
+        self._accent = QColor(accent)
+        self._track = QColor(track)
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802 — Qt signature
         painter = QPainter(self)
         try:
@@ -116,10 +121,12 @@ class CompletionBar(QWidget):
             f"{acquired} of {planned} planned tiles acquired. Press Enter or Space to open."
         )
 
+        self._fixed_accent = accent
+        self._failed_chip: QLabel | None = None
+        self._failed_text = ""
         theme = current_palette()
         track_color = QColor(theme.surface_hi)
         accent_color = QColor(accent) if accent is not None else QColor(theme.chart_green)
-        failed_color = QColor(theme.chart_red)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 4)
@@ -139,10 +146,10 @@ class CompletionBar(QWidget):
             if failed_batch_count:
                 batch_noun = "batch position group" if failed_batch_count == 1 else "batch position groups"
                 batch_suffix = f" · {failed_batch_count} {batch_noun}"
-            failed_chip = QLabel(
-                f'<span style="color: {failed_color.name()}">● {failed_count} failed {exposure_noun}{batch_suffix}</span>'
-            )
+            self._failed_text = f"● {failed_count} failed {exposure_noun}{batch_suffix}"
+            failed_chip = QLabel(self._failed_html())
             failed_chip.setTextFormat(Qt.TextFormat.RichText)
+            self._failed_chip = failed_chip
             # Size from the sheet; the colour stays inline because it is a
             # per-row status value, not a type decision.
             failed_chip.setObjectName("statStatusText")
@@ -165,7 +172,20 @@ class CompletionBar(QWidget):
         layout.addLayout(header)
 
         fraction = (acquired / planned) if planned else 0.0
-        layout.addWidget(_BarTrack(fraction, accent_color, track_color))
+        self._bar = _BarTrack(fraction, accent_color, track_color)
+        layout.addWidget(self._bar)
+
+    def _failed_html(self) -> str:
+        return f'<span style="color: {QColor(current_palette().chart_red).name()}">{self._failed_text}</span>'
+
+    def refresh_theme(self) -> None:
+        """Recolour in place after a theme switch."""
+
+        theme = current_palette()
+        accent = self._fixed_accent if self._fixed_accent is not None else theme.chart_green
+        self._bar.set_colours(accent, theme.surface_hi)
+        if self._failed_chip is not None:
+            self._failed_chip.setText(self._failed_html())
 
     # ------- click forwarding ------------------------------------------------
 

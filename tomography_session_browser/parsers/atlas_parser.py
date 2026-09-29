@@ -3,14 +3,17 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
+import re
 from typing import Any
 
 from tomography_session_browser.domain.models import Atlas
 from tomography_session_browser.parsers.mrc_parser import read_mrc_metadata
 from tomography_session_browser.parsers.path_utils import safe_id, sorted_paths
 from tomography_session_browser.parsers.xml_parser import find_first, parse_xml_file
+from tomography_session_browser.services.atlas_metadata import atlas_projection_mismatch, referenced_atlas_stem
 
 LOGGER = logging.getLogger(__name__)
+_TILE_ATLAS_ID_RE = re.compile(r"^Tile_\d+_\d+_(\d+)$")
 
 
 def parse_atlas_folder(path: Path) -> Atlas | None:
@@ -23,7 +26,22 @@ def parse_atlas_folder(path: Path) -> Atlas | None:
     if dm_path.exists():
         metadata["Atlas.dm"] = _parse_xml_metadata(dm_path, warnings)
 
+    # Tomography 5 keeps every acquisition when a grid's atlas is re-acquired,
+    # so one Atlas folder can hold several Atlas_<id> mosaics. Atlas.dm names
+    # the current one, and its node table (the overlay projection) describes
+    # that mosaic only; the image, XML and tiles must all come from it.
+    atlas_mrcs = sorted_paths(list(path.glob("Atlas_*.mrc")))
+    atlas_jpgs = sorted_paths(list(path.glob("Atlas_*.jpg")))
+    atlas_stems = list(dict.fromkeys(item.stem for item in sorted_paths(atlas_mrcs + atlas_jpgs)))
+    atlas_stem = _current_atlas_stem(metadata.get("Atlas.dm"), atlas_stems, warnings)
+    selected_atlas_id = _atlas_id(atlas_stem) if atlas_stem is not None else None
+    if atlas_stem is not None:
+        atlas_mrcs = [item for item in atlas_mrcs if item.stem == atlas_stem]
+        atlas_jpgs = [item for item in atlas_jpgs if item.stem == atlas_stem]
+
     atlas_xmls = sorted_paths(list(path.glob("Atlas_*.xml")))
+    if atlas_stem is not None:
+        atlas_xmls = [item for item in atlas_xmls if item.stem == atlas_stem]
     for xml_path in atlas_xmls[:5]:
         metadata[xml_path.name] = _parse_xml_metadata(xml_path, warnings)
 
@@ -33,8 +51,6 @@ def parse_atlas_folder(path: Path) -> Atlas | None:
     # requires a separate effective-pixel-size correction. The MRC keeps
     # marker overlays at the correct scale automatically because its
     # ``voxel_size`` matches the per-tile XML pixel size exactly.
-    atlas_mrcs = sorted_paths(list(path.glob("Atlas_*.mrc")))
-    atlas_jpgs = sorted_paths(list(path.glob("Atlas_*.jpg")))
     image_path = atlas_mrcs[0] if atlas_mrcs else (atlas_jpgs[0] if atlas_jpgs else None)
     if image_path is None and not dm_path.exists():
         return None
@@ -46,8 +62,14 @@ def parse_atlas_folder(path: Path) -> Atlas | None:
         + list(path.glob("Overview_Alignment_*.jpg"))
         + list(path.glob("Overview_Alignment_*.xml"))
     )
-    tile_paths = sorted_paths(list(path.glob("Tile_*.mrc")) + list(path.glob("Tile_*.jpg")))
-    tile_metadata_paths = sorted_paths(list(path.glob("Tile_*.xml")))
+    tile_paths = _without_other_atlas_tiles(
+        sorted_paths(list(path.glob("Tile_*.mrc")) + list(path.glob("Tile_*.jpg"))),
+        selected_atlas_id,
+    )
+    tile_metadata_paths = _without_other_atlas_tiles(
+        sorted_paths(list(path.glob("Tile_*.xml"))),
+        selected_atlas_id,
+    )
 
     # Cache the rendered JPG dimensions whenever a JPG sibling exists. Used
     # as the *fallback* image size for atlases that ship only a downsampled
@@ -86,7 +108,7 @@ def parse_atlas_folder(path: Path) -> Atlas | None:
                 len(tile_metadata_paths),
             )
 
-    return Atlas(
+    atlas = Atlas(
         id=safe_id(path),
         image_path=image_path,
         mrc_metadata=read_mrc_metadata(image_path) if image_path is not None and image_path.suffix.lower() == ".mrc" else None,
@@ -96,6 +118,64 @@ def parse_atlas_folder(path: Path) -> Atlas | None:
         alignment_paths=alignment_paths,
         warnings=warnings,
     )
+    if reason := atlas_projection_mismatch(atlas):
+        atlas.warnings.append(f"Atlas markers unavailable: {reason}")
+    return atlas
+
+
+def _current_atlas_stem(atlas_dm: object, stems: list[str], warnings: list[str]) -> str | None:
+    """Return the ``Atlas_<id>`` stem of the atlas mosaic to display.
+
+    ``stems`` are the atlas images on disk in natural order. Atlas.dm's
+    ``AtlasImageReference`` names the current atlas. Without a usable
+    reference the latest acquisition is used: atlas IDs increase with
+    acquisition time, so it is the last stem. Returns ``None`` when the folder
+    holds no atlas image.
+    """
+
+    if not stems:
+        return None
+    latest = stems[-1]
+    referenced = referenced_atlas_stem(atlas_dm)
+    if referenced is not None and referenced not in stems:
+        warnings.append(
+            f"Atlas.dm names {referenced} as the current atlas but its image was not found "
+            f"in the Atlas folder; showing the latest atlas on disk, {latest}."
+        )
+        referenced = None
+    current = referenced or latest
+    others = [stem for stem in stems if stem != current]
+    if others:
+        reason = "the current atlas in Atlas.dm" if referenced else "the latest acquisition"
+        noun = "atlas" if len(others) == 1 else "atlases"
+        warnings.append(
+            f"Atlas was re-acquired: showing {current} ({reason}); "
+            f"other {noun} {', '.join(others)} not displayed."
+        )
+    return current
+
+
+def _atlas_id(stem: str) -> str:
+    return stem.removeprefix("Atlas_")
+
+
+def _without_other_atlas_tiles(paths: list[Path], selected_atlas_id: str | None) -> list[Path]:
+    """Drop the tiles acquired for another atlas in the same folder.
+
+    Tile names end with the ID of their atlas
+    (``Tile_<tile id>_<index>_<atlas id>``). Tiles named any other way cannot
+    be attributed, so they are kept. Compare with the selected acquisition,
+    even when another acquisition's mosaic is no longer on disk.
+    """
+
+    if selected_atlas_id is None:
+        return paths
+    kept: list[Path] = []
+    for item in paths:
+        match = _TILE_ATLAS_ID_RE.match(item.stem)
+        if match is None or match.group(1) == selected_atlas_id:
+            kept.append(item)
+    return kept
 
 
 def _compute_effective_mosaic_pixel_size(

@@ -74,3 +74,26 @@ def test_pdf_atlas_figure_uses_status_aware_leaf_source_and_print_legend(
 def test_print_legend_advertises_its_real_layout_size() -> None:
     legend = AtlasMarkerPrintLegend()
     assert legend.wrap(500, 500) == (340.0, 132.0)
+
+
+def test_pdf_fallback_atlas_explains_why_its_overlays_are_unavailable(tmp_path, monkeypatch) -> None:
+    from PIL import Image
+
+    image_path = tmp_path / "Atlas_100.jpg"
+    Image.new("RGB", (16, 12), "grey").save(image_path)
+    atlas = Atlas(
+        id="atlas",
+        image_path=image_path,
+        metadata={"Atlas.dm": {"AtlasImageReference": {"BaseFileName": "Atlas_300"}}},
+    )
+    monkeypatch.setattr(report_generator.graphics, "keep_with_caption", lambda items, caption: (items, caption))
+
+    [(items, caption)] = report_generator._atlas_image_block(
+        atlas, label="Fallback atlas", generation_warnings=[],
+        scope_overviews=[Overview("ov", "Overview", Path("ov.jpg"))],
+    )
+
+    assert "Atlas markers unavailable:" in caption
+    assert "Atlas_300" in caption and "Atlas_100" in caption
+    assert "1 overview marker" not in caption
+    assert not any(isinstance(item, AtlasMarkerPrintLegend) for item in items)

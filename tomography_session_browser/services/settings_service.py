@@ -27,6 +27,9 @@ class Settings:
     last_tab: str = "Session"
     recent_sessions: list[str] = field(default_factory=list)
     last_report_directory: str | None = None
+    # Base64 of ``QWidget.saveGeometry()``: window size, position and
+    # maximised state. Display preference only; empty means "first run".
+    window_geometry: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Settings":
@@ -35,6 +38,7 @@ class Settings:
         # after a schema change.
         defaults = cls()
         report_dir = data.get("last_report_directory")
+        geometry = data.get("window_geometry")
         return cls(
             theme=str(data.get("theme", defaults.theme)) or defaults.theme,
             compact=bool(data.get("compact", defaults.compact)),
@@ -43,6 +47,7 @@ class Settings:
             last_tab=str(data.get("last_tab", defaults.last_tab)) or defaults.last_tab,
             recent_sessions=[str(p) for p in data.get("recent_sessions", []) if p],
             last_report_directory=str(report_dir) if report_dir else None,
+            window_geometry=geometry if isinstance(geometry, str) else defaults.window_geometry,
         )
 
 

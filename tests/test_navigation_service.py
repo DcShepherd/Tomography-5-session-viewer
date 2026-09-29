@@ -6,6 +6,7 @@ import pytest
 
 from navigation_contract import NAVIGATION_CONTRACT, contract_case_ids
 from tomography_session_browser.domain.models import (
+    Atlas,
     BatchPosition,
     MdocSection,
     Overview,
@@ -21,6 +22,7 @@ from tomography_session_browser.services.navigation_service import (
     resolve_batch_position_overview,
     resolve_batch_position_search_map,
     resolve_exposure_tilt_series,
+    resolve_item_atlas,
     resolve_tilt_series_navigation_targets,
 )
 
@@ -497,7 +499,61 @@ def _c_exposure_complete_order(tmp_path: Path) -> NavigationResolution:
     return _partial_exposure_case(tmp_path, ("custom_a", "custom_b", "custom_c"))
 
 
+def _atlas(tmp_path: Path, session: str, sample: str) -> Atlas:
+    folder = tmp_path / session / sample / "Atlas"
+    return Atlas(id=f"{session}:{sample}:Atlas", image_path=folder / "Atlas_1.mrc")
+
+
+def _c_item_atlas_none(tmp_path: Path) -> NavigationResolution:
+    return resolve_item_atlas(own_atlas=None, linked_atlases=())
+
+
+def _c_item_atlas_own_one(tmp_path: Path) -> NavigationResolution:
+    return resolve_item_atlas(own_atlas=_atlas(tmp_path, "Grid", "Sample1"))
+
+
+def _c_item_atlas_linked_one(tmp_path: Path) -> NavigationResolution:
+    return resolve_item_atlas(own_atlas=None, linked_atlases=[_atlas(tmp_path, "Screening", "Sample1")])
+
+
+def _c_item_atlas_linked_many(tmp_path: Path) -> NavigationResolution:
+    return resolve_item_atlas(
+        own_atlas=None,
+        linked_atlases=[_atlas(tmp_path, "ScreeningA", "Sample1"), _atlas(tmp_path, "ScreeningB", "Sample1")],
+    )
+
+
+def test_an_ambiguous_atlas_link_names_its_candidates_readably(tmp_path: Path) -> None:
+    resolution = _c_item_atlas_linked_many(tmp_path)
+
+    assert "ScreeningA/Sample1 atlas" in resolution.explanation
+    assert "ScreeningB/Sample1 atlas" in resolution.explanation
+
+
+def test_two_atlases_sharing_an_id_are_still_two_candidates(tmp_path: Path) -> None:
+    """Deduplication must not merge different atlases that happen to share an ID."""
+
+    first = Atlas(id="Atlas", image_path=tmp_path / "ScreeningA" / "Sample1" / "Atlas" / "Atlas_1.mrc")
+    second = Atlas(id="Atlas", image_path=tmp_path / "ScreeningB" / "Sample1" / "Atlas" / "Atlas_1.mrc")
+
+    resolution = resolve_item_atlas(own_atlas=None, linked_atlases=[first, second])
+
+    assert resolution.ambiguous and resolution.target is None
+
+
+def test_the_items_own_atlas_outranks_an_atlas_id_link(tmp_path: Path) -> None:
+    own = _atlas(tmp_path, "Grid", "Sample1")
+
+    resolution = resolve_item_atlas(own_atlas=own, linked_atlases=[_atlas(tmp_path, "Screening", "Sample1")])
+
+    assert resolution.target is own and resolution.provenance == "sample.atlas"
+
+
 CONTRACT_BUILDERS = {
+    "item_atlas_none": _c_item_atlas_none,
+    "item_atlas_own_one": _c_item_atlas_own_one,
+    "item_atlas_linked_one": _c_item_atlas_linked_one,
+    "item_atlas_linked_many": _c_item_atlas_linked_many,
     "exposure_missing_middle": _c_exposure_missing_middle,
     "exposure_missing_singleton": _c_exposure_missing_singleton,
     "exposure_unrelated_singleton": _c_exposure_unrelated_singleton,

@@ -27,14 +27,17 @@ the visible flash that a full rebuild produces on every slider tick.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import re
 from typing import Iterable
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QFontMetrics, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QScrollArea,
     QSizePolicy,
     QToolButton,
@@ -44,6 +47,8 @@ from PySide6.QtWidgets import (
 )
 
 from tomography_session_browser.ui.icons import themed_icon
+from tomography_session_browser.ui.motion import SmoothScroller
+from tomography_session_browser.ui.theme import SPACE_M, SPACE_S, SPACE_XS
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 
 _PATH_HINTS = ("/", "\\")
@@ -79,6 +84,64 @@ _KEY_COLUMN_MIN_WIDTH = 88
 _KEY_COLUMN_MAX_WIDTH = 240
 _KEY_COLUMN_VIEWPORT_FRACTION = 0.62
 _VALUE_COLUMN_MIN_WIDTH = 88
+# The key column fits the *typical* key, not the longest: one outlier such as
+# "Frames with parsed metadata" used to widen the column for every row and
+# squeeze each value onto three lines. The outlier key wraps instead.
+_KEY_COLUMN_PERCENTILE = 0.75
+_KEY_OUTLIER_RATIO = 1.5
+# Room between the value column and the scroll bar.
+_BODY_RIGHT_MARGIN = SPACE_S
+_EMPTY_TITLE = "No selection"
+
+# Display-only glue for values. A number stays with its unit, and a unit such
+# as "Å/px" never breaks at its slash (Qt's line breaker allows a break after
+# "/"). Both characters are removed again when a value is copied.
+_WORD_JOINER = "⁠"
+_NO_BREAK_SPACE = " "
+_UNIT_TOKENS = frozenset(
+    {
+        "Å", "Å/px", "nm", "nm/px", "µm", "μm", "µm/px", "μm/px", "um", "mm", "pm",
+        "px", "kV", "V", "eV", "keV", "s", "ms", "min", "h", "°", "%", "×", "Hz",
+        "fps", "e/Å²", "e⁻/Å²", "e-/Å²", "e/Å^2", "MB", "GB", "KB",
+    }
+)
+_NUMBER_RE = re.compile(r"^[-+±~≈]?\d[\d.,]*$")
+_PATH_SEPARATOR_RE = re.compile(r"[\\/]+")
+
+
+def display_value(value: str) -> str:
+    """Return ``value`` with display-only glue that keeps units intact."""
+
+    words = value.split(" ")
+    glued: list[str] = []
+    for word in words:
+        if "/" in word.strip("/") and not word.startswith("/"):
+            word = word.replace("/", f"{_WORD_JOINER}/{_WORD_JOINER}")
+        glued.append(word)
+    if not glued:
+        return value
+    result = glued[0]
+    for previous, raw, word in zip(words, words[1:], glued[1:]):
+        unit = raw.rstrip(",;:)")
+        number = previous.lstrip("(")
+        separator = _NO_BREAK_SPACE if unit in _UNIT_TOKENS and _NUMBER_RE.match(number) else " "
+        result += separator + word
+    return result
+
+
+def clean_copied_text(text: str) -> str:
+    """Undo :func:`display_value` so copied values are the source text."""
+
+    return text.replace(_WORD_JOINER, "").replace(_NO_BREAK_SPACE, " ")
+
+
+def short_path(path: str) -> str:
+    """``parent › name`` for a filesystem path, the part that identifies it."""
+
+    parts = [part for part in _PATH_SEPARATOR_RE.split(path.strip()) if part]
+    if len(parts) >= 2:
+        return f"{parts[-2]} › {parts[-1]}"
+    return parts[-1] if parts else path
 _PROVENANCE_TOOLTIP_KEYS = {
     "Detector",
     "Search spot size",
@@ -130,17 +193,135 @@ def _display_value_and_tooltip(key: str, value: str) -> tuple[str, str | None]:
     return clean_value.strip(), f"Source: {source}"
 
 
+class _PathValueLabel(ElidedLabel):
+    """A path that shows its identifying end when the whole path cannot fit.
+
+    Middle-eliding a full Windows path at dock width produced ``C:\\…mrc``,
+    which identifies nothing. Show the longest of these that fits: the full
+    path, ``parent › name``, the file name, or the file name middle-elided.
+    ``text_full()``, the tooltip and the copy button keep the complete path.
+    """
+
+    def _apply_elision(self) -> None:
+        metrics = QFontMetrics(self.font())
+        width = max(self.width() - 4, 12)
+        full = self.text_full()
+        short = short_path(full)
+        name = short.rsplit(" › ", 1)[-1]
+        for candidate in (full, short, name):
+            if metrics.horizontalAdvance(candidate) <= width:
+                shown = candidate
+                break
+        else:
+            shown = metrics.elidedText(name, Qt.TextElideMode.ElideMiddle, width)
+        QLabel.setText(self, shown)
+
+
+class _ValueLabel(QLabel):
+    """A metadata value that never widens the panel and never splits a unit.
+
+    * A multi-word value wraps at spaces, with numbers glued to their units.
+    * A single unbreakable token (an identifier such as
+      ``SearchMap_20260320_022428``) is middle-elided with the full value in the
+      tooltip. Such a token used to force the whole panel body wider than the
+      dock, which then clipped *every* row at the right edge.
+    * Copying returns the source text, without the display-only glue.
+    """
+
+    def __init__(self, value: str, tooltip: str | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("metaValue")
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        # Ignored: the row gives the value whatever width is left, and the
+        # value's own text can never demand more.
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
+        self.setMinimumWidth(1)
+        self._full = ""
+        self._extra_tooltip: str | None = None
+        self._single_token: bool | None = None
+        self.set_value(value, tooltip)
+
+    def value(self) -> str:
+        return self._full
+
+    def set_value(self, value: str, tooltip: str | None = None) -> None:
+        self._full = value
+        self._extra_tooltip = tooltip or None
+        single_token = bool(value) and not any(character.isspace() for character in value)
+        if single_token != self._single_token:
+            self._single_token = single_token
+            self.setWordWrap(not single_token)
+        self._refresh()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        super().resizeEvent(event)
+        if self._single_token:
+            self._refresh()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        super().showEvent(event)
+        if self._single_token:
+            self._refresh()
+
+    def _refresh(self) -> None:
+        if self._single_token:
+            # Elide only against a real, laid-out width. Before the label is
+            # shown its geometry is a placeholder, and eliding against it
+            # truncated short values such as "Nanoprobe".
+            if self.isVisible():
+                width = max(self.width() - 2, 12)
+                shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideMiddle, width)
+            else:
+                shown = self._full
+        else:
+            shown = display_value(self._full)
+        if super().text() != shown:
+            super().setText(shown)
+        elided = bool(self._single_token) and shown != self._full
+        tooltip = self._extra_tooltip or (self._full if elided else "")
+        if self.toolTip() != tooltip:
+            self.setToolTip(tooltip)
+
+    def _text_to_copy(self) -> str:
+        if self._single_token and super().text() != self._full:
+            return self._full
+        return clean_copied_text(self.selectedText() or self._full)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        if event.matches(QKeySequence.StandardKey.Copy):
+            _set_clipboard(self._text_to_copy())
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        menu = QMenu(self)
+        copy_selection = menu.addAction("Copy")
+        copy_selection.setEnabled(self.hasSelectedText())
+        copy_selection.triggered.connect(lambda: _set_clipboard(self._text_to_copy()))
+        copy_value = menu.addAction("Copy value")
+        copy_value.triggered.connect(lambda: _set_clipboard(self._full))
+        menu.exec(event.globalPos())
+
+
+def _set_clipboard(text: str) -> None:
+    clipboard = QGuiApplication.clipboard()
+    if clipboard is not None:
+        clipboard.setText(text)
+
+
 class _PathRow(QWidget):
     def __init__(self, key: str, value: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.key = key
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setSpacing(SPACE_S)
 
         layout.addWidget(_key_label(key))
 
-        self._value = ElidedLabel(value, mode=Qt.TextElideMode.ElideMiddle, parent=self)
+        self._value = _PathValueLabel(value, mode=Qt.TextElideMode.ElideMiddle, parent=self)
         self._value.setObjectName("metaValuePath")
         layout.addWidget(self._value, stretch=1)
 
@@ -183,24 +364,15 @@ class _KeyValueRow(QWidget):
         self.key = key
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setSpacing(SPACE_S)
 
         layout.addWidget(_key_label(key))
 
-        self._value_label = QLabel(value)
-        self._value_label.setObjectName("metaValue")
-        self._value_label.setWordWrap(True)
-        self._value_label.setToolTip(tooltip or "")
-        self._value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._value_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self._value_label = _ValueLabel(value, tooltip, self)
         layout.addWidget(self._value_label, stretch=1)
 
     def set_value(self, value: str, tooltip: str | None = None) -> None:
-        if self._value_label.text() != value:
-            self._value_label.setText(value)
-        next_tooltip = tooltip or ""
-        if self._value_label.toolTip() != next_tooltip:
-            self._value_label.setToolTip(next_tooltip)
+        self._value_label.set_value(value, tooltip)
         row_tooltip = tooltip or ""
         if self.toolTip() != row_tooltip:
             self.setToolTip(row_tooltip)
@@ -249,9 +421,12 @@ class MetadataPanel(QWidget):
         )
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(6)
+        outer.setSpacing(SPACE_S)
 
-        self._title = ElidedLabel("Context", mode=Qt.TextElideMode.ElideRight, parent=self)
+        # The panel's own "CONTEXT" heading now sits above this line (plan
+        # C11), so with nothing selected the title says that rather than
+        # repeating the heading.
+        self._title = ElidedLabel(_EMPTY_TITLE, mode=Qt.TextElideMode.ElideRight, parent=self)
         self._title.setObjectName("contextTitle")
         outer.addWidget(self._title)
 
@@ -262,13 +437,14 @@ class MetadataPanel(QWidget):
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        SmoothScroller(self._scroll)  # eased wheel scrolling (plan F5.5)
         outer.addWidget(self._scroll, stretch=1)
 
         self._body = QWidget()
         self._body.setObjectName("metadataBody")
         self._body_layout = QVBoxLayout(self._body)
-        self._body_layout.setContentsMargins(0, 2, 0, 2)
-        self._body_layout.setSpacing(5)
+        self._body_layout.setContentsMargins(0, SPACE_XS, _BODY_RIGHT_MARGIN, SPACE_XS)
+        self._body_layout.setSpacing(SPACE_XS)
         self._body_layout.addStretch(1)
         self._scroll.setWidget(self._body)
 
@@ -284,7 +460,7 @@ class MetadataPanel(QWidget):
     # ----- public API -----
 
     def set_title(self, text: str) -> None:
-        self._title.setText(text or "Context")
+        self._title.setText(text or _EMPTY_TITLE)
 
     def set_text(self, text: str) -> None:
         self._raw_text = text or ""
@@ -378,10 +554,15 @@ class MetadataPanel(QWidget):
         if viewport_width <= 0:
             return
 
-        required = max(
+        widths = sorted(
             label.fontMetrics().horizontalAdvance(label.text()) + 4
             for label in labels
         )
+        # Fit every ordinary key on one line, but let a genuine outlier (much
+        # longer than the typical key) wrap rather than squeezing every value.
+        typical = widths[max(0, math.ceil(len(widths) * _KEY_COLUMN_PERCENTILE) - 1)]
+        required = max(width for width in widths if width <= typical * _KEY_OUTLIER_RATIO)
+        viewport_width -= _BODY_RIGHT_MARGIN
         available = max(_KEY_COLUMN_MIN_WIDTH, viewport_width - _VALUE_COLUMN_MIN_WIDTH)
         responsive_cap = max(
             _KEY_COLUMN_MIN_WIDTH,
@@ -423,7 +604,7 @@ class MetadataPanel(QWidget):
     def _build_widget(self, spec: _RowSpec) -> QWidget:
         if spec.kind == "spacer":
             spacer = QWidget()
-            spacer.setFixedHeight(6)
+            spacer.setFixedHeight(SPACE_S)
             return spacer
         if spec.kind == "section":
             return _SectionHeader(spec.value)
@@ -434,7 +615,7 @@ class MetadataPanel(QWidget):
         else:  # plain
             row = _PlainRow(spec.value)
         if spec.indented:
-            row.setContentsMargins(12, 0, 0, 0)
+            row.setContentsMargins(SPACE_M, 0, 0, 0)
         return row
 
     def _parse(self, lines: Iterable[str]) -> Iterable[_RowSpec]:

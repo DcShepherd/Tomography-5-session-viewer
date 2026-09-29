@@ -13,8 +13,9 @@ LOGGER = logging.getLogger(__name__)
 
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QObject, QElapsedTimer, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QFont, QKeySequence, QShortcut
+import shiboken6
+from PySide6.QtCore import QByteArray, QCoreApplication, QEvent, QEventLoop, QObject, QElapsedTimer, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QFont, QGuiApplication, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -82,6 +83,7 @@ from tomography_session_browser.services.navigation_service import (
     resolve_search_tile_search_map,
     resolve_search_tile_tilt_series,
     resolve_exposure_tilt_series,
+    resolve_item_atlas,
     resolve_tilt_series_navigation_targets,
     tab_label_for_object,
     tilt_exposure_match_keys,
@@ -91,6 +93,15 @@ from tomography_session_browser.services.tilt_series_validation import (
 )
 from tomography_session_browser.services.tilt_angle_service import stack_order_tilt_angles
 from tomography_session_browser.services.session_loader import SessionLoader
+from tomography_session_browser.services.session_intake import (
+    DRAG_CHECK_BUDGET_S,
+    DropReceipt,
+    DroppedFolder,
+    SessionIntake,
+    assess_paths,
+    path_identity_key,
+    recheck_unchecked,
+)
 from tomography_session_browser.services.settings_service import (
     Settings,
     add_recent_session,
@@ -116,10 +127,20 @@ from tomography_session_browser.services.timeline_service import (
     build_session_timeline,
     detect_inferred_pauses,
 )
-from tomography_session_browser.ui.animations import fade_in
 from tomography_session_browser.ui.branding import TitleBarLockup, brand_window_icon
-from tomography_session_browser.ui.icons import themed_icon
+from tomography_session_browser.ui.icons import draw_in_advance, themed_icon, undrawn_in
 from tomography_session_browser.ui.list_decorations import paint_selection_marker
+from tomography_session_browser.ui.motion import (
+    THEME_REVEAL_GLOW_ALPHA,
+    ItemHoverAnimator,
+    PageFade,
+    PanelSlide,
+    ThemeRevealOverlay,
+    ThemeSeed,
+    motion_enabled,
+    watch_system_reduced_motion,
+)
+from tomography_session_browser.ui.native_window import set_title_bar_dark
 from tomography_session_browser.ui.navigation_icons import (
     PROJECT_GROUP_ICONS,
     TAB_ICONS,
@@ -157,13 +178,49 @@ from tomography_session_browser.ui.project_model import (
     session_key,
 )
 from tomography_session_browser.ui.report_scope import ReportScopeDialog, normalise_report_scope
-from tomography_session_browser.ui.session_linking import linked_sample_groups, sample_sort_key_for_group
-from tomography_session_browser.ui.theme import apply_theme, current_palette, palette_for
+from tomography_session_browser.ui.session_linking import (
+    atlas_link_resolutions,
+    linked_sample_groups,
+    sample_sort_key_for_group,
+)
+from tomography_session_browser.ui.fit_first import (
+    TAB_STEP_FULL,
+    TAB_STEPS,
+    clamped_share,
+    first_fitting_step,
+    tab_text,
+)
+from tomography_session_browser.ui.theme import (
+    RADIUS_CONTROL,
+    SPACE_L,
+    SPACE_M,
+    SPACE_S,
+    SPACE_XL,
+    apply_theme,
+    current_palette,
+    mark_theme_region,
+    palette_for,
+)
+from tomography_session_browser.ui.widgets.context_drawer import (
+    CONTEXT_DRAWER_MIN_PAGE_PX,
+    ContextDrawer,
+    context_panel_as_drawer,
+)
 from tomography_session_browser.ui.widgets.context_header import ContextHeader
 from tomography_session_browser.ui.widgets.metadata_panel import MetadataPanel
 from tomography_session_browser.ui.widgets.loading_overlay import LoadingOverlay
+from tomography_session_browser.ui.widgets.toast import TONE_ERROR, TONE_INFO, TONE_SUCCESS, Toast
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 from tomography_session_browser.ui.widgets.session_dashboard import SessionDashboard
+from tomography_session_browser.ui.widgets.session_drop import (
+    ProjectDropHint,
+    SessionDropOverlay,
+    SessionDropReceipt,
+    SessionDropTarget,
+)
+from tomography_session_browser.ui.load_sessions_dialog import LOAD_SESSIONS_TITLE, LoadSessionsDialog
+from tomography_session_browser.ui.widgets.sliding_tab_bar import SlidingTabBar
+from tomography_session_browser.ui.widgets.smooth_tree import SmoothScrollTree
 from tomography_session_browser.ui.session_presenter import (
     DashboardEntityScope,
     EntityGroup,
@@ -187,20 +244,57 @@ from tomography_session_browser.ui.session_presenter import (
 # realistic number of scopes; oldest scopes are evicted first.
 VIEWER_STATE_CACHE_LIMIT = 96
 
-# Workspace-width breakpoints. These describe the *central* area, not the
-# window: the docks are user-resizable, so a wide window can still leave a
-# cramped reviewing area. All three are transient observations recomputed on
-# resize — none is ever written to settings. See ``_derived_narrow_chrome``.
-WORKSPACE_NARROW_CHROME_PX = 1420
+# Workspace-width tiers for the session pill. They describe the *central*
+# area, not the window: the docks are user-resizable, so a wide window can
+# still leave a cramped reviewing area. Transient observations recomputed on
+# resize, never written to settings. The toolbar, tabs and context header no
+# longer share one breakpoint; each fits itself (``ui.fit_first``, plan F3).
 WORKSPACE_MEDIUM_PILL_PX = 1120
 WORKSPACE_WIDE_PILL_PX = 1500
-# Project-totals strip: full labels, abbreviations, then nothing. These were
-# the last width thresholds still measured against the *window*, so widening
-# the docks compacted every other piece of chrome and left this one alone.
-WORKSPACE_FULL_TOTALS_PX = 1500
-WORKSPACE_ABBREVIATED_TOTALS_PX = 1120
-WORKSPACE_RUNTIME_LABEL_PX = 1040
+# Room the toolbar needs beyond its items (its QSS padding and a margin for
+# the overflow button), and the tab bar beyond its tabs (the workspace's side
+# margins), when measuring whether a presentation fits.
+TOOLBAR_CHROME_PX = 40
+TAB_BAR_CHROME_PX = 24
+# Session-pill width caps for the wide / medium / narrow tiers. The pill takes
+# its text's width up to the cap; the old 150 px narrow cap elided
+# "1 group · 2 sessions" beside hundreds of free toolbar pixels.
+SESSION_PILL_MAX_PX = (360, 300, 240)
+SESSION_PILL_MIN_PX = 90
+# Room the status bar needs beyond its items (margins, item spacing and the
+# size grip) when fitting the project totals (``_fit_status_bar``).
+STATUS_BAR_CHROME_PX = 40
+# The theme button's icon, drawn at once in the new theme when it is clicked
+# (plan F5.8a): a disc this wide, centred where the icon sits in a button
+# with text beside it (1 px margin, 1 px border, 8 px padding, half an 18 px
+# icon; ``QToolBar QToolButton`` in the style sheet).
+THEME_SEED_DIAMETER_PX = 28
+THEME_SEED_ICON_OFFSET_PX = 19
+# How long after the window first shows the loader's Qt Quick lamp is loaded
+# (plan F6.2): about 170 ms of the GUI thread, taken while the app is idle.
+LOADER_PREWARM_DELAY_MS = 1500
+# The other theme's icons are drawn a few at a time once the app is idle
+# (after start-up and after each load), so a theme switch needn't draw them.
+THEME_ICONS_IDLE_DELAY_MS = 800
+THEME_ICONS_PER_TURN = 12
 CONTEXT_DOCK_MIN_WIDTH_PX = 300
+# Side-panel widths follow the window (plan F3, D2) as (minimum, share of
+# the window, maximum). They were a fixed 255 and 300 px at every size. The
+# context panel keeps its 300 px floor rather than the plan's 260: its key
+# column was tuned to that width. Refitted on window resizes only, and never
+# over a width the reviewer has dragged; never written to settings.
+PROJECT_DOCK_WIDTH = (220, 0.15, 360)
+CONTEXT_DOCK_WIDTH = (CONTEXT_DOCK_MIN_WIDTH_PX, 0.19, 460)
+# A dock this far from the width last fitted to it, after a drag, has been
+# sized by the reviewer.
+DOCK_DRAG_TOLERANCE_PX = 4
+# First-run window size: a share of the screen's usable area, capped at the
+# comfortable desktop layout the default was designed around. A fixed
+# 2000×1100 overflowed a 150%-scaled laptop (1707×1019 usable), putting the
+# status bar behind the taskbar.
+FIRST_RUN_SCREEN_FRACTION = 0.88
+FIRST_RUN_MAX_SIZE = (2000, 1100)
+WINDOW_MIN_SIZE = (960, 640)
 # Floor for the derived workspace width. Dragging the docks out until they meet
 # leaves nothing in the middle; reporting the *window* width there said "wide"
 # at the precise moment the reviewing area was at its narrowest.
@@ -214,8 +308,11 @@ PROJECT_BADGE_MEANINGS: dict[str, str] = {
     "DC": "Data collection session",
     "!": "Unresolved or ambiguous atlas link",
 }
+# U+00A0 keeps each badge on the same line as its word when the legend wraps
+# in a narrow panel; otherwise "!" could end one line and "unresolved" start
+# the next.
 PROJECT_BADGE_LEGEND_TEXT = " · ".join(
-    f"{badge} {meaning.split()[0].lower()}" for badge, meaning in PROJECT_BADGE_MEANINGS.items()
+    f"{badge} {meaning.split()[0].lower()}" for badge, meaning in PROJECT_BADGE_MEANINGS.items()
 )
 PROJECT_BADGE_LEGEND_TOOLTIP = "\n".join(
     f"{badge} — {meaning}" for badge, meaning in PROJECT_BADGE_MEANINGS.items()
@@ -226,17 +323,40 @@ TAB_LABELS = ["Session", "Atlas", "Overview", "Search map", "Search", "Batch pos
 # internal tab key becomes something a person reads. The keys themselves are
 # dictionary keys used across this window and must not be renamed.
 _TAB_DISPLAY_LABELS = ENTITY_DISPLAY_LABELS
+# The Sample (and Session) list holding each kind of item with an Atlas jump.
+_ATLAS_ITEM_LISTS: dict[type, str] = {
+    Overview: "overviews",
+    SearchMap: "search_maps",
+    SearchTile: "search_tiles",
+    BatchPosition: "batch_positions",
+    TiltSeries: "tilt_series",
+}
 OBJECT_ROLE = int(Qt.ItemDataRole.UserRole)
 EXPANSION_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 HIGHLIGHT_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 #: Absolute path carried by a "Recent sessions" row so it can be reopened.
 RECENT_PATH_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 _ACTIVE_CONTEXT = object()
-SESSION_FOLDER_HELP_TEXT = (
-    "Select the folder for your atlas and/or data collection session"
-)
-LINKED_IMPORT_HELP_TEXT = "On import, connected atlas and data collection sessions will be linked."
 DIRECT_DM_FILE_MESSAGE = "Please select the containing folder, not an individual session file."
+#: Qt's QWIDGETSIZE_MAX: "no maximum" for a widget's size.
+_QWIDGETSIZE_MAX = (1 << 24) - 1
+
+
+def first_run_window_rect(available: QRect) -> QRect:
+    """Return a centred first-run window rect that fits ``available``.
+
+    ``available`` is the screen's usable area (taskbar excluded). The result is
+    never smaller than the window's minimum size, so on a screen too small for
+    that minimum it may still overflow, exactly as the minimum already implies.
+    """
+
+    max_width, max_height = FIRST_RUN_MAX_SIZE
+    min_width, min_height = WINDOW_MIN_SIZE
+    width = max(min_width, min(max_width, round(available.width() * FIRST_RUN_SCREEN_FRACTION)))
+    height = max(min_height, min(max_height, round(available.height() * FIRST_RUN_SCREEN_FRACTION)))
+    left = available.left() + max(0, (available.width() - width) // 2)
+    top = available.top() + max(0, (available.height() - height) // 2)
+    return QRect(left, top, width, height)
 
 
 def _format_tilt_angle(angle: float) -> str:
@@ -355,6 +475,9 @@ def _select_session_folder(
 
 class _SessionLoadSignals(QObject):
     status = Signal(str)
+    # The loader's stage and what it is reading (plan F6.1), for the overlay.
+    stage = Signal(str)
+    progress = Signal(str, int, int)
     loaded = Signal(str, bool, bool, bool, object, object)
     failed = Signal(str, bool, bool, bool, str)
 
@@ -390,9 +513,16 @@ class _SessionLoadTask(QRunnable):
         _mrc_parser.inspect_cache_hit_hook = lambda: profile.increment("parser_cache_hits")
         _mrc_parser.inspect_cache_miss_hook = lambda: profile.increment("parser_cache_misses")
         try:
+            self._signals.stage.emit("parse")
             self._signals.status.emit("Parsing metadata and MRC headers...")
+            signals = self._signals
             with profile.phase("load_session_worker"), active_profile(profile):
-                session = SessionLoader().load(self._path, profile=profile)
+                session = SessionLoader().load(
+                    self._path,
+                    profile=profile,
+                    # Emitted from this worker thread; queued to the window.
+                    progress=lambda label, current, total: signals.progress.emit(label, current, total),
+                )
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI thread
             LOGGER.exception("Could not load tomography session path=%s", self._path)
             profile.emit_perf_report(LOGGER, path=self._path)
@@ -550,19 +680,81 @@ def _prepare_session_ui_payload(
     )
 
 
+class _ProjectTreeWidget(SmoothScrollTree):
+    """Project tree whose hover belongs entirely to :class:`ItemHoverAnimator`.
+
+    It scrolls per pixel and eases its scrolls, including the scroll to a row
+    selected from elsewhere (plan F5.5).
+
+    Qt item views track a hover row from plain mouse moves and hover events,
+    and the native style then paints a snapping "hot" box behind the expander
+    arrow that the style sheet cannot reach. Button-less moves and hover
+    events are kept out of that internal tracking. The animator still sees
+    them first, through its viewport event filter; drags and clicks are
+    unaffected.
+    """
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if event.buttons() == Qt.MouseButton.NoButton:
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def viewportEvent(self, event) -> bool:  # noqa: N802 - Qt API
+        if event.type() in (QEvent.Type.HoverEnter, QEvent.Type.HoverMove, QEvent.Type.HoverLeave):
+            return True
+        return super().viewportEvent(event)
+
+    def drawBranches(self, painter, rect, index) -> None:  # noqa: N802 - Qt API
+        # The Windows 11 style marks a selected row with its own pill, in the
+        # system accent colour, in the branch area just before the branches
+        # are drawn. The delegate already marks the row with the palette's
+        # accent bar (plan C9), so the pill is painted out and the native
+        # expander drawn on the plain panel. Styling ``::branch`` instead
+        # would hide the native arrow.
+        painter.fillRect(rect, QColor(current_palette().panel))
+        super().drawBranches(painter, rect, index)
+
+
 class _ProjectTreeDelegate(QStyledItemDelegate):
-    """Use the project tree's stylesheet selection without native focus trails."""
+    """Paint the project tree's row fills once per row, without focus trails.
+
+    Hover, selection and the cross-view highlight are all painted here as one
+    full-row fill rather than by the style sheet. ``::item`` rules apply per
+    column, so the ``:hover`` rule (which also snapped on and off) and the
+    ``:selected`` rule each drew a separate rounded cell for the name and the
+    badge with a seam between them (plan C9), and the branch area took a third
+    block. The tree carries ``paintsRowSelection``, which turns the sheet's
+    per-column selection fill off.
+    """
+
+    hover_animator: ItemHoverAnimator | None = None
 
     def paint(self, painter, option: QStyleOptionViewItem, index) -> None:  # noqa: N802 - Qt API
         paint_option = QStyleOptionViewItem(option)
         paint_option.state &= ~QStyle.StateFlag.State_HasFocus
+        hovered = bool(paint_option.state & QStyle.StateFlag.State_MouseOver)
+        paint_option.state &= ~QStyle.StateFlag.State_MouseOver
         selected = bool(paint_option.state & QStyle.StateFlag.State_Selected)
         highlighted = bool(index.sibling(index.row(), 0).data(HIGHLIGHT_ROLE))
-        if highlighted and not selected:
+        if index.column() == 0:
             palette = current_palette()
-            fill = QColor(palette.accent)
-            fill.setAlpha(34)
-            painter.fillRect(paint_option.rect, fill)
+            if selected:
+                self._paint_row_fill(painter, paint_option, QColor(palette.selection))
+            elif highlighted:
+                fill = QColor(palette.accent)
+                fill.setAlpha(34)
+                self._paint_row_fill(painter, paint_option, fill)
+            else:
+                progress = (
+                    self.hover_animator.progress(index)
+                    if self.hover_animator is not None
+                    else (1.0 if hovered else 0.0)
+                )
+                if progress > 0.001:
+                    fill = QColor(palette.surface_alt)
+                    fill.setAlphaF(min(1.0, progress) * fill.alphaF())
+                    self._paint_row_fill(painter, paint_option, fill)
         super().paint(painter, paint_option, index)
         # Column 0 only: the marker belongs to the row, and ``paint`` runs
         # once per column.
@@ -570,6 +762,53 @@ class _ProjectTreeDelegate(QStyledItemDelegate):
             paint_selection_marker(
                 painter, paint_option.rect, current_palette(), strong=highlighted
             )
+
+    @staticmethod
+    def _paint_row_fill(painter, option: QStyleOptionViewItem, fill: QColor) -> None:
+        """One rounded fill from the name to the badge, painted in column 0."""
+
+        view = option.widget
+        right = view.viewport().width() - 3 if view is not None else option.rect.right()
+        rect = QRectF(option.rect.left(), option.rect.top(), right - option.rect.left(), option.rect.height())
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(fill)
+        painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), RADIUS_CONTROL, RADIUS_CONTROL)
+        painter.restore()
+
+
+#: Both side panels open with the same header row, so their first lines sit at
+#: one height: 24 px of content between 8 px margins.
+PANEL_HEADER_HEIGHT_PX = SPACE_XL + 2 * SPACE_S
+#: One inset for everything inside the side panels (it was 14, 10 and 10 on
+#: the left, 10 on the right). SPACE_S rather than SPACE_M: the context
+#: panel's key column is sized from the width left over, and the dock minimum
+#: was tuned for 10 px margins.
+SIDE_PANEL_INSET_PX = SPACE_S
+
+
+def _panel_header(text: str, parent: QWidget, count: QLabel | None = None) -> QWidget:
+    """The small-caps heading row shared by the Project and Context panels.
+
+    The two panels used to disagree (plan C11): the left one opened with a
+    small-caps "PROJECT" line and the right one with a large title-case name,
+    so their first lines did not line up.
+    """
+
+    header = QWidget(parent)
+    header.setObjectName("panelHeaderRow")
+    header.setFixedHeight(PANEL_HEADER_HEIGHT_PX)
+    layout = QHBoxLayout(header)
+    layout.setContentsMargins(SIDE_PANEL_INSET_PX, SPACE_S, SIDE_PANEL_INSET_PX, SPACE_S)
+    layout.setSpacing(SPACE_S)
+    title = QLabel(text, header)
+    title.setObjectName("panelHeader")
+    layout.addWidget(title)
+    layout.addStretch(1)
+    if count is not None:
+        layout.addWidget(count)
+    return header
 
 
 def _dashboard_scope_value_for_sessions(sessions: list[Session], active_context: Any) -> Any:
@@ -872,7 +1111,13 @@ class MainWindow(QMainWindow):
         self._selection_state = SelectionState()
         self._settings = settings if settings is not None else Settings()
         self._theme_actions: list[QAction] = []  # actions whose icon needs refreshing on theme change
-        self._theme_refresh_generation = 0
+        # The other theme's icons are being drawn while idle (restyle spike).
+        self._other_theme_icons_pending = False
+        # The theme changed while the Session tab was hidden: its dashboard
+        # (which bakes some colours in) is rebuilt when the tab is shown.
+        self._dashboard_theme_stale = False
+        # The new theme radiating out of the theme button (plan F5.8b).
+        self._theme_reveal: ThemeRevealOverlay | None = None
         self._failed_tilt_ids_cache: frozenset[str] | None = None
         # Bounded LRU of per-(scope, tab) viewer state. Holds only IDs and
         # scalars, so it can never keep a removed session's entities alive.
@@ -930,6 +1175,8 @@ class MainWindow(QMainWindow):
         self._report_signals.failed.connect(self._on_report_failed)
         self._session_load_signals = _SessionLoadSignals(self)
         self._session_load_signals.status.connect(self._set_loading_status)
+        self._session_load_signals.stage.connect(self._set_loading_stage)
+        self._session_load_signals.progress.connect(self._set_loading_progress)
         self._session_load_signals.loaded.connect(self._on_session_loaded)
         self._session_load_signals.failed.connect(self._on_session_load_failed)
         self._session_ui_prepare_signals = _SessionUiPrepareSignals(self)
@@ -959,12 +1206,11 @@ class MainWindow(QMainWindow):
         self._sample_object_index: dict[int, list[Sample]] = {}
         self.setWindowTitle("Tomography Session Browser")
         self.setWindowIcon(brand_window_icon())
-        # Default size targets the comfortable laptop / desktop layout the
-        # user pinned in screenshots: a wide central image area with a
-        # compact project tree and metadata panel on either side.
-        # The minimum size keeps the app usable down to ~720p.
-        self.resize(2000, 1100)
-        self.setMinimumSize(QSize(960, 640))
+        # The minimum size keeps the app usable down to ~720p. The initial
+        # size is the last saved geometry if there is one, otherwise a
+        # first-run size fitted to the screen.
+        self.setMinimumSize(QSize(*WINDOW_MIN_SIZE))
+        self._apply_initial_geometry()
         self._build_toolbar()
         self._build_left_tree()
         self._build_right_panel()
@@ -972,23 +1218,46 @@ class MainWindow(QMainWindow):
         self.loading_overlay = LoadingOverlay(self)
         self.loading_overlay.setGeometry(self.rect())
         self.loading_overlay.hidden.connect(self._flush_deferred_loading_dashboard)
-        # Establish initial dock proportions matching the user's reference
-        # screenshot (left project tree ~245 px, right metadata panel
-        # ~300 px). The centre tab area gets the remainder (~1440 px on a
-        # 2000-wide window). Splitter / drag-resize behaviour is unaffected.
-        self.resizeDocks(
-            [self.project_dock, self.context_dock],
-            [255, 300],
-            Qt.Orientation.Horizontal,
-        )
+        # A load adds tree icons: their other-theme versions too, once idle.
+        self.loading_overlay.hidden.connect(self._schedule_other_theme_icons)
+        # The dashboard's charts, held back during a load, are built as the
+        # overlay starts to leave, under it: the interface it reveals is
+        # finished, with no second entrance (plan F6.3).
+        self.loading_overlay.leaving.connect(self._loading_overlay_leaving)
+        # What a drop skipped is said once the hand-off has finished: the
+        # hand-off pictures the page, and nothing should appear under it.
+        self.loading_overlay.hidden.connect(self._show_pending_drop_receipt)
+        # Keyboard focus after a load, when what had it before is gone: the
+        # project tree, where the loaded session now is.
+        self.loading_overlay.focus_after = lambda: getattr(self, "tree", None)
+        # Confirmations fade in over the workspace and away (plan F5.9).
+        self.toast = Toast(self)
+        self._loaded_this_run: list[str] = []
+        # Folders a drop could not load, until its load finishes; then the
+        # receipt that says so, until the loading screen has handed over.
+        self._pending_drop_skips: tuple[DroppedFolder, ...] = ()
+        self._pending_drop_receipt: DropReceipt | None = None
+        # Initial dock widths as a share of the window (plan D2); the centre
+        # tab area gets the remainder. Dragging a dock still works, and a
+        # dragged width is then kept (``_note_user_dock_widths``).
+        self._dock_targets: dict[QDockWidget, int] = {}
+        self._user_sized_docks: set[QDockWidget] = set()
+        self._fitting_docks = False
+        self._dock_fit_window_size = QSize()
+        self._fit_docks()
         self._update_session_pill()
         self._update_status_summary()
         self._restore_from_settings()
+        # A change to Windows' "Animation effects" applies without a restart.
+        watch_system_reduced_motion(QApplication.instance())
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt signature
         super().resizeEvent(event)
         if hasattr(self, "loading_overlay"):
             self.loading_overlay.setGeometry(self.rect())
+        if hasattr(self, "_dock_targets"):
+            self._fit_docks()
+            self._update_context_drawer_mode()
         self._update_responsive_chrome()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt signature
@@ -997,19 +1266,171 @@ class MainWindow(QMainWindow):
             # resizing the main window. A central-widget Resize event already
             # carries the committed geometry, so update in the same event turn
             # and avoid leaving stale chrome until another input arrives.
+            if hasattr(self, "_dock_targets"):
+                self._note_user_dock_widths(QGuiApplication.mouseButtons())
             self._update_responsive_chrome()
         return super().eventFilter(watched, event)
+
+    # -- proportional side panels (plan F3, D2) -----------------------------
+
+    def _dock_width_specs(self) -> list[tuple[QDockWidget, tuple[int, float, int]]]:
+        return [(self.project_dock, PROJECT_DOCK_WIDTH), (self.context_dock, CONTEXT_DOCK_WIDTH)]
+
+    def _fit_docks(self) -> None:
+        """Size each side panel as a share of the window, within its clamp.
+
+        Runs on window resizes only. Qt otherwise keeps a dock's width fixed
+        and hands every spare pixel to the centre, which left the panels as
+        slivers at 4K. A dock the reviewer has dragged keeps their width.
+        """
+
+        if self._fitting_docks:
+            return
+        docks, widths = [], []
+        for dock, (minimum, share, maximum) in self._dock_width_specs():
+            # ``isHidden`` rather than ``isVisible``: an unshown window's docks
+            # are not "visible" yet, but they still need a starting width.
+            if dock in self._user_sized_docks or dock.isHidden() or dock.isFloating():
+                continue
+            target = clamped_share(minimum, share, maximum, self.width())
+            self._dock_targets[dock] = target
+            docks.append(dock)
+            widths.append(target)
+        self._dock_fit_window_size = self.size()
+        if not docks:
+            return
+        self._fitting_docks = True
+        try:
+            self.resizeDocks(docks, widths, Qt.Orientation.Horizontal)
+        finally:
+            self._fitting_docks = False
+
+    # -- the context drawer on narrow windows (plan D2) -----------------------
+
+    def _update_context_drawer_mode(self) -> None:
+        """Dock the context panel, or fold it into a drawer, to suit the width.
+
+        Judged from the window alone (the page's width as if the panel were
+        docked), so switching cannot feed back. Only once the window is shown:
+        showing a dock before that can flash it as a tiny top-level window.
+        """
+
+        if not hasattr(self, "context_drawer") or not self.isVisible():
+            return
+        if self.project_dock.isHidden() or self.project_dock.isFloating():
+            project = 0
+        elif self.project_dock in self._user_sized_docks:
+            project = self.project_dock.width()
+        else:
+            project = clamped_share(*PROJECT_DOCK_WIDTH, self.width())
+        context = clamped_share(*CONTEXT_DOCK_WIDTH, self.width())
+        drawer = context_panel_as_drawer(
+            self.width(), project, context, currently_drawer=self._context_drawer_mode
+        )
+        if drawer and not self._context_drawer_mode:
+            self._enter_context_drawer()
+        elif not drawer and self._context_drawer_mode:
+            self._leave_context_drawer()
+        elif drawer:
+            self._place_context_drawer()
+
+    def _enter_context_drawer(self) -> None:
+        self._context_drawer_mode = True
+        slide = self._panel_slides.pop(self.context_dock, None)
+        if slide is not None:
+            try:
+                slide.dismiss()
+            except RuntimeError:
+                pass
+        self.context_dock.hide()
+        self.context_drawer.hold(self._context_shell)
+        self._place_context_drawer()
+        # The button now says whether the drawer is open: closed to start.
+        self._show_context_action_checked(False)
+
+    def _leave_context_drawer(self) -> None:
+        self._context_drawer_mode = False
+        self.context_drawer.close_drawer(animate=False)
+        self.context_drawer.release()
+        self.context_dock.setWidget(self._context_shell)
+        # Back to the reviewer's docked preference, which the drawer never touched.
+        visible = self._settings.context_panel_visible
+        self._show_context_action_checked(visible)
+        self.context_dock.setVisible(visible)
+        self._fit_docks()
+
+    def _place_context_drawer(self) -> None:
+        central = self.centralWidget().geometry()
+        width = min(
+            clamped_share(*CONTEXT_DOCK_WIDTH, self.width()),
+            max(0, self.width() - self._project_dock_room() - CONTEXT_DRAWER_MIN_PAGE_PX),
+        )
+        self.context_drawer.place(QRect(self.width() - width, central.top(), width, central.height()))
+
+    def _project_dock_room(self) -> int:
+        dock = self.project_dock
+        return 0 if dock.isHidden() or dock.isFloating() else dock.width()
+
+    def _open_context_drawer(self, open_: bool) -> None:
+        animate = motion_enabled(self) and not self._loading_overlay_active()
+        if open_:
+            self._place_context_drawer()
+            self.context_drawer.open_drawer(animate=animate)
+        else:
+            self.context_drawer.close_drawer(animate=animate)
+
+    def _close_context_drawer_from_keyboard(self) -> None:
+        self._show_context_action_checked(False)
+        self._open_context_drawer(False)
+        # Focus goes back to the button that opened it (as the Overlays panel does).
+        button = self.main_toolbar.widgetForAction(self.context_panel_action)
+        if button is not None:
+            button.setFocus(Qt.FocusReason.ShortcutFocusReason)
+
+    def _show_context_action_checked(self, checked: bool) -> None:
+        blocked = self.context_panel_action.blockSignals(True)
+        try:
+            self.context_panel_action.setChecked(checked)
+        finally:
+            self.context_panel_action.blockSignals(blocked)
+
+    def _note_user_dock_widths(self, buttons: Qt.MouseButton) -> None:
+        """Keep a width the reviewer dragged instead of refitting over it.
+
+        A dock whose width moved away from its fitted width while the window
+        kept its size, with a mouse button held, was dragged by its separator.
+        Qt also squeezes docks during a window resize and a panel toggle moves
+        the centre, but neither holds the window size *and* the button. A
+        session-long choice, like any other layout observation, never saved.
+        """
+
+        if self._fitting_docks or not (buttons & Qt.MouseButton.LeftButton):
+            return
+        if self.size() != self._dock_fit_window_size:
+            return
+        for dock, target in self._dock_targets.items():
+            if dock.isVisible() and not dock.isFloating() and abs(dock.width() - target) > DOCK_DRAG_TOLERANCE_PX:
+                self._user_sized_docks.add(dock)
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main")
         toolbar.setObjectName("mainToolbar")
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(18, 18))
+        # Set once. Each button's own style is then fitted per step
+        # (``_fit_toolbar``); changing the toolbar's style would reset them all.
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         toolbar.setFixedHeight(50)
         self.main_toolbar = toolbar
-        self._toolbar_narrow: bool | None = None
-        self._tabs_icon_only = False
+        self._toolbar_step = 0
+        # (what the widths depend on) → width each toolbar step needs.
+        self._toolbar_widths_cache: tuple[tuple, list[int]] | None = None
+        self._brand_compact = False
+        self._tab_step = TAB_STEP_FULL
+        self._tab_count_values: dict[str, int] = {}
+        # (texts of every step, font, icon size) → width each step needs.
+        self._tab_widths_cache: tuple[tuple, list[int]] | None = None
+        self._panel_slides: dict[QDockWidget, PanelSlide] = {}
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
         self.brand_label = TitleBarLockup(self)
@@ -1045,24 +1466,19 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.session_pill_container)
         toolbar.addSeparator()
 
-        # Primary file actions ------------------------------------------------
+        # Primary file action -------------------------------------------------
+        # One action: Open and Import both added to the project, so they were
+        # one command under two names. Folders can also be dropped onto the
+        # project panel.
         self.open_action = self._action(
-            "folder-open",
-            "Open folder",
-            "Open one or more Tomography 5 session folders.",
+            "folder-plus",
+            LOAD_SESSIONS_TITLE,
+            "Load atlas screening and data collection session folders. "
+            "You can also drop folders onto the project panel.",
             QKeySequence.StandardKey.Open,
         )
         self.open_action.triggered.connect(self.open_session)
         toolbar.addAction(self.open_action)
-
-        self.import_action = self._action(
-            "folder-plus",
-            "Import folder",
-            "Add a related read-only atlas or data collection session folder to the current project view.",
-            "Ctrl+Shift+O",
-        )
-        self.import_action.triggered.connect(self.import_session)
-        toolbar.addAction(self.import_action)
 
         self.refresh_action = self._action(
             "refresh", "Refresh", "Reload the currently opened session folders.", QKeySequence.StandardKey.Refresh
@@ -1110,6 +1526,7 @@ class MainWindow(QMainWindow):
         spacer = QWidget(self)
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
+        self._toolbar_spacer = spacer
 
         # View / theme actions ------------------------------------------------
         self.compact_action = self._action(
@@ -1174,7 +1591,6 @@ class MainWindow(QMainWindow):
         # supports the same surface, so we alias the new actions back to the
         # historical attribute names.
         self.open_button = self.open_action
-        self.import_button = self.import_action
         self.refresh_button = self.refresh_action
         self.report_button = self.report_action
         self.compact_button = self.compact_action
@@ -1194,6 +1610,11 @@ class MainWindow(QMainWindow):
         """Create a QAction with a themed icon and remember it for theme changes."""
 
         action = QAction(themed_icon(icon_name), label, self)
+        # Toolbar buttons show ``iconText``; menus, tooltips and ``text()``
+        # keep the plain label. Qt's text-beside-icon layout hard-codes a
+        # 4 px gap that style sheets cannot widen, so the icon butted against
+        # its label (plan C12). One no-break space restores the gap.
+        action.setIconText(f" {label}")
         if shortcut is not None:
             action.setShortcut(shortcut)
             # Qt only appends the shortcut to menu text, never to a toolbar
@@ -1255,70 +1676,174 @@ class MainWindow(QMainWindow):
         # inverted the answer exactly when the workspace was most cramped.
         return max(width, WORKSPACE_MIN_PX)
 
-    def _derived_narrow_chrome(self) -> bool:
-        """Transient, recomputed on every resize — never a saved preference.
-
-        Named apart from ``Settings.compact`` on purpose. Both concepts were
-        called "compact", which is precisely how a breakpoint ends up
-        overwriting something the user chose. ``Settings.compact`` is a
-        persisted user toggle (currently an inert, hidden action); this is a
-        width observation and is never written to settings.
-        """
-
-        return self.workspace_width() < WORKSPACE_NARROW_CHROME_PX
-
     def _refresh_branding(self) -> None:
         if not hasattr(self, "brand_label"):
             return
         palette = current_palette()
         self.brand_label.set_theme(palette.name)
-        # ``TitleBarLockup.set_compact`` is that widget's own vocabulary; the
-        # value we pass it is the derived observation, not the preference.
-        self.brand_label.set_compact(self._derived_narrow_chrome())
+        # Whether the lockup is compact is one of the toolbar's fitted steps
+        # (``TitleBarLockup.set_compact`` is that widget's own vocabulary),
+        # so refreshing the brand refits the toolbar. Never a preference.
+        if hasattr(self, "main_toolbar"):
+            self._fit_toolbar()
+        self.brand_label.set_compact(self._brand_compact)
 
     def _update_responsive_chrome(self) -> None:
-        """Keep the toolbar and status strip useful at supported widths."""
+        """Fit each piece of chrome to the room it has (plan F3, D1).
 
-        self._refresh_branding()
-        width = self.workspace_width()
-        narrow = self._derived_narrow_chrome()
-        if hasattr(self, "main_toolbar") and narrow != self._toolbar_narrow:
-            self.main_toolbar.setToolButtonStyle(
-                Qt.ToolButtonStyle.ToolButtonIconOnly
-                if narrow
-                else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-            )
-            self._toolbar_narrow = narrow
+        Transient, recomputed on every resize and dock change, and never a
+        saved preference: ``Settings.compact`` is a separate, persisted toggle.
+        The pill goes first because the toolbar measures its width, and the
+        brand refresh fits the toolbar.
+        """
+
         if hasattr(self, "session_pill"):
-            pill = getattr(self, "session_pill_container", self.session_pill)
-            pill.setMaximumWidth(
-                300
-                if width >= WORKSPACE_WIDE_PILL_PX
-                else 220
-                if width >= WORKSPACE_MEDIUM_PILL_PX
-                else 150
-            )
+            self._fit_session_pill()
+        self._refresh_branding()
         if hasattr(self, "context_header"):
-            self.context_header.set_narrow(narrow)
+            self.context_header.fit_to_width(self.workspace_width())
         if hasattr(self, "tabs"):
-            self._update_tab_overflow_strategy(narrow)
+            self._fit_tabs()
         if hasattr(self, "status_counts"):
             self._update_status_summary()
 
-    def _update_tab_overflow_strategy(self, narrow: bool) -> None:
-        """Drop tab text before relying on the tab bar's scroll arrows.
+    # -- fit-first toolbar --------------------------------------------------
 
-        Seven tabs with icon and text do not fit a narrow workspace, and Qt's
-        fallback is a pair of small arrows that hide whole entity types behind
-        a scroll gesture. Icons alone keep every tab reachable; the name moves
-        to the tooltip rather than vanishing.
+    def _toolbar_steps(self) -> list[tuple[frozenset[QAction], bool]]:
+        """Toolbar presentations, richest first: (icon-only actions, compact brand).
+
+        Back and Forward give up their labels first and Open and Import keep
+        theirs longest (plan D1); the brand's tagline goes early because it
+        names the app rather than doing anything.
         """
 
-        if narrow == self._tabs_icon_only:
+        history = {self.back_action, self.forward_action}
+        secondary = {self.refresh_action, self.report_action}
+        view = {self.project_panel_action, self.context_panel_action, self.theme_action}
+        primary = {self.open_action}
+        return [
+            (frozenset(), False),
+            (frozenset(history), False),
+            (frozenset(history), True),
+            (frozenset(history | secondary), True),
+            (frozenset(history | secondary | view), True),
+            (frozenset(history | secondary | view | primary), True),
+        ]
+
+    def _apply_toolbar_step(self, icon_only: frozenset[QAction], brand_compact: bool) -> None:
+        toolbar = self.main_toolbar
+        for action in self._theme_actions:
+            button = toolbar.widgetForAction(action)
+            if isinstance(button, QToolButton):
+                button.setToolButtonStyle(
+                    Qt.ToolButtonStyle.ToolButtonIconOnly
+                    if action in icon_only
+                    else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+                )
+        self._brand_compact = brand_compact
+        if hasattr(self, "brand_label"):
+            self.brand_label.set_compact(brand_compact)
+
+    def _toolbar_required_width(self) -> int:
+        """Width the toolbar needs to show every item without its overflow menu."""
+
+        toolbar = self.main_toolbar
+        widths = []
+        for action in toolbar.actions():
+            if not action.isVisible():
+                continue
+            widget = toolbar.widgetForAction(action)
+            if widget is None or widget is self._toolbar_spacer:
+                continue
+            widget.ensurePolished()
+            widths.append(max(0, widget.sizeHint().width()))
+        layout = toolbar.layout()
+        spacing = layout.spacing() if layout is not None else 0
+        return sum(widths) + spacing * max(0, len(widths) - 1) + TOOLBAR_CHROME_PX
+
+    def _fit_toolbar(self) -> None:
+        """Show as many toolbar labels as the window's width holds.
+
+        Measuring means applying every step, and each restyles ten buttons
+        and re-lays out the toolbar: six times on every resize event, as the
+        tabs once were. The widths depend only on what ``_toolbar_measure_key``
+        names, so they are measured once per change, and a step is applied
+        only when the fitting one changes.
+        """
+
+        if not hasattr(self, "theme_action"):  # still being built
             return
-        self._tabs_icon_only = narrow
-        self.tabs.tabBar().setExpanding(False)
-        self._update_tab_counts()
+        steps = self._toolbar_steps()
+        key = self._toolbar_measure_key()
+        if self._toolbar_widths_cache is None or self._toolbar_widths_cache[0] != key:
+            required = []
+            for icon_only, compact in steps:
+                self._apply_toolbar_step(icon_only, compact)
+                required.append(self._toolbar_required_width())
+            self._toolbar_widths_cache = (key, required)
+            self._toolbar_step = -1  # the toolbar now shows the last step measured
+        step = first_fitting_step(self._toolbar_widths_cache[1], self.width())
+        if step != self._toolbar_step:
+            self._toolbar_step = step
+            self._apply_toolbar_step(*steps[step])
+
+    def _toolbar_measure_key(self) -> tuple:
+        """What the toolbar's widths depend on, apart from the step itself.
+
+        The labels and their visibility, the fonts and icon size, the theme
+        and pixel density (the brand lockup), and the width of every other
+        item, the session pill above all, which follows the workspace.
+        """
+
+        toolbar = self.main_toolbar
+        stepped = set(self._theme_actions) | {self.back_action, self.forward_action}
+        others = []
+        for action in toolbar.actions():
+            widget = toolbar.widgetForAction(action)
+            if widget is None or widget is self._toolbar_spacer or widget is getattr(self, "brand_label", None):
+                continue
+            if action in stepped:
+                continue
+            others.append((action.isVisible(), widget.sizeHint().width() if action.isVisible() else 0))
+        labels = tuple((action.text(), action.isVisible()) for action in toolbar.actions() if action in stepped)
+        return (
+            labels,
+            tuple(others),
+            toolbar.font().toString(),
+            toolbar.iconSize().toTuple(),
+            current_palette().name,
+            self.devicePixelRatioF(),
+        )
+
+    # -- fit-first tabs -----------------------------------------------------
+
+    def _fit_tabs(self) -> None:
+        """Drop tab text in stages before relying on the tab bar's scroll arrows.
+
+        Qt's fallback is a pair of small arrows that hide whole entity types
+        behind a scroll gesture. Names shorten, then go, and the counts go
+        last; every tab stays reachable and its full text is in the tooltip.
+        """
+
+        bar = self.tabs.tabBar()
+        bar.setExpanding(False)
+        # Measuring means setting every step's texts, and each ``setTabText``
+        # re-lays out the bar: 28 of them per call, on every resize event,
+        # were most of a window drag's cost. The widths depend only on the
+        # texts, font and icon size, so they are measured once per change.
+        texts = tuple(self._tab_texts(step) for step in TAB_STEPS)
+        key = (texts, bar.font().toString(), bar.iconSize().toTuple())
+        if self._tab_widths_cache is None or self._tab_widths_cache[0] != key:
+            required = []
+            for step in TAB_STEPS:
+                self._apply_tab_texts(step)
+                required.append(sum(bar.tabSizeHint(index).width() for index in range(bar.count())))
+            self._tab_widths_cache = (key, required)
+            self._tab_step = -1  # the bar now shows the last step measured
+        step = first_fitting_step(self._tab_widths_cache[1], self.workspace_width() - TAB_BAR_CHROME_PX)
+        if step != self._tab_step:
+            self._tab_step = step
+            self._apply_tab_texts(step)
 
     def _update_session_pill(self) -> None:
         if not hasattr(self, "session_pill"):
@@ -1351,8 +1876,39 @@ class MainWindow(QMainWindow):
             "link",
         )
 
+    def _session_pill_cap(self) -> int:
+        width = self.workspace_width()
+        if width >= WORKSPACE_WIDE_PILL_PX:
+            return SESSION_PILL_MAX_PX[0]
+        if width >= WORKSPACE_MEDIUM_PILL_PX:
+            return SESSION_PILL_MAX_PX[1]
+        return SESSION_PILL_MAX_PX[2]
+
+    def _fit_session_pill(self) -> None:
+        """Give the pill room for its whole text, up to the workspace tier.
+
+        The pill's label reports its *elided* width as its size hint, and the
+        toolbar sizes widgets from their hints, so once elided the pill never
+        got wider again: it read "1 gro…sions" beside hundreds of free pixels.
+        Claim the full-text width as a minimum instead, capped by the tier.
+        """
+
+        pill = getattr(self, "session_pill_container", self.session_pill)
+        cap = self._session_pill_cap()
+        if pill is self.session_pill:
+            pill.setMaximumWidth(cap)
+            return
+        label = self.session_pill
+        full_text = label.fontMetrics().horizontalAdvance(label.text_full()) + 6
+        needed = pill.sizeHint().width() - label.sizeHint().width() + full_text
+        # Exactly the content width, up to the cap: the toolbar hands spare
+        # room to expanding widgets, which left an empty capsule beside the text.
+        pill.setFixedWidth(max(SESSION_PILL_MIN_PX, min(cap, needed)))
+
     def _set_session_pill(self, text: str, tooltip: str, icon_name: str) -> None:
         self.session_pill.setText(text)
+        if hasattr(self, "session_pill_container"):
+            self._fit_session_pill()
         self.session_pill.setToolTip(tooltip)
         if hasattr(self, "session_pill_container"):
             self.session_pill_container.setToolTip(tooltip)
@@ -1375,18 +1931,29 @@ class MainWindow(QMainWindow):
             "Batch position": len(self._context_batch_positions(context)) if self._sessions else 0,
             "Tilt series": len(self._context_tilt_series(context)) if self._sessions else 0,
         }
-        for index, label in enumerate(TAB_LABELS):
-            display_label = _TAB_DISPLAY_LABELS.get(label, label)
-            full_text = (
-                "Session"
-                if label == "Session"
-                else f"{display_label}  {counts.get(label, 0)}"
-            )
-            # In a narrow workspace the label is dropped to the tooltip so all
-            # seven tabs stay visible; Qt's fallback would hide whole entity
-            # types behind small scroll arrows instead.
-            self.tabs.setTabText(index, "" if self._tabs_icon_only else full_text)
-            self.tabs.setTabToolTip(index, full_text)
+        # Kept, so fitting the tabs to a new width measures the texts without
+        # recounting every entity in scope.
+        self._tab_count_values = counts
+        # New counts can change the fit, but only a shown window has a width
+        # worth fitting to; showing it runs ``_update_responsive_chrome``.
+        if self.isVisible():
+            self._fit_tabs()
+        else:
+            self._apply_tab_texts(self._tab_step)
+
+    def _tab_texts(self, step: int) -> tuple[str, ...]:
+        counts = self._tab_count_values
+        return tuple(
+            # None until counted (and always for Session): the name alone.
+            tab_text(label, _TAB_DISPLAY_LABELS.get(label, label), None if label == "Session" else counts.get(label), step)
+            for label in TAB_LABELS
+        )
+
+    def _apply_tab_texts(self, step: int) -> None:
+        # The full text lives in the tooltip at every step.
+        for index, (text, full) in enumerate(zip(self._tab_texts(step), self._tab_texts(TAB_STEP_FULL), strict=True)):
+            self.tabs.setTabText(index, text)
+            self.tabs.setTabToolTip(index, full)
 
     def _tab_count_context(self) -> Any:
         """Return the broad scope that should drive top-tab counts.
@@ -1493,30 +2060,49 @@ class MainWindow(QMainWindow):
             ("Batch positions", "batch position", None, totals["Batch position"]),
             ("Tilt series", "tilt series", "tilt series", totals["Tilt series"]),
         )
-        # The workspace, not the window — the same rule the toolbar, branding,
-        # session pill, tabs and context header follow. Widening the docks used
-        # to compact all of those and leave this strip claiming it had room.
-        width = self.workspace_width()
-        if width >= WORKSPACE_FULL_TOTALS_PX:
-            text = "Project totals · " + " · ".join(
-                f"{count_label} {value}" for count_label, _, _, value in counts
-            )
-        elif width >= WORKSPACE_ABBREVIATED_TOTALS_PX:
-            abbreviations = ("AT", "OV", "SM", "ST", "BP", "TS")
-            text = "Project totals · " + " · ".join(
-                f"{abbreviation} {entry[3]}"
-                for abbreviation, entry in zip(abbreviations, counts, strict=True)
-            )
-        else:
-            text = ""
-        self.status_counts.setText(text)
-        self.status_counts.setVisible(bool(text))
-        self.status_runtime.setVisible(width >= WORKSPACE_RUNTIME_LABEL_PX)
+        full = "Project totals · " + " · ".join(f"{count_label} {value}" for count_label, _, _, value in counts)
+        abbreviations = ("AT", "OV", "SM", "ST", "BP", "TS")
+        abbreviated = "Project totals · " + " · ".join(
+            f"{abbreviation} {entry[3]}" for abbreviation, entry in zip(abbreviations, counts, strict=True)
+        )
+        self._fit_status_bar(
+            # Richest first: the version label goes before the totals shorten.
+            [(full, True), (full, False), (abbreviated, False), ("", False)]
+        )
         self.status_counts.setToolTip(
             "Project totals: "
             + ", ".join(count_phrase(value, singular, plural) for _, singular, plural, value in counts)
             + "."
         )
+
+    def _status_bar_required_width(self, text: str, runtime: bool) -> int:
+        """Width the status bar needs for the scope, ``text`` and the version."""
+
+        widths = [self.status_scope.sizeHint().width()]
+        if text:
+            self.status_counts.setText(text)
+            widths.append(self.status_counts.sizeHint().width())
+        if runtime:
+            widths.append(self.status_runtime.sizeHint().width())
+        if not self.loading_progress.isHidden():
+            widths.append(self.loading_progress.sizeHint().width())
+        return sum(widths) + STATUS_BAR_CHROME_PX
+
+    def _fit_status_bar(self, steps: list[tuple[str, bool]]) -> None:
+        """Show the richest totals and version the status bar holds (plan F3.5).
+
+        Measured against the window, which the bar spans, like the toolbar.
+        It followed the workspace through fixed thresholds, so the totals
+        vanished from a 1600 px window's bar with half of it empty.
+        """
+
+        for widget in (self.status_scope, self.status_counts, self.status_runtime):
+            widget.ensurePolished()
+        required = [self._status_bar_required_width(text, runtime) for text, runtime in steps]
+        text, runtime = steps[first_fitting_step(required, self.width())]
+        self.status_counts.setText(text)
+        self.status_counts.setVisible(bool(text))
+        self.status_runtime.setVisible(runtime)
 
     def _current_scope_label(self) -> str:
         context = self._active_context
@@ -1532,13 +2118,139 @@ class MainWindow(QMainWindow):
 
     def _on_theme_toggled(self, checked: bool) -> None:
         new_theme = "light" if checked else "dark"
+        palette = palette_for(new_theme)
+        # A toggle mid-reveal: that theme is already on; finish showing it.
+        self._finish_theme_reveal()
+        # Acknowledge the click on screen before the restyle blocks the event
+        # loop: the reveal shows its seed at once (plan F5.8b); without motion,
+        # the seed alone (F5.8a).
+        reveal = self._start_theme_reveal(palette)
+        seed = None if reveal is not None else self._show_theme_seed(palette)
         self._settings.theme = new_theme
         app = QApplication.instance()
         if app is not None:
-            apply_theme(app, palette_for(new_theme))
+            apply_theme(app, palette)
         self._refresh_action_icons()
         self._refresh_theme_dependent_widgets()
         save_settings(self._settings)
+        if reveal is not None:
+            # The title bar cannot take part; it changes as the reveal lands.
+            reveal.after_switch(self.grab)
+            return
+        set_title_bar_dark(self, palette.name == "dark")
+        if seed is not None:
+            # The toolbar now matches it; let the new theme paint first.
+            QTimer.singleShot(0, seed.dismiss)
+
+    def _theme_seed_place(self, palette) -> tuple[QPoint, QPixmap] | None:
+        """Where the seed goes (window coordinates) and its icon in ``palette``."""
+
+        toolbar = getattr(self, "main_toolbar", None)
+        button = toolbar.widgetForAction(self.theme_action) if toolbar is not None else None
+        if button is None or not self.isVisible() or not button.isVisible():
+            return None
+        if button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly:
+            local = button.rect().center()
+        else:
+            local = QPoint(THEME_SEED_ICON_OFFSET_PX, button.height() // 2)
+        name = "sun" if self.theme_action.isChecked() else "moon"
+        size = toolbar.iconSize()
+        icon = themed_icon(name, color=palette.icon, size=size.width()).pixmap(size)
+        return button.mapTo(self, local), icon
+
+    def _show_theme_seed(self, palette) -> ThemeSeed | None:
+        """Paint the theme button's icon in ``palette`` over the button, now."""
+
+        place = self._theme_seed_place(palette)
+        if place is None:
+            return None
+        centre, icon = place
+        return ThemeSeed(
+            self, centre, THEME_SEED_DIAMETER_PX, QColor(palette.surface), QColor(palette.border_strong), icon
+        )
+
+    def _start_theme_reveal(self, palette) -> ThemeRevealOverlay | None:
+        """Cover the window with its old theme and the seed of ``palette``.
+
+        None when there is nothing to animate over: reduced motion, a hidden
+        or minimised window, or a load in progress (the loader covers it).
+        """
+
+        if not motion_enabled(self) or not self.isVisible() or self.isMinimized() or self._loading_overlay_active():
+            return None
+        place = self._theme_seed_place(palette)
+        if place is None:
+            return None
+        centre, icon = place
+        glow = QColor(palette.accent)
+        glow.setAlpha(THEME_REVEAL_GLOW_ALPHA)
+        self._theme_reveal = ThemeRevealOverlay(
+            self,
+            self.grab(),
+            QPointF(centre),
+            seed_diameter=THEME_SEED_DIAMETER_PX,
+            seed_fill=QColor(palette.surface),
+            seed_edge=QColor(palette.border_strong),
+            seed_icon=icon,
+            glow=glow,
+            on_finished=self._theme_reveal_landed,
+        )
+        return self._theme_reveal
+
+    def _theme_reveal_landed(self) -> None:
+        self._theme_reveal = None
+        set_title_bar_dark(self, current_palette().name == "dark")
+
+    def _finish_theme_reveal(self) -> None:
+        reveal = getattr(self, "_theme_reveal", None)
+        if reveal is not None and shiboken6.isValid(reveal):
+            reveal.finish()
+        self._theme_reveal = None
+
+    @property
+    def theme_reveal(self) -> ThemeRevealOverlay | None:
+        reveal = getattr(self, "_theme_reveal", None)
+        return reveal if reveal is not None and shiboken6.isValid(reveal) else None
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        super().showEvent(event)
+        # Before the first paint, so a narrow window never shows the panel
+        # docked first (plan D2).
+        self._update_context_drawer_mode()
+        # The native title bar follows the theme; the window needs a native
+        # handle for that, which it has once shown.
+        set_title_bar_dark(self, current_palette().name == "dark")
+        # Load the loader's Qt Quick lamp while the app is idle, so the
+        # first session load doesn't pay for it (plan F6.2).
+        if not getattr(self, "_loader_prewarm_scheduled", False):
+            self._loader_prewarm_scheduled = True
+            QTimer.singleShot(LOADER_PREWARM_DELAY_MS, self, self._prewarm_loader)
+
+    def _prewarm_loader(self) -> None:
+        if self.isVisible() and hasattr(self, "loading_overlay"):
+            self.loading_overlay.prewarm()
+        self._schedule_other_theme_icons()
+
+    def _schedule_other_theme_icons(self) -> None:
+        """Draw the other theme's icons while idle, so a switch needn't (restyle spike)."""
+
+        if not self._other_theme_icons_pending:
+            self._other_theme_icons_pending = True
+            QTimer.singleShot(THEME_ICONS_IDLE_DELAY_MS, self, self._draw_other_theme_icons)
+
+    def _draw_other_theme_icons(self) -> None:
+        if not self.isVisible() or self._loading_overlay_active() or self.loading_overlay.isVisible():
+            self._other_theme_icons_pending = False
+            return
+        current = current_palette()
+        other = palette_for("light" if current.name == "dark" else "dark").icon
+        undrawn = undrawn_in(other, drawn_in=current.icon)
+        # A few per turn: each is five pixel densities of one SVG.
+        draw_in_advance(other, undrawn[:THEME_ICONS_PER_TURN])
+        if len(undrawn) > THEME_ICONS_PER_TURN:
+            QTimer.singleShot(0, self, self._draw_other_theme_icons)
+            return
+        self._other_theme_icons_pending = False
 
     def _refresh_theme_dependent_widgets(self) -> None:
         """Repaint custom/icon-based widgets that Qt stylesheets do not recolour."""
@@ -1562,19 +2274,13 @@ class MainWindow(QMainWindow):
                 refresh_tree_item(self.tree.topLevelItem(index))
             self.tree.viewport().update()
         if hasattr(self, "session_dashboard"):
-            if self._sessions:
-                self._theme_refresh_generation += 1
-                generation = self._theme_refresh_generation
-
-                def refresh_dashboard() -> None:
-                    if generation == self._theme_refresh_generation:
-                        self._render_dashboard_for_scope(animate=False)
-
-                # Let the stylesheet and shell repaint before rebuilding the
-                # custom-painted dashboard cards for the new palette.
-                QTimer.singleShot(0, refresh_dashboard)
+            if self.session_dashboard.isVisible():
+                # Recoloured in place. It used to be rebuilt, which with the
+                # clean-up of the old cards cost ~150 ms of every switch.
+                self.session_dashboard.refresh_theme()
             else:
-                self.session_dashboard.update()
+                # Hidden: recoloured when the Session tab is next shown.
+                self._dashboard_theme_stale = True
         if hasattr(self, "loading_overlay"):
             self.loading_overlay.update()
 
@@ -1614,55 +2320,102 @@ class MainWindow(QMainWindow):
     def _on_tab_changed(self, index: int) -> None:
         if 0 <= index < len(TAB_LABELS):
             label = TAB_LABELS[index]
+            tilt_tab = self._viewer_tabs.get("Tilt series")
+            if tilt_tab is not None and label != "Tilt series":
+                # A tilt-series zoom lasts while the reviewer stays with the
+                # series. Leaving the tab drops it, so the series is fitted
+                # when they come back.
+                tilt_tab.discard_zoom()
+            self._fade_in_page()
             self._session_context_sync_generation += 1
             self._settings.last_tab = label
             # Deferred: this writes a JSON file, and doing it synchronously
             # inside the tab-change handler put a disk round-trip in front of
             # every single tab switch.
             self._schedule_settings_save()
+            generation = self._session_context_sync_generation
             viewer_tab = self._viewer_tabs.get(label)
             if viewer_tab is not None:
-                viewer_tab.ensure_initial_preview_loaded(
-                    notify_selection=not self._tab_activation_preserves_broad_scope()
-                )
+                preserve_scope = self._tab_activation_preserves_broad_scope()
+                viewer_tab.ensure_initial_preview_loaded(notify_selection=not preserve_scope)
+                if not self._suppress_viewer_context and (
+                    preserve_scope or getattr(viewer_tab, "_current_value", None) is None
+                ):
+                    # Describing an item costs 25-100 ms, so it waits for the
+                    # page's first paint, like the Session tab below.
+                    shown = (self.context_panel.text(), self.context_panel.toPlainText())
+                    self._defer_until_page_repaint(
+                        generation,
+                        lambda: self._describe_tab_display(viewer_tab, shown),
+                    )
             elif label == "Session":
+                if self._dashboard_theme_stale:
+                    # The theme changed while this tab was hidden. Recoloured
+                    # before its first paint, so the old colours never show.
+                    self._dashboard_theme_stale = False
+                    self.session_dashboard.refresh_theme()
                 # Commit ad273c5 put the context/status rebuild directly in
                 # this signal handler. QTabWidget cannot display its new page
                 # until the handler returns, so keep the panel correct but
                 # allow one repaint turn before doing that secondary work.
-                generation = self._session_context_sync_generation
-                QTimer.singleShot(
-                    0,
-                    lambda: self._defer_session_context_sync_until_repaint(
-                        generation,
-                        first_turn=True,
-                    ),
-                )
+                self._defer_until_page_repaint(generation, self._sync_context_panel_to_active_scope)
             self._refresh_context_header()
 
-    def _defer_session_context_sync_until_repaint(
-        self,
-        generation: int,
-        *,
-        first_turn: bool,
-    ) -> None:
-        """Refresh Session context after its page has had a repaint turn."""
+    def _describe_tab_display(self, viewer_tab: ViewerTab, shown: tuple[str, str]) -> None:
+        """Point the context panel at what the activated tab shows.
 
-        if (
-            generation != self._session_context_sync_generation
-            or self.tabs.currentIndex() != TAB_LABELS.index("Session")
-        ):
+        A broad scope (a project group) survives a tab switch, so the tab's
+        item is not announced as a selection, which would narrow the scope.
+        The panel must still follow the tab: left alone, it went on
+        describing the previous tab's item beside this tab's image. A tab
+        showing nothing gets the scope's description instead.
+
+        ``shown`` is the panel's title and text at the switch. If they have
+        changed since, something newer (a selection, a jump's destination)
+        is already described there.
+        """
+
+        if (self.context_panel.text(), self.context_panel.toPlainText()) != shown:
             return
-        if first_turn:
-            QTimer.singleShot(
-                0,
-                lambda: self._defer_session_context_sync_until_repaint(
-                    generation,
-                    first_turn=False,
-                ),
-            )
+        value = getattr(viewer_tab, "_current_value", None)
+        if value is None:
+            self._sync_context_panel_to_active_scope()
+        else:
+            self._set_context(self._label_for(value), value)
+
+    def _fade_in_page(self) -> None:
+        """Lift a veil off the tab page that just appeared (plan F5.3).
+
+        The page is live from the first frame; the veil only softens the cut
+        while the tab bar's underline slides across. Never over the loader,
+        never with reduced motion.
+        """
+
+        previous = getattr(self, "_page_fade", None)
+        self._page_fade = None
+        if previous is not None:
+            try:
+                previous.dismiss()
+            except RuntimeError:
+                pass  # it had already finished and deleted itself
+        page = self.tabs.currentWidget()
+        if page is None or not self.isVisible() or not motion_enabled(self) or self._loading_overlay_active():
             return
-        self._sync_context_panel_to_active_scope()
+        stack = page.parentWidget()
+        self._page_fade = PageFade(stack, stack.rect(), QColor(current_palette().background))
+
+    def _defer_until_page_repaint(self, generation: int, work: Callable[[], None]) -> None:
+        """Run ``work`` once the tab page just shown has had a repaint turn.
+
+        Two turns: the first lets the page paint. Dropped if the tab changes
+        again first (``generation`` moves on).
+        """
+
+        def run() -> None:
+            if generation == self._session_context_sync_generation:
+                work()
+
+        QTimer.singleShot(0, self, lambda: QTimer.singleShot(0, self, run))
 
     def _sync_context_panel_to_active_scope(self) -> None:
         """Point the context panel and status bar at the dashboard's scope.
@@ -1709,9 +2462,28 @@ class MainWindow(QMainWindow):
         self._update_status_summary(title)
         self._context_panel_scope_key = scope_key
 
+    def _apply_initial_geometry(self) -> None:
+        """Restore the last window geometry, or fit a first-run size to the screen."""
+
+        saved = self._settings.window_geometry
+        if saved:
+            # restoreGeometry() also brings a window saved on a monitor that
+            # is no longer attached back onto a visible screen.
+            if self.restoreGeometry(QByteArray.fromBase64(saved.encode("ascii", errors="ignore"))):
+                return
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(*FIRST_RUN_MAX_SIZE)
+            return
+        self.setGeometry(first_run_window_rect(screen.availableGeometry()))
+
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt signature
+        self._settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode("ascii")
         self._settings.project_panel_visible = self.project_panel_action.isChecked()
-        self._settings.context_panel_visible = self.context_panel_action.isChecked()
+        if not self._context_drawer_mode:
+            # In drawer mode the button says whether the drawer is open, which
+            # is never saved; the docked preference already is.
+            self._settings.context_panel_visible = self.context_panel_action.isChecked()
         self._settings.compact = self.compact_action.isChecked()
         if 0 <= self.tabs.currentIndex() < len(TAB_LABELS):
             self._settings.last_tab = TAB_LABELS[self.tabs.currentIndex()]
@@ -1733,18 +2505,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        header = QWidget(panel)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(14, 10, 14, 8)
-        header_layout.setSpacing(8)
-        title = QLabel("PROJECT")
-        title.setObjectName("panelHeader")
         self.project_count = QLabel("0 sessions")
         self.project_count.setObjectName("panelCount")
-        header_layout.addWidget(title)
-        header_layout.addStretch(1)
-        header_layout.addWidget(self.project_count)
-        layout.addWidget(header)
+        layout.addWidget(_panel_header("PROJECT", panel, self.project_count))
 
         self.project_filter = QLineEdit()
         self.project_filter.setObjectName("treeSearch")
@@ -1759,9 +2522,12 @@ class MainWindow(QMainWindow):
         self._clear_project_filter_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
         self._clear_project_filter_shortcut.activated.connect(self.project_filter.clear)
         self.project_filter.textChanged.connect(self._filter_project_tree)
+        # A line edit takes drops of text by default; folders dragged over
+        # the filter belong to the panel's drop, not the filter.
+        self.project_filter.setAcceptDrops(False)
         filter_wrap = QWidget(panel)
         filter_layout = QVBoxLayout(filter_wrap)
-        filter_layout.setContentsMargins(10, 6, 10, 8)
+        filter_layout.setContentsMargins(SIDE_PANEL_INSET_PX, 0, SIDE_PANEL_INSET_PX, SPACE_S)
         filter_layout.addWidget(self.project_filter)
         layout.addWidget(filter_wrap)
 
@@ -1777,12 +2543,16 @@ class MainWindow(QMainWindow):
         self.project_badge_legend.setAccessibleDescription(PROJECT_BADGE_LEGEND_TOOLTIP)
         legend_wrap = QWidget(panel)
         legend_layout = QVBoxLayout(legend_wrap)
-        legend_layout.setContentsMargins(10, 0, 10, 6)
+        legend_layout.setContentsMargins(SIDE_PANEL_INSET_PX, 0, SIDE_PANEL_INSET_PX, SPACE_S)
         legend_layout.addWidget(self.project_badge_legend)
         layout.addWidget(legend_wrap)
 
-        self.tree = QTreeWidget()
+        self.tree = _ProjectTreeWidget()
         self.tree.setObjectName("projectTree")
+        # The delegate paints the selection as one row-wide fill (plan C9);
+        # this turns off the sheet's per-column one. The report dialog's tree
+        # shares the object name but not the delegate, so it keeps the sheet's.
+        self.tree.setProperty("paintsRowSelection", True)
         self.tree.setColumnCount(2)
         self.tree.setHeaderHidden(True)
         self.tree.setIndentation(14)
@@ -1791,7 +2561,9 @@ class MainWindow(QMainWindow):
         self.tree.setAlternatingRowColors(False)
         self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.tree.setAllColumnsShowFocus(True)
-        self.tree.setItemDelegate(_ProjectTreeDelegate(self.tree))
+        tree_delegate = _ProjectTreeDelegate(self.tree)
+        tree_delegate.hover_animator = ItemHoverAnimator(self.tree)
+        self.tree.setItemDelegate(tree_delegate)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_project_tree_context_menu)
         self.tree.header().setStretchLastSection(False)
@@ -1804,11 +2576,40 @@ class MainWindow(QMainWindow):
         self.tree.itemDoubleClicked.connect(self._project_tree_item_double_clicked)
         # Enter previously did nothing on any tree row, for any entity type.
         self.tree.itemActivated.connect(self._project_tree_item_activated)
-        root = QTreeWidgetItem(["No session loaded", ""])
-        root.setToolTip(0, "No session loaded")
-        self._style_tree_item(root)
-        self.tree.addTopLevelItem(root)
+        # With nothing loaded the tree holds only recent sessions, if any, and
+        # shrinks to them; the drop invitation takes the rest of the panel.
+        self.tree.itemExpanded.connect(lambda _item: self._sync_project_empty_state())
+        self.tree.itemCollapsed.connect(lambda _item: self._sync_project_empty_state())
         layout.addWidget(self.tree, stretch=1)
+        self.project_drop_hint = ProjectDropHint(
+            panel,
+            shortcut_text=QKeySequence(QKeySequence.StandardKey.Open).toString(
+                QKeySequence.SequenceFormat.NativeText
+            ),
+        )
+        self.project_drop_hint.load_requested.connect(lambda: self.open_session())
+        layout.addWidget(self.project_drop_hint, stretch=1)
+        # What a drop skipped, kept until dismissed.
+        receipt_wrap = QWidget(panel)
+        receipt_layout = QVBoxLayout(receipt_wrap)
+        receipt_layout.setContentsMargins(SPACE_M, SPACE_S, SPACE_M, SPACE_M)
+        self.drop_receipt = SessionDropReceipt(receipt_wrap)
+        receipt_layout.addWidget(self.drop_receipt)
+        receipt_wrap.setVisible(False)
+        self.drop_receipt.dismissed.connect(lambda: receipt_wrap.setVisible(False))
+        self._drop_receipt_wrap = receipt_wrap
+        layout.addWidget(receipt_wrap)
+        # Session folders dropped onto the panel load like the Load sessions
+        # window's; the overlay says, while dragging, which of them can.
+        self.project_drop_overlay = SessionDropOverlay(panel)
+        self._project_drop_target = SessionDropTarget(
+            panel,
+            self.project_drop_overlay,
+            assess=self._assess_project_drop,
+            refused=self._project_drops_refused,
+            load=self._load_dropped_sessions,
+        )
+        self._sync_project_empty_state()
         self.project_dock.setWidget(panel)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.project_dock)
 
@@ -1821,19 +2622,35 @@ class MainWindow(QMainWindow):
         panel = QWidget(self.context_dock)
         panel.setObjectName("contextShell")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-        self.context_panel = MetadataPanel(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(_panel_header("CONTEXT", panel))
+        body = QWidget(panel)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(SIDE_PANEL_INSET_PX, 0, SIDE_PANEL_INSET_PX, SIDE_PANEL_INSET_PX)
+        body_layout.setSpacing(0)
+        self.context_panel = MetadataPanel(body)
         # Backwards-compatible aliases for tests / older call sites.
         self.context_title = self.context_panel
         self.context_text = self.context_panel
-        layout.addWidget(self.context_panel, stretch=1)
+        body_layout.addWidget(self.context_panel, stretch=1)
+        layout.addWidget(body, stretch=1)
         self.context_dock.setWidget(panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.context_dock)
+        # On a narrow window the same panel moves into a drawer over the page
+        # (plan D2): ``_update_context_drawer_mode``.
+        self._context_shell = panel
+        self._context_drawer_mode = False
+        self.context_drawer = ContextDrawer(self)
+        self.context_drawer.escape_pressed.connect(self._close_context_drawer_from_keyboard)
+        self.context_drawer.stay_under = lambda: getattr(self, "loading_overlay", None)
+        self.context_drawer.toggle_control = lambda: self.main_toolbar.widgetForAction(self.context_panel_action)
 
     def _build_tabs(self) -> None:
         self.tabs = QTabWidget()
         self.tabs.setObjectName("mainTabs")
+        # Before any tab is added: the bar paints the sliding underline (F5.3).
+        self.tabs.setTabBar(SlidingTabBar(self.tabs))
         self.tabs.setIconSize(QSize(16, 16))
         for label in TAB_LABELS:
             tab = QWidget(self.tabs)
@@ -1884,6 +2701,13 @@ class MainWindow(QMainWindow):
                     on_marker_selection_cleared=self._viewer_marker_selection_cleared,
                     show_marker_controls=label != "Tilt series",
                     atlas_lod=label == "Atlas",
+                    # The search-map tile grid covers much of an Overview;
+                    # selecting a tile on press made that area impossible to
+                    # pan. Double-click still opens the search map.
+                    pan_through_marker_types=(MarkerType.SEARCH_MAP,) if label == "Overview" else (),
+                    # Following something small through the tilt: stepping
+                    # frames keeps the zoom; another series opens fitted.
+                    frames_share_zoom=label == "Tilt series",
                     navigation_actions_for=self._viewer_navigation_actions
                     if label in {"Overview", "Search", "Search map", "Batch position", "Tilt series"}
                     else None,
@@ -1903,6 +2727,9 @@ class MainWindow(QMainWindow):
                 layout.addWidget(viewer_tab, stretch=1)
             index = self.tabs.addTab(tab, _TAB_DISPLAY_LABELS.get(label, label))
             self.tabs.setTabIcon(index, themed_icon(TAB_ICONS[label], size=16))
+            # Restyled at a theme switch only if on screen, else when next
+            # shown: most of the window's widgets are on hidden pages.
+            mark_theme_region(tab)
         container = QWidget(self)
         container.setObjectName("centralShell")
         outer = QVBoxLayout(container)
@@ -1920,30 +2747,73 @@ class MainWindow(QMainWindow):
         self._refresh_context_header()
 
     def open_session(self) -> None:
-        dialog = OpenSessionsDialog(self._loader, self._current_path or "", self)
+        """The Load sessions window; what it queues joins the project."""
+
+        dialog = LoadSessionsDialog(
+            self._loader,
+            self._current_path or "",
+            self,
+            loaded_paths=[session.path for session in self._sessions],
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        paths = dialog.selected_paths()
+        self._load_session_paths(dialog.selected_paths())
+
+    def _load_session_paths(self, paths: list[str]) -> None:
+        """Load already-checked session folders, adding them to the project.
+
+        Each is named in the finished toast (none is ``quiet``): the folders
+        were checked first, so none can be a duplicate the toast would repeat.
+        """
+
         if not paths:
             return
         replacing_empty_project = not self._sessions
         self._queue_session_loads(
             [
-                (path, replacing_empty_project and index == 0, index > 0, index == len(paths) - 1)
+                (path, replacing_empty_project and index == 0, False, index == len(paths) - 1)
                 for index, path in enumerate(paths)
             ]
         )
 
-    def import_session(self) -> None:
-        path = _select_session_folder(
-            self,
-            "Import related session folder",
-            self._current_path or "",
-            "Import folder",
+    # -- folders dropped onto the project panel ---------------------------------
+
+    def _loaded_path_keys(self) -> frozenset[str]:
+        return frozenset(path_identity_key(session.path) for session in self._sessions)
+
+    def _project_drops_refused(self) -> bool:
+        """Drops wait for no load: while one runs (hand-off included) they are refused."""
+
+        overlay = getattr(self, "loading_overlay", None)
+        return bool(self._loading_task_active or self._load_queue or (overlay is not None and overlay.isVisible()))
+
+    def _assess_project_drop(self, paths: list[str]) -> SessionIntake | None:
+        if self._project_drops_refused():
+            return None
+        return assess_paths(
+            paths,
+            self._loader.classify,
+            loaded_keys=self._loaded_path_keys(),
+            budget_s=DRAG_CHECK_BUDGET_S,
         )
-        if not path:
+
+    def _load_dropped_sessions(self, intake: SessionIntake) -> None:
+        if self._project_drops_refused():
             return
-        self.load_session(path, replace=False)
+        intake = recheck_unchecked(intake, self._loader.classify, loaded_keys=self._loaded_path_keys())
+        paths = list(intake.ready_paths)
+        if not paths:
+            return
+        self.drop_receipt.dismiss()
+        self._pending_drop_skips = intake.problems
+        self._load_session_paths(paths)
+
+    def _show_pending_drop_receipt(self) -> None:
+        receipt, self._pending_drop_receipt = self._pending_drop_receipt, None
+        if receipt is None:
+            return
+        self._drop_receipt_wrap.setVisible(True)
+        self.drop_receipt.show_receipt(receipt)
 
     def refresh_session(self) -> None:
         if self._current_path:
@@ -1989,6 +2859,10 @@ class MainWindow(QMainWindow):
             return
         path, replace, quiet, animate = self._load_queue.pop(0)
         self._loading_task_active = True
+        self._set_loading_stage("discover")
+        if hasattr(self, "loading_overlay"):
+            # Which folder, when several load one after another.
+            self.loading_overlay.update_loading_message("Discovering files...", detail=Path(path).name)
         self._set_loading_status("Discovering files...", force=True)
         # Build the profile on the main thread so the stall monitor can
         # share it with the worker's parsing run. The worker calls
@@ -2082,7 +2956,7 @@ class MainWindow(QMainWindow):
         self._failed_session_path = None
         if not replace and self._session_for_path(session.path) is not None:
             if not quiet:
-                self.statusBar().showMessage(f"{session.name} is already loaded.", 4000)
+                self.show_toast(f"{session.name} is already loaded.")
             self._after_loaded_session_integrated(animate=False)
             return
         self._integrate_loaded_session_cooperatively(
@@ -2101,7 +2975,7 @@ class MainWindow(QMainWindow):
         self._loading_task_active = False
         self._detach_stall_monitor()
         self._unbind_main_thread_profile()
-        self._finish_loading("Loading failed", fade=False)
+        self._finish_loading("Loading failed", fade=False, success=False)
         self._failed_session_path = path
         if not self._sessions:
             state = load_failed_state(path=path, error=error)
@@ -2185,6 +3059,11 @@ class MainWindow(QMainWindow):
                 self._after_loaded_session_integrated(animate=animate, profile=profile, profile_path=path)
                 return
             message, step = steps[index]
+            if index < len(steps) - 1:
+                self._set_loading_stage("build")
+                self._set_loading_progress("Building", index + 1, len(steps) - 1)
+            else:
+                self._set_loading_stage("finish")
             self._set_loading_status(message, force=True)
             try:
                 started = time.perf_counter()
@@ -2217,6 +3096,7 @@ class MainWindow(QMainWindow):
         """Integrate a parsed session without treating parsing as UI readiness."""
 
         def prepare_tree() -> None:
+            self._set_loading_stage("link")
             self._set_loading_status("Building project tree...", force=True)
             try:
                 started = time.perf_counter()
@@ -2338,7 +3218,8 @@ class MainWindow(QMainWindow):
         self._update_status_summary(active_group.display_name if active_group is not None else "Session")
         if not quiet:
             action = "Loaded" if replace else "Imported"
-            self.statusBar().showMessage(f"{action} {session.name}")
+            # Said once, by the toast when the whole load finishes (plan F5.9).
+            self._loaded_this_run.append(f"{action} {session.name}")
         LOGGER.debug("Integrated tomography session path=%s replace=%s animate=%s", path, replace, animate)
 
     def _fold_main_thread_perf_into_profile(self, profile: LoadingProfiler) -> None:
@@ -2383,10 +3264,14 @@ class MainWindow(QMainWindow):
         if profile is not None:
             self._fold_main_thread_perf_into_profile(profile)
             profile.emit_perf_report(LOGGER, path=profile_path)
-        if animate:
-            QTimer.singleShot(0, self._animate_import_refresh)
+        # The loader's hand-off says the page changed (F6.3). A fade of the
+        # tree and context panel used to start here too: the hand-off
+        # pictured them half-faded, and they popped when it ended.
 
     def _begin_loading(self, message: str) -> None:
+        self._loaded_this_run = []
+        # While the overlay shows, the status bar says nothing (plan §3.2).
+        self.statusBar().clearMessage()
         self._pending_loading_status = None
         self._loading_status_timer.stop()
         self._last_loading_status_at = 0.0
@@ -2414,8 +3299,12 @@ class MainWindow(QMainWindow):
             self.loading_overlay.show_loading(message)
         self._set_loading_status(message, force=True)
         self.open_button.setEnabled(False)
-        self.import_button.setEnabled(False)
         self.refresh_button.setEnabled(False)
+        # A drop is refused while this load runs; what an earlier drop
+        # skipped is no longer news.
+        self.project_drop_overlay.clear()
+        self.drop_receipt.dismiss()
+        self._pending_drop_receipt = None
 
     def _set_loading_status(self, message: str, *, force: bool = False) -> None:
         if not message:
@@ -2440,10 +3329,21 @@ class MainWindow(QMainWindow):
     def _apply_loading_status(self, message: str) -> None:
         self._last_loading_status_at = time.monotonic()
         if hasattr(self, "loading_overlay") and self.loading_overlay.isVisible():
+            # The overlay says it; the status bar used to repeat it (plan §3.2).
             self.loading_overlay.update_loading_message(message)
+            return
         self.statusBar().showMessage(message)
 
+    def _set_loading_stage(self, stage: str) -> None:
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.set_stage(stage)
+
+    def _set_loading_progress(self, label: str, current: int, total: int) -> None:
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.set_progress(label, current, total)
+
     def _finish_loading_after_repaint(self, message: str, *, fade: bool = True) -> None:
+        self._set_loading_stage("finish")
         self._set_loading_status("Finalising interface...", force=True)
         self.update()
         if hasattr(self, "loading_overlay"):
@@ -2454,22 +3354,53 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(0, finish_after_repaint)
 
-    def _finish_loading(self, message: str, *, fade: bool = True) -> None:
+    def _finish_loading(self, message: str, *, fade: bool = True, success: bool = True) -> None:
         self._pending_loading_status = None
         self._loading_status_timer.stop()
         self.loading_progress.setVisible(self._report_task_active)
         self._set_loading_status(message, force=True)
+        # A completion message is news, not state: it used to stay in the
+        # status bar indefinitely ("Loading complete" minutes later). It is a
+        # toast now (plan F5.9), naming what loaded when it can.
+        self.statusBar().clearMessage()
+        loaded, self._loaded_this_run = self._loaded_this_run, []
+        skipped, self._pending_drop_skips = self._pending_drop_skips, ()
+        if success and len(loaded) == 1:
+            message = loaded[0]
+        elif success and loaded:
+            message = f"Loaded {len(loaded)} sessions"
+        if success and loaded and skipped:
+            # A drop that skipped folders is confirmed by the receipt, which
+            # stays until dismissed, once the loading screen has handed over
+            # (``_show_pending_drop_receipt``): a toast would say half of it.
+            self._pending_drop_receipt = DropReceipt(loaded_count=len(loaded), skipped=skipped)
+        else:
+            self.show_toast(message, tone=TONE_SUCCESS if success else TONE_ERROR)
         if hasattr(self, "loading_overlay"):
             self.loading_overlay.hide_loading(fade=fade)
+            if not self.loading_overlay.isVisible():
+                self._show_pending_drop_receipt()
         self.open_button.setEnabled(True)
-        self.import_button.setEnabled(True)
         self.refresh_button.setEnabled(bool(self._sessions))
         self.report_action.setEnabled(bool(self._sessions) and not self._report_task_active)
 
     def _loading_overlay_active(self) -> bool:
+        # A leaving overlay no longer stands for a load: the hand-off must
+        # never hold anything back (plan §3.4).
         return bool(
             self._loading_task_active
-            or (hasattr(self, "loading_overlay") and self.loading_overlay.isVisible())
+            or (hasattr(self, "loading_overlay") and self.loading_overlay.blocking)
+        )
+
+    def motion_held(self) -> bool:
+        """Whether small transitions should wait (``motion.veil`` asks).
+
+        While the loader is up, hand-off included: it pictures the page, and
+        a veil half-lifted in that picture would pop when the hand-off ends.
+        """
+
+        return self._loading_overlay_active() or (
+            hasattr(self, "loading_overlay") and self.loading_overlay.isVisible()
         )
 
     def _record_loading_animation_profile(self, profile: LoadingProfiler | None) -> None:
@@ -2485,11 +3416,22 @@ class MainWindow(QMainWindow):
                 f"target_ms={snapshot.get('target_interval_ms', 0)} "
                 f"median_ms={snapshot.get('median_interval_ms', 0)} "
                 f"max_ms={snapshot.get('max_interval_ms', 0)} "
-                f"dropped_frames={snapshot.get('dropped_frames', 0)}"
+                f"dropped_frames={snapshot.get('dropped_frames', 0)} "
+                f"renderer={snapshot.get('renderer', '')}"
             ),
         )
 
-    def _flush_deferred_loading_dashboard(self) -> None:
+    def _loading_overlay_leaving(self) -> None:
+        self._flush_deferred_loading_dashboard(now=True)
+
+    def _flush_deferred_loading_dashboard(self, *, now: bool = False) -> None:
+        """Build the dashboard's held-back charts.
+
+        ``now``: at once and without an entrance, under the leaving overlay,
+        which reveals the finished page itself. Otherwise just after the
+        overlay has gone (it was hidden without a hand-off).
+        """
+
         pending = self._deferred_loading_dashboard
         refresh = self._deferred_loading_dashboard_refresh
         self._deferred_loading_dashboard = None
@@ -2503,17 +3445,16 @@ class MainWindow(QMainWindow):
                 self._render_dashboard_for_scope(
                     model=model,
                     timeline=timeline,
-                    animate=animate,
+                    animate=animate and not now,
                     defer_heavy_cards=False,
                 )
             else:
                 self._render_dashboard_for_scope(defer_heavy_cards=False)
 
-        QTimer.singleShot(0, render_after_overlay_paint)
-
-    def _animate_import_refresh(self) -> None:
-        fade_in(self.tree.viewport(), duration_ms=150, start_opacity=0.72)
-        fade_in(self.context_panel, duration_ms=150, delay_ms=35, start_opacity=0.76)
+        if now:
+            render_after_overlay_paint()
+        else:
+            QTimer.singleShot(0, render_after_overlay_paint)
 
     def _on_generate_report(self) -> None:
         if not self._sessions:
@@ -2579,9 +3520,8 @@ class MainWindow(QMainWindow):
         save_settings(self._settings)
         page_count = int(getattr(result, "page_count", 0))
         warnings = list(getattr(result, "warnings", ()))
-        self.statusBar().showMessage(
-            f"Saved {output_path.name} ({page_count} pages)", 5000
-        )
+        self.statusBar().clearMessage()  # "Generating …" is over
+        self.show_toast(f"Saved {output_path.name} ({page_count} pages)", tone=TONE_SUCCESS)
 
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Information)
@@ -2611,7 +3551,8 @@ class MainWindow(QMainWindow):
             "Report failed",
             f"Could not generate {output_path.name}:\n\n{message}",
         )
-        self.statusBar().showMessage("Report generation failed", 5000)
+        self.statusBar().clearMessage()
+        self.show_toast("Report generation failed", tone=TONE_ERROR)
 
     def _finish_report_task(self) -> None:
         self._report_task_active = False
@@ -2690,11 +3631,8 @@ class MainWindow(QMainWindow):
                 session_label = count_phrase(len(self._sessions), "session")
                 self.project_count.setText(f"{group_label} / {session_label}")
             else:
+                # The panel's drop invitation says it (``ProjectDropHint``).
                 self.project_count.setText("0 sessions")
-                root = QTreeWidgetItem(["No session loaded", ""])
-                root.setToolTip(0, "No session loaded")
-                self._style_tree_item(root)
-                self.tree.addTopLevelItem(root)
 
             current_item: QTreeWidgetItem | None = None
             first_group_item: QTreeWidgetItem | None = None
@@ -2717,6 +3655,41 @@ class MainWindow(QMainWindow):
         finally:
             self.tree.setUpdatesEnabled(True)
             self.tree.blockSignals(previous_signal_state)
+        self._sync_project_empty_state()
+
+    def _sync_project_empty_state(self) -> None:
+        """With nothing loaded, invite a drop; the tree keeps only recents.
+
+        Display only: which widgets show, never what the tree holds.
+        """
+
+        hint = getattr(self, "project_drop_hint", None)
+        if hint is None:
+            return
+        empty = not self._sessions
+        hint.setVisible(empty)
+        rows = self.tree.topLevelItemCount()
+        self.tree.setVisible(bool(rows) or not empty)
+        if empty and rows:
+            self.tree.setMaximumHeight(self._project_tree_content_height())
+        else:
+            self.tree.setMaximumHeight(_QWIDGETSIZE_MAX)
+
+    def _project_tree_content_height(self) -> int:
+        """The height the tree's shown rows need, so the hint gets the rest."""
+
+        row_height = self.tree.sizeHintForRow(0)
+        if row_height <= 0:
+            row_height = self.tree.fontMetrics().height() + SPACE_S * 2
+        shown = 0
+        for index in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(index)
+            if item.isHidden():
+                continue
+            shown += 1
+            if item.isExpanded():
+                shown += sum(1 for child in range(item.childCount()) if not item.child(child).isHidden())
+        return shown * row_height + 2 * self.tree.frameWidth() + SPACE_S
 
     def _populate_session_item(self, session_item: QTreeWidgetItem, session: Session) -> None:
         display_samples = self._display_samples(session)
@@ -3182,6 +4155,9 @@ class MainWindow(QMainWindow):
 
         timer = QElapsedTimer()
         timer.start()
+        # Any rebuild draws the current palette, so a theme-switch rebuild
+        # waiting for the Session tab is no longer needed.
+        self._dashboard_theme_stale = False
         scope_value = self._dashboard_scope_value()
         loading_active = self._loading_overlay_active()
         defer_heavy_cards = defer_heavy_cards or loading_active
@@ -3632,9 +4608,9 @@ class MainWindow(QMainWindow):
         if viewer_tab is not None:
             viewer_tab.list_filter.setText(query)
             if query:
-                self.statusBar().showMessage(f"Filtered {destination.lower()} list: {query}", 3000)
+                self.show_toast(f"Filtered {destination.lower()} list: {query}")
             else:
-                self.statusBar().showMessage(f"Showing all {destination.lower()} entries", 3000)
+                self.show_toast(f"Showing all {destination.lower()} entries")
         # State *why* at the destination. A filtered list with no explanation
         # is indistinguishable from a scope that simply has little in it.
         self._dashboard_filter_reason = reason if query else ""
@@ -3721,7 +4697,10 @@ class MainWindow(QMainWindow):
             self._set_dashboard_highlighted_tilt_series_id(None)
 
     def _project_tree_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
-        self._activate_project_tree_item(item)
+        # Qt already opens or closes a row with children on a double-click
+        # (``expandsOnDoubleClick``). A scope row toggling here as well was
+        # toggled straight back, so a double-click did nothing.
+        self._activate_project_tree_item(item, toggle_scope=False)
 
     def _project_tree_item_activated(self, item: QTreeWidgetItem, column: int) -> None:
         """Keyboard activation (Enter) on the project tree.
@@ -3733,12 +4712,15 @@ class MainWindow(QMainWindow):
 
         self._activate_project_tree_item(item)
 
-    def _activate_project_tree_item(self, item: QTreeWidgetItem | None) -> bool:
+    def _activate_project_tree_item(self, item: QTreeWidgetItem | None, *, toggle_scope: bool = True) -> bool:
         """Open the tree item's object in its viewer tab.
 
         Selection and activation stay distinct: selection re-scopes and
         describes, activation opens. Only activation is an explicit navigation
         event, which is what H1 will record in history.
+
+        Opening a scope row expands or collapses it. ``toggle_scope`` is False
+        for a double-click, where the tree itself does that.
 
         Returns True when something was opened.
         """
@@ -3784,7 +4766,8 @@ class MainWindow(QMainWindow):
         if isinstance(value, ProjectTreeGroup | Session | Sample | LinkedSampleGroup):
             # Scope rows have no destination beyond themselves; activating one
             # expands it, which is what a reviewer means by pressing Enter.
-            item.setExpanded(not item.isExpanded())
+            if toggle_scope:
+                item.setExpanded(not item.isExpanded())
             return True
         return False
 
@@ -4052,15 +5035,80 @@ class MainWindow(QMainWindow):
 
     def _toggle_project_panel(self) -> None:
         visible = self.project_panel_button.isChecked()
-        self.project_dock.setVisible(visible)
+        self._set_side_panel_visible(self.project_dock, visible)
         self._settings.project_panel_visible = visible
         save_settings(self._settings)
+        # The project panel's room decides whether the context panel docks.
+        self._update_context_drawer_mode()
 
     def _toggle_context_panel(self) -> None:
         visible = self.context_panel_button.isChecked()
-        self.context_dock.setVisible(visible)
+        if self._context_drawer_mode:
+            # The drawer over the page (plan D2): transient, never saved.
+            self._open_context_drawer(visible)
+            return
+        self._set_side_panel_visible(self.context_dock, visible)
         self._settings.context_panel_visible = visible
         save_settings(self._settings)
+
+    def _set_side_panel_visible(self, dock: QDockWidget, visible: bool) -> None:
+        """Show or hide a side panel, sliding it from its own edge (plan F5.2).
+
+        The dock changes at once, so the window lays out a single time: a
+        snapshot of the panel slides on an overlay, and the current viewer
+        eases its fitted image to the new width alongside. Animating the
+        dock's real width re-laid out the whole window on every frame.
+        """
+
+        previous = self._panel_slides.pop(dock, None)
+        if previous is not None and (not shiboken6.isValid(previous) or previous.isHidden()):
+            previous = None  # it had already settled
+        can_move = not (
+            dock.isVisible() == visible
+            or dock.isFloating()
+            or not self.isVisible()
+            or not motion_enabled(self)
+            # A slide raises itself; it must never cover the loader.
+            or self._loading_overlay_active()
+        )
+        palette = current_palette()
+        from_left = dock is self.project_dock
+        # Each panel's own background (``projectPanel`` / ``contextShell``).
+        backdrop = QColor(palette.panel if from_left else palette.background)
+        if previous is not None and can_move and previous.entering != visible:
+            # A toggle mid-slide turns it round from where it is.
+            dock.setVisible(visible)
+            if visible:
+                self.layout().activate()
+            self._ride_along_with_panel()
+            previous.reverse(backdrop=backdrop)
+            self._panel_slides[dock] = previous
+            return
+        if previous is not None:
+            previous.dismiss()
+        if not can_move:
+            dock.setVisible(visible)
+            return
+        self._ride_along_with_panel()
+        if visible:
+            dock.setVisible(True)
+            # Apply the new layout now, so the snapshot is the panel as it
+            # will stand.
+            self.layout().activate()
+            geometry, picture = dock.geometry(), dock.grab()
+        else:
+            geometry, picture = dock.geometry(), dock.grab()
+            dock.setVisible(False)
+        self._panel_slides[dock] = PanelSlide(
+            self, geometry, picture, from_left=from_left, entering=visible, backdrop=backdrop
+        )
+
+    def _ride_along_with_panel(self) -> None:
+        """The current viewer eases its fitted image to the width a panel leaves."""
+
+        viewer_tab = self._viewer_tabs.get(TAB_LABELS[self.tabs.currentIndex()])
+        if viewer_tab is not None and viewer_tab.isVisible():
+            viewer_tab.viewer.ease_next_refit()
 
     def _session_summary_item(self, session: Session) -> QTreeWidgetItem:
         item = QTreeWidgetItem([session.name])
@@ -4161,7 +5209,7 @@ class MainWindow(QMainWindow):
                 if value is not None:
                     self._select_viewer_object(value)
                     if location.marker_id:
-                        viewer_tab.select_marker(location.marker_id)
+                        viewer_tab.select_marker(location.marker_id, arrive=True)
                     if location.frame_index is not None:
                         QTimer.singleShot(
                             0,
@@ -4298,8 +5346,12 @@ class MainWindow(QMainWindow):
         elif command == EMPTY_COMMAND_RETURN_TO_SCOPE:
             self.tabs.setCurrentIndex(TAB_LABELS.index("Session"))
         elif command == EMPTY_COMMAND_SHOW_METADATA:
-            self.context_dock.show()
-            self.context_dock.raise_()
+            if self._context_drawer_mode:
+                self._show_context_action_checked(True)
+                self._open_context_drawer(True)
+            else:
+                self.context_dock.show()
+                self.context_dock.raise_()
             self.context_panel.setFocus(Qt.FocusReason.ShortcutFocusReason)
         elif command == EMPTY_COMMAND_COPY_DETAILS:
             # One owner for the clipboard. The panel used to write the text and
@@ -4325,10 +5377,10 @@ class MainWindow(QMainWindow):
                 break
         clipboard = QApplication.clipboard()
         if not details or clipboard is None:
-            self.statusBar().showMessage("There are no details to copy.", 3000)
+            self.show_toast("There are no details to copy.")
             return
         clipboard.setText(details)
-        self.statusBar().showMessage("Details copied to the clipboard.", 3000)
+        self.show_toast("Details copied to the clipboard.", tone=TONE_SUCCESS)
 
     def _clear_active_tab_filter(self) -> None:
         """Clear the filter on the visible tab, from the header's Clear action."""
@@ -4768,6 +5820,15 @@ class MainWindow(QMainWindow):
         if update_context:
             self._set_context(self._label_for(value), value)
 
+    def show_toast(self, text: str, *, tone: str = TONE_INFO) -> None:
+        """Confirm something that just happened, briefly (plan F5.9).
+
+        For news only: where a jump went, why one could not, and work in
+        progress stay in the status bar, which does not fade.
+        """
+
+        self.toast.show_message(text, tone=tone)
+
     def _show_arrival_message(self, text: str, timeout: int = 0) -> None:
         """Post an arrival message, folding in any filter notice it would hide."""
 
@@ -4986,7 +6047,7 @@ class MainWindow(QMainWindow):
         )
         if current is not None:
             self._set_context(self._label_for(current), current)
-        self.statusBar().showMessage("Cleared marker selection and highlights.")
+        self.show_toast("Cleared marker selection and highlights.")
 
     def _atlas_cluster_member_activated(self, marker: ImageMarker) -> None:
         batch = self._find_object_by_id(
@@ -5035,7 +6096,8 @@ class MainWindow(QMainWindow):
         )
         if destination_marker_id:
             self._viewer_tabs["Search map"].select_marker(
-                destination_marker_id
+                destination_marker_id,
+                arrive=True,
             )
         self.statusBar().showMessage(
             f"Opened {self._label_for(search_map)} for {self._label_for(batch)}."
@@ -5043,16 +6105,19 @@ class MainWindow(QMainWindow):
 
     def _viewer_navigation_actions(self, value: Any) -> list[ViewerNavigationAction]:
         if isinstance(value, TiltSeries):
-            return self._tilt_navigation_actions(value)
-        if isinstance(value, SearchTile):
-            return self._search_tile_navigation_actions(value)
-        if isinstance(value, BatchPosition):
-            return self._batch_position_navigation_actions(value)
-        if isinstance(value, Overview):
-            return self._overview_navigation_actions(value)
-        if isinstance(value, SearchMap):
-            return self._search_map_navigation_actions(value)
-        return []
+            actions = self._tilt_navigation_actions(value)
+        elif isinstance(value, SearchTile):
+            actions = self._search_tile_navigation_actions(value)
+        elif isinstance(value, BatchPosition):
+            actions = self._batch_position_navigation_actions(value)
+        elif isinstance(value, Overview):
+            actions = self._overview_navigation_actions(value)
+        elif isinstance(value, SearchMap):
+            actions = self._search_map_navigation_actions(value)
+        else:
+            return []
+        # Every image tab can go to the Atlas of the item's grid.
+        return [self._atlas_navigation_action(value), *actions]
 
     def _linked_target_tooltip(self, kind: str, target: Any, missing: str) -> str:
         if target is None:
@@ -5221,6 +6286,50 @@ class MainWindow(QMainWindow):
             ),
         ]
 
+    def _atlas_navigation_action(self, value: Any) -> ViewerNavigationAction:
+        """Every image tab's Atlas jump: to the Atlas of the item's grid."""
+
+        resolution = self._atlas_resolution_for(value)
+        return ViewerNavigationAction(
+            "atlas",
+            "\u2197 Atlas",
+            enabled=resolution.navigable,
+            tooltip=self._resolved_target_tooltip(resolution.explanation, resolution.target),
+        )
+
+    def _atlas_resolution_for(self, value: Any) -> NavigationResolution:
+        """The Atlas of the grid ``value`` was acquired on, through the resolver.
+
+        The facts come from the folders and the AtlasId link the project tree
+        already trusts; an ambiguous AtlasId passes on every candidate so the
+        jump stays inert and names them. Items are found by identity: two
+        sessions can hold equal-looking records.
+        """
+
+        field = _ATLAS_ITEM_LISTS.get(type(value))
+        if field is None:
+            return resolve_item_atlas(own_atlas=None)
+        sample = next(
+            (sample for sample in self._all_samples() if any(item is value for item in getattr(sample, field))),
+            None,
+        )
+        if sample is None:
+            session = next(
+                (session for session in self._sessions if any(item is value for item in getattr(session, field))),
+                None,
+            )
+            return resolve_item_atlas(own_atlas=session.atlas if session is not None else None)
+        if sample.atlas is not None:
+            return resolve_item_atlas(own_atlas=sample.atlas)
+        link = atlas_link_resolutions(self._sessions).get(id(sample))
+        if link is None:
+            return resolve_item_atlas(own_atlas=None)
+        candidates = (link.sample,) if link.linked else link.candidates
+        return resolve_item_atlas(
+            own_atlas=None,
+            linked_atlases=[candidate.atlas for candidate in candidates if candidate.atlas is not None],
+        )
+
     def _search_map_navigation_actions(self, value: SearchMap) -> list[ViewerNavigationAction]:
         """Search-map jump buttons, mirroring the Search and Batch tabs.
 
@@ -5260,6 +6369,9 @@ class MainWindow(QMainWindow):
         # ``resolution_by_key`` carries the resolver's verdict alongside the
         # destination so an inert action can say *why* it is inert instead of
         # falling back on a generic "not found".
+        if key == "atlas":
+            self._navigate_to_atlas(value)
+            return
         resolution_by_key: dict[str, NavigationResolution] = {}
         if isinstance(value, TiltSeries):
             targets, marker_context = self._resolve_tilt_navigation(value)
@@ -5368,6 +6480,7 @@ class MainWindow(QMainWindow):
 
         tab_label = tab_label_for_object(target)
         marker_id: str | None = None
+        frame_marker = True
         if isinstance(value, TiltSeries):
             marker_id = self._marker_id_for_tilt_navigation(
                 target,
@@ -5409,8 +6522,12 @@ class MainWindow(QMainWindow):
                 )
             else:
                 marker_id = self._marker_id_for_search_map_navigation(target, value, context=marker_context)
+                # The whole Search map, not a spot on it: it is shown at fit.
+                frame_marker = False
         if tab_label is not None and marker_id:
-            self._viewer_tabs[tab_label].select_marker(marker_id)
+            # A jump button flies in on where it landed, as the Atlas jump
+            # does: at fit a marker can be a speck on its image.
+            self._viewer_tabs[tab_label].select_marker(marker_id, arrive=True, frame=frame_marker)
         self._show_arrival_message(f"Opened {self._label_for(target)} linked to {value.name}.")
         self._record_history(departure)
 
@@ -5854,6 +6971,94 @@ class MainWindow(QMainWindow):
         marker = self._preferred_batch_marker(markers, batch_position)
         return marker.id if marker is not None else None
 
+    def _navigate_to_atlas(self, value: Any) -> None:
+        """The Atlas jump from any image tab: to the Atlas of the item's grid,
+        flown in on where the item is (``_atlas_region_of_interest``)."""
+
+        resolution = self._atlas_resolution_for(value)
+        atlas = resolution.target
+        if not isinstance(atlas, Atlas):
+            self.statusBar().showMessage(self._inert_navigation_message(value, "atlas", resolution))
+            self._show_unresolved_relationship_panel(value, "atlas", resolution)
+            return
+        # Resolved from where the reviewer starts, before the scope moves.
+        region = self._atlas_region_of_interest(value)
+        departure = self._current_history_location()
+        self._enter_navigation_scope(atlas)
+        self._select_viewer_object(atlas)
+        atlas_tab = self._viewer_tabs["Atlas"]
+        drawn = atlas_tab.viewer.markers
+        found = next(
+            (
+                (marker.id, kind)
+                for marker_type, linked_id, kind in region
+                for marker in drawn
+                if marker.marker_type == marker_type
+                and marker.linked_object_id == linked_id
+                # A Search map is found by its outline, not one of its tiles.
+                and marker.metadata.get("atlas_lod_role") != "search_map_tile"
+            ),
+            None,
+        )
+        subject = f"Opened {self._label_for(atlas)} linked to {getattr(value, 'name', None) or value.id}"
+        if found is None:
+            atlas_tab.select_marker(None)
+            self._show_arrival_message(f"{subject}. Its position is not marked on the Atlas.")
+        else:
+            marker_id, kind = found
+            atlas_tab.select_marker(marker_id, arrive=True, frame=True)
+            self._show_arrival_message(f"{subject}." if kind is None else f"{subject}, at its {kind}.")
+        self._record_history(departure)
+
+    def _atlas_region_of_interest(self, value: Any) -> list[tuple[str, str, str | None]]:
+        """Where ``value`` is on its Atlas, most exact first.
+
+        Each entry is a marker type, the linked ID to find it by and, for a
+        stand-in, what it is. The item's own marker comes first; where the
+        Atlas does not draw the item, the nearest item that it does draw,
+        reached through the resolver's verified links only.
+        """
+
+        region: list[tuple[str, str, str | None]] = []
+
+        def add(marker_type: str, target: Any, kind: str | None) -> None:
+            if target is not None:
+                region.append((marker_type, target.id, kind))
+
+        if isinstance(value, Overview):
+            add(MarkerType.OVERVIEW, value, None)
+        elif isinstance(value, SearchMap):
+            context = self._marker_context_for_search_map(value)
+            add(MarkerType.SEARCH_MAP, value, None)
+            add(MarkerType.OVERVIEW, resolve_search_map_overview(value, overviews=context.overviews).target, "Overview")
+        elif isinstance(value, SearchTile):
+            context = self._marker_context_for_search_tile(value)
+            search_map = self._search_map_resolution_for_search_tile(value, context).target
+            add(MarkerType.BATCH_POSITION, self._batch_resolution_for_search_tile(value, context).target, "batch position")
+            add(MarkerType.SEARCH_MAP, search_map, "Search map")
+            if search_map is not None:
+                overview = resolve_search_map_overview(search_map, overviews=context.overviews).target
+                add(MarkerType.OVERVIEW, overview, "Overview")
+        elif isinstance(value, BatchPosition):
+            context = self._marker_context_for_batch_position(value)
+            search_map = self._search_map_resolution_for_batch_position(value, context).target
+            add(MarkerType.BATCH_POSITION, value, None)
+            add(MarkerType.SEARCH_MAP, search_map, "Search map")
+            add(
+                MarkerType.OVERVIEW,
+                self._overview_resolution_for_batch_position(value, search_map, context).target,
+                "Overview",
+            )
+        elif isinstance(value, TiltSeries):
+            targets, _context = self._resolve_tilt_navigation(value)
+            # A failed tilt series with no batch is drawn where its MRC
+            # header puts it (approximately).
+            add(MarkerType.TILT_SERIES, value, None)
+            add(MarkerType.BATCH_POSITION, targets.batch_position, "batch position")
+            add(MarkerType.SEARCH_MAP, targets.search_map, "Search map")
+            add(MarkerType.OVERVIEW, targets.overview, "Overview")
+        return region
+
     def _marker_id_for_search_map_navigation(
         self,
         target: Any,
@@ -5861,18 +7066,26 @@ class MainWindow(QMainWindow):
         *,
         context: MarkerContext,
     ) -> str | None:
-        """Find the marker on ``target`` that represents ``search_map``.
+        """Find the marker on ``target`` that represents ``search_map`` whole.
 
-        The overview tab draws a region marker per linked search map; we
-        pick the one whose ``linked_object_id`` matches so the user lands
-        on the right region instead of a generic centred overview view.
+        The Overview draws a Search map as one region, or, once it has more
+        than one tile, as a grid of reconstructed tiles with no marker for
+        the whole map. Taking the first marker linked to the map then picked
+        one tile and ringed an arbitrary corner, so a grid selects nothing:
+        the Overview opens at fit with the map in view.
         """
 
         if not isinstance(target, Overview):
             return None
         markers = markers_for_object(target, context=context)
         marker = next(
-            (item for item in markers if item.linked_object_id == search_map.id),
+            (
+                item
+                for item in markers
+                if item.linked_object_id == search_map.id
+                and item.marker_type == MarkerType.SEARCH_MAP
+                and item.metadata.get("tile_index") is None
+            ),
             None,
         )
         return marker.id if marker is not None else None
@@ -6461,7 +7674,7 @@ class MainWindow(QMainWindow):
             ),
             None,
         )
-        viewer.select_marker(linked_marker.id if linked_marker is not None else None)
+        viewer.select_marker(linked_marker.id if linked_marker is not None else None, arrive=True)
         self._set_context(self._label_for(batch), batch)
         self.statusBar().showMessage(
             f"Opened {self._label_for(overview)} for batch position {self._label_for(batch)}."
@@ -6505,7 +7718,10 @@ class MainWindow(QMainWindow):
         timer.start()
         self.context_panel.set_title(label)
         self.context_panel.set_text(self._context_description(value))
-        self._update_status_summary(label)
+        # The status bar names the scope, which a selection never is
+        # (docs/USER_FLOWS_AND_NAVIGATION.md). It used to show ``label``, so
+        # selecting a map under a group read "scope: SearchMap_…".
+        self._update_status_summary()
         self._refresh_context_header()
         elapsed_ms = timer.elapsed()
         LOGGER.debug(
@@ -7456,152 +8672,3 @@ class MainWindow(QMainWindow):
         if isinstance(context, ProjectTreeGroup):
             return _context_tilt_series_for_sessions(context.sessions, None)
         return self._all_tilt_series()
-
-
-class OpenSessionsDialog(QDialog):
-    def __init__(self, loader: SessionLoader, start_path: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._loader = loader
-        self._start_path = start_path
-        self._parent_buttons: dict[QLineEdit, QPushButton] = {}
-        self.setWindowTitle("Select session folder")
-        self.resize(780, 260)
-
-        layout = QVBoxLayout(self)
-        help_label = QLabel(SESSION_FOLDER_HELP_TEXT)
-        help_label.setWordWrap(True)
-        layout.addWidget(help_label)
-
-        form = QFormLayout()
-        self.atlas_path = QLineEdit()
-        self.collection_path = QLineEdit()
-        form.addRow("Atlas session", self._path_row(self.atlas_path))
-        form.addRow("Data collection session", self._path_row(self.collection_path))
-        layout.addLayout(form)
-
-        self.message = QLabel("")
-        self.message.setWordWrap(True)
-        layout.addWidget(self.message)
-
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        cancel_button = QPushButton("Cancel")
-        cancel_button.clicked.connect(self.reject)
-        self.import_button = QPushButton("Open folders")
-        # Give the confirming action primary weight so it does not read as a
-        # peer of Cancel. Set before the first polish, so no re-polish needed.
-        self.import_button.setObjectName("primaryButton")
-        self.import_button.setDefault(True)
-        self.import_button.setAutoDefault(True)
-        self.import_button.clicked.connect(self.accept)
-        buttons.addWidget(cancel_button)
-        buttons.addWidget(self.import_button)
-        layout.addLayout(buttons)
-
-        self.atlas_path.textChanged.connect(self._validate)
-        self.collection_path.textChanged.connect(self._validate)
-        self._validate()
-
-    def selected_paths(self) -> list[str]:
-        return [path for path in [self.atlas_path.text().strip(), self.collection_path.text().strip()] if path]
-
-    def _path_row(self, line_edit: QLineEdit) -> QWidget:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        line_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        parent_button = QPushButton("Use parent folder")
-        parent_button.setVisible(False)
-        parent_button.clicked.connect(lambda: self._use_parent_folder(line_edit))
-        browse_button = QPushButton("Browse folder...")
-        browse_button.clicked.connect(lambda: self._browse(line_edit))
-        layout.addWidget(line_edit)
-        layout.addWidget(parent_button)
-        layout.addWidget(browse_button)
-        self._parent_buttons[line_edit] = parent_button
-        return row
-
-    def _browse(self, line_edit: QLineEdit) -> None:
-        path = _select_session_folder(
-            self,
-            "Select session folder",
-            line_edit.text().strip() or self._start_path,
-            "Open folder",
-        )
-        if path:
-            line_edit.setText(path)
-
-    def _use_parent_folder(self, line_edit: QLineEdit) -> None:
-        path = Path(line_edit.text().strip())
-        if _looks_like_direct_file_path(path):
-            line_edit.setText(str(path.parent))
-
-    def _validate(self) -> None:
-        messages: list[str] = []
-        valid = True
-        atlas = self.atlas_path.text().strip()
-        collection = self.collection_path.text().strip()
-
-        for line_edit in (self.atlas_path, self.collection_path):
-            parent_button = self._parent_buttons.get(line_edit)
-            if parent_button is not None:
-                path = Path(line_edit.text().strip()) if line_edit.text().strip() else None
-                parent_button.setVisible(bool(path and _looks_like_direct_file_path(path) and path.parent.exists()))
-
-        if not atlas and not collection:
-            valid = False
-
-        if atlas:
-            atlas_path = Path(atlas)
-            if _looks_like_direct_file_path(atlas_path):
-                messages.append(DIRECT_DM_FILE_MESSAGE)
-                messages.append(f"You selected {atlas_path.name}. Use its parent folder, or browse for the atlas session folder.")
-                valid = False
-            elif not atlas_path.exists() or not atlas_path.is_dir():
-                messages.append("The atlas session field must point to a folder.")
-                valid = False
-            else:
-                atlas_kind = self._loader.classify(atlas)
-                if atlas_kind == SessionKind.UNKNOWN:
-                    messages.append("No Tomography 5 metadata was found in the atlas session folder.")
-                    valid = False
-                elif atlas_kind != SessionKind.ATLAS_SCREENING:
-                    messages.append("The atlas session field must point to an atlas screening session folder.")
-                    valid = False
-
-        if collection:
-            collection_path = Path(collection)
-            if _looks_like_direct_file_path(collection_path):
-                messages.append(DIRECT_DM_FILE_MESSAGE)
-                messages.append(
-                    f"You selected {collection_path.name}. Use its parent folder, or browse for the data collection session folder."
-                )
-                valid = False
-            elif not collection_path.exists() or not collection_path.is_dir():
-                messages.append("The data collection field must point to a folder.")
-                valid = False
-            else:
-                collection_kind = self._loader.classify(collection)
-                if collection_kind == SessionKind.UNKNOWN:
-                    messages.append("No Tomography 5 metadata was found in the data collection folder.")
-                    valid = False
-                elif collection_kind == SessionKind.ATLAS_SCREENING:
-                    messages.append("The data collection field contains an atlas session folder.")
-                    valid = False
-
-        self.message.setText("\n".join(messages) if messages else LINKED_IMPORT_HELP_TEXT)
-        self.import_button.setEnabled(valid)
-
-    def accept(self) -> None:  # noqa: D102 - Qt override
-        for line_edit in (self.atlas_path, self.collection_path):
-            text = line_edit.text().strip()
-            if not text:
-                continue
-            folder_path = _normalise_session_folder_for_import(self, text)
-            if folder_path is None:
-                return
-            line_edit.setText(folder_path)
-        self._validate()
-        if not self.import_button.isEnabled():
-            return
-        super().accept()

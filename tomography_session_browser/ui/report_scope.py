@@ -25,6 +25,7 @@ from tomography_session_browser.reports import ProjectReportGroup
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.navigation_icons import PROJECT_GROUP_ICONS
 from tomography_session_browser.ui.project_model import ProjectTreeGroup, session_key
+from tomography_session_browser.ui.theme import SPACE_L, SPACE_M, SPACE_S
 
 
 REPORT_GROUP_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -169,8 +170,8 @@ class ReportScopeDialog(QDialog):
         self.resize(560, 520)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(SPACE_L, SPACE_L, SPACE_L, SPACE_L)
+        layout.setSpacing(SPACE_M)
 
         heading = QLabel("Choose sessions and samples for the report", self)
         heading.setObjectName("cardTitle")
@@ -200,7 +201,7 @@ class ReportScopeDialog(QDialog):
         layout.addWidget(self.tree, stretch=1)
 
         controls = QHBoxLayout()
-        controls.setSpacing(8)
+        controls.setSpacing(SPACE_S)
         # "view" described the widget; this is about the scientific scope being
         # reviewed, and now names it.
         scope_name = _describe_current_scope(current_scope)

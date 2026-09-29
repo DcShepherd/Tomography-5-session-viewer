@@ -26,7 +26,12 @@ tomo_session_viewer = "tomography_session_browser.main:main"
 include = ["tomography_session_browser*"]
 
 [tool.setuptools.package-data]
-tomography_session_browser = ["assets/icons/*.svg", "assets/branding/*.svg"]
+tomography_session_browser = [
+    "assets/icons/*.svg",
+    "assets/branding/*.svg",
+    "assets/loader/*.qml",
+    "assets/loader/*.qsb",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

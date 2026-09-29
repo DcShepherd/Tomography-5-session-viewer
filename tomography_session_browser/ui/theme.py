@@ -2,7 +2,7 @@
 
 The app chrome follows the Slate & Sage style guide supplied with the
 project: Inter for interface text, JetBrains Mono for identifiers/readouts,
-compact 6/8/10 px radii, and a calm sage accent shared across light and dark
+compact 4/8/12 px radii, and a calm sage accent shared across light and dark
 mode. ``build_stylesheet`` substitutes the palette into one QSS template so
 both themes stay in sync. ``apply_theme`` installs the stylesheet and updates
 the icon-loader's default colour so freshly-built actions match the theme.
@@ -14,9 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from PySide6.QtCore import QStandardPaths
+from PySide6.QtCore import QEvent, QObject, QStandardPaths, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QWidget
+import shiboken6
 
 
 # Qt stylesheets do not handle CSS-style fallback stacks reliably on Windows.
@@ -26,6 +27,68 @@ SANS_FONT_NAME: Final[str] = "Segoe UI"
 MONO_FONT_NAME: Final[str] = "Cascadia Mono"
 SANS_FONT_FAMILY: Final[str] = f'"{SANS_FONT_NAME}"'
 MONO_FONT_FAMILY: Final[str] = f'"{MONO_FONT_NAME}"'
+
+# Corner radii. The chrome had drifted into ten values (3–15 px); these three
+# steps replace them:
+#   RADIUS_CONTROL: buttons, inputs, chips, menu items, list and tree rows;
+#   RADIUS_CARD:    cards, panels, menus, tooltips, floating viewer panels;
+#   RADIUS_POPOVER: large floating surfaces such as the loading card.
+# A menu uses the card radius on purpose: with 4 px of padding, its 4 px items
+# sit concentric inside its 8 px corner.
+#
+# Pills are the one exception. Qt draws a *square* corner when the radius is
+# more than half the widget's height, so a pill's radius belongs to its own
+# height and stays just under half of it. Mark such a line ``/* pill */``; the
+# style-guide test rejects any other radius that is not one of these tokens.
+RADIUS_CONTROL: Final[int] = 4
+RADIUS_CARD: Final[int] = 8
+RADIUS_POPOVER: Final[int] = 12
+RADIUS_TOKENS: Final[tuple[int, ...]] = (RADIUS_CONTROL, RADIUS_CARD, RADIUS_POPOVER)
+
+# Spacing on a 4 px grid. The chrome had 23 margin tuples and 13 spacing
+# values; layouts adopt these as each surface is migrated (plan F2).
+#   SPACE_XS: a label and its value, an icon and its label, rows in a
+#             dense list (the context panel, card row lists);
+#   SPACE_S:  items in a row, a key column and its values, blocks in a stack;
+#   SPACE_M:  cards in a grid, the padding inside a card, an indent;
+#   SPACE_L:  groups in a row, sections on a page;
+#   SPACE_XL / SPACE_XXL: wide separation (side-by-side readouts).
+# Values are chosen by role, not by rounding the old number: a dense list
+# stays dense.
+SPACE_XS: Final[int] = 4
+SPACE_S: Final[int] = 8
+SPACE_M: Final[int] = 12
+SPACE_L: Final[int] = 16
+SPACE_XL: Final[int] = 24
+SPACE_XXL: Final[int] = 32
+SPACE_SCALE: Final[tuple[int, ...]] = (SPACE_XS, SPACE_S, SPACE_M, SPACE_L, SPACE_XL, SPACE_XXL)
+
+# Type scale in points. Thirteen sizes (8–26 pt) had accumulated; these six
+# steps replace them. Body text is the application font.
+#   TYPE_CAPTION: card titles, section headings, keys, chips, counts, notes;
+#   TYPE_BODY:    values, row names, detail text;
+#   TYPE_LEAD:    panel titles and the landmark tier;
+#   TYPE_TITLE:   health readouts;
+#   TYPE_HEADING: the viewer title;
+#   TYPE_DISPLAY: the dashboard title and card values.
+# Monospace is kept for readouts (numbers with units, raw metadata), not for
+# chrome. Counts use Segoe UI: its Regular digits are already tabular. Its
+# Semibold digits are not, so a bold number that must align in a column needs
+# ``QFont.setFeature(QFont.Tag("tnum"), 1)``.
+TYPE_CAPTION: Final[int] = 9
+TYPE_BODY: Final[int] = 10
+TYPE_LEAD: Final[int] = 11
+TYPE_TITLE: Final[int] = 13
+TYPE_HEADING: Final[int] = 16
+TYPE_DISPLAY: Final[int] = 22
+TYPE_SCALE: Final[tuple[int, ...]] = (
+    TYPE_CAPTION,
+    TYPE_BODY,
+    TYPE_LEAD,
+    TYPE_TITLE,
+    TYPE_HEADING,
+    TYPE_DISPLAY,
+)
 
 
 @dataclass(frozen=True)
@@ -266,11 +329,122 @@ def palette_for(name: str | None) -> ThemePalette:
     return DARK_PALETTE
 
 
+# Status tones, as the palette slot each one is drawn in. The viewer list's
+# badges paint them; the header status chip gets them from the stylesheet
+# through its ``tone`` property, so a theme switch recolours it. It used to
+# carry the colours in its own inline style, which kept the old palette: after
+# switching to light, "Acquired" and "Failed" were white on a pale fill.
+STATUS_TONE_COLOURS: Final[dict[str, str]] = {
+    "good": "chart_green",
+    "warn": "chart_amber",
+    "bad": "chart_red",
+    "info": "chart_blue",
+    "neutral": "chart_grey",
+}
+# Alpha (of 255) of a status tone's fill behind its text.
+STATUS_TONE_FILL_ALPHA: Final[int] = 40
+
+
+def _status_tone_rules(palette: ThemePalette) -> str:
+    rules = []
+    for tone, slot in STATUS_TONE_COLOURS.items():
+        colour = getattr(palette, slot).lstrip("#")
+        red, green, blue = (int(colour[index : index + 2], 16) for index in (0, 2, 4))
+        rules.append(
+            f'QLabel#viewerChipStatus[tone="{tone}"] {{\n'
+            f"    background: rgba({red}, {green}, {blue}, {STATUS_TONE_FILL_ALPHA});\n"
+            f"    border-color: #{colour};\n"
+            "}\n"
+        )
+    return "\n".join(rules)
+
+
+#: The dashboard's status tones: the colour a status gives its dot, chip or
+#: count. They carried inline style sheets that baked the palette in, so a
+#: theme switch rebuilt the whole dashboard to recolour them (~150 ms with its
+#: clean-up), and Qt re-applied each of those sheets at every restyle. Now a
+#: widget carries only its ``tone`` and these rules colour it, so a switch
+#: recolours it in place. (The dashboard's "unknown" is not the chart grey.)
+DASHBOARD_TONE_COLOURS: Final[dict[str, str]] = {
+    "good": "chart_green",
+    "warn": "chart_amber",
+    "bad": "chart_red",
+    "unknown": "unknown",
+    "grey": "chart_grey",
+}
+
+
+def _dashboard_tone_rules(palette: ThemePalette) -> str:
+    rules = []
+    for tone, slot in DASHBOARD_TONE_COLOURS.items():
+        colour = getattr(palette, slot)
+        rules.append(
+            f'QLabel#statusDot[tone="{tone}"] {{ color: {colour}; }}\n'
+            f'QLabel#searchMapSummaryChip[tone="{tone}"] {{ border-color: {colour}; color: {colour}; }}\n'
+            f'QLabel#sampleCount[tone="{tone}"] {{ color: {palette.text_strong}; border-color: {colour}; }}\n'
+            f'QLabel#warningCount[tone="{tone}"] {{ color: {colour}; border-color: {colour}; }}\n'
+        )
+    rules.append('QLabel#searchMapSummaryChip[spaced="true"] { margin-top: 4px; }\n')
+    return "\n".join(rules)
+
+
+def _hex_rgb(colour: str) -> tuple[int, int, int]:
+    value = colour.lstrip("#")
+    return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+
+
+def _luminance(colour: str) -> float:
+    def linear(channel: int) -> float:
+        value = channel / 255.0
+        return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = (linear(channel) for channel in _hex_rgb(colour))
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def _contrast(foreground: str, background: str) -> float:
+    lighter, darker = sorted((_luminance(foreground), _luminance(background)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def readable_tone(tone: str, background: str, toward: str, *, floor: float = 4.5) -> str:
+    """``tone``, mixed toward ``toward`` only as far as text needs to read.
+
+    The status colours are chart colours: in the light palette the red and
+    amber fall just short of 4.5:1 as small text on the pale panels.
+    """
+
+    start, end = _hex_rgb(tone), _hex_rgb(toward)
+    for step in range(0, 21):
+        amount = step / 20.0
+        mixed = "#" + "".join(f"{round(a + (b - a) * amount):02x}" for a, b in zip(start, end))
+        if _contrast(mixed, background) >= floor:
+            return mixed
+    return toward
+
+
+def _session_intake_rules(palette: ThemePalette) -> str:
+    """Tone colours for the Load sessions window and the drop receipt."""
+
+    red, green, blue = _hex_rgb(palette.chart_red)
+    good = readable_tone(palette.selection_marker, palette.surface, palette.text_strong)
+    bad_on_surface = readable_tone(palette.chart_red, palette.surface, palette.text_strong)
+    bad_on_panel = readable_tone(palette.chart_red, palette.panel, palette.text_strong)
+    warn = readable_tone(palette.chart_amber, palette.surface_alt, palette.text_strong)
+    return (
+        f'QFrame#queuedFolderRow[tone="bad"] {{ background: rgba({red}, {green}, {blue}, 12); }}\n'
+        f"QLabel#queuedFolderReason {{ color: {bad_on_panel}; }}\n"
+        f'QLabel#queueCount[tone="good"] {{ color: {good}; }}\n'
+        f'QLabel#queueCount[tone="bad"] {{ color: {bad_on_surface}; }}\n'
+        f"QLabel#dropReceiptSkipped {{ color: {warn}; }}\n"
+    )
+
+
 _QSS_TEMPLATE = """
 QWidget {{
     color: {text};
     font-family: {sans_font};
-    font-size: 10pt;
+    font-size: {type_body}pt;
 }}
 
 QMainWindow,
@@ -301,6 +475,14 @@ QScrollArea#metadataScroll {{
     border: 0;
 }}
 
+/* The context panel as a drawer over the page on narrow windows (plan D2):
+   the page runs on beneath it, so a strong edge marks where it begins. */
+QFrame#contextDrawer {{
+    background: {background};
+    border: 0;
+    border-left: 1px solid {border_strong};
+}}
+
 QLabel {{
     background: transparent;
 }}
@@ -309,7 +491,7 @@ QToolTip {{
     background: {surface};
     color: {text};
     border: 1px solid {border_strong};
-    border-radius: 6px;
+    border-radius: {radius_card}px;
     padding: 6px 8px;
 }}
 
@@ -323,14 +505,14 @@ QMenu {{
     background: {surface};
     color: {text};
     border: 1px solid {border_strong};
-    border-radius: 8px;
+    border-radius: {radius_card}px;
     padding: 4px;
 }}
 
 QMenu::item {{
     background: transparent;
     color: {text};
-    border-radius: 6px;
+    border-radius: {radius_control}px;
     padding: 6px 24px 6px 12px;
 }}
 
@@ -362,7 +544,7 @@ QWidget#viewerListPanel {{
 QWidget#viewerCanvasShell {{
     background: {canvas};
     border: 1px solid {border};
-    border-radius: 8px;
+    border-radius: {radius_card}px;
 }}
 
 QWidget#viewerTopControls,
@@ -390,9 +572,9 @@ QToolBar {{
 QToolBar QToolButton {{
     background: transparent;
     border: 1px solid transparent;
-    border-radius: 6px;
+    border-radius: {radius_control}px;
     color: {text};
-    padding: 5px 9px;
+    padding: 4px 8px;
     margin: 0 1px;
     font-weight: 500;
 }}
@@ -407,9 +589,11 @@ QToolBar QToolButton:pressed {{
     border-color: {accent_line};
 }}
 
+/* A checked toggle (Project, Context) is a soft fill, not a box: it was the
+   only bordered action in a borderless toolbar (plan C12). */
 QToolBar QToolButton:checked {{
     background: {accent_soft};
-    border-color: {accent_line};
+    border-color: transparent;
     color: {text_strong};
 }}
 
@@ -426,56 +610,56 @@ QToolBar::separator {{
 QLabel#appTitle {{
     background: transparent;
     color: {text_strong};
-    font-size: 12pt;
+    font-size: {type_title}pt;
     font-weight: 600;
     padding-right: 12px;
 }}
 
 QLabel#tabTitle {{
     color: {text_strong};
-    font-size: 11pt;
+    font-size: {type_lead}pt;
     font-weight: 600;
 }}
 
 QLabel#contextTitle {{
     color: {text_strong};
-    font-size: 11pt;
+    font-size: {type_lead}pt;
     font-weight: 600;
-    padding: 1px 0 7px 0;
+    padding: 0 0 8px 0;
     border-bottom: 1px solid {border};
 }}
 
 QLabel#metaSection {{
     color: {text_muted};
-    font-size: 8.5pt;
+    font-size: {type_caption}pt;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0;
-    padding: 6px 0 2px 0;
+    padding: 8px 0 4px 0;
 }}
 
 QLabel#metaKey {{
     color: {text_muted};
-    font-size: 9pt;
+    font-size: {type_caption}pt;
 }}
 
 QLabel#metaValue,
 QLabel#metaValuePath {{
     color: {text};
-    font-size: 9.5pt;
+    font-size: {type_body}pt;
 }}
 
 QLabel#metaPlain {{
     color: {text};
-    font-size: 9.5pt;
+    font-size: {type_body}pt;
 }}
 
 QToolButton#metaCopyButton {{
     background: transparent;
     border: 1px solid transparent;
-    border-radius: 5px;
+    border-radius: {radius_control}px;
     color: {text_muted};
-    font-size: 11pt;
+    font-size: {type_lead}pt;
     padding: 0;
 }}
 
@@ -488,7 +672,7 @@ QToolButton#metaCopyButton:hover {{
 QPushButton {{
     background: {surface};
     border: 1px solid {control_border};
-    border-radius: 6px;
+    border-radius: {radius_control}px;
     color: {text};
     padding: 0 12px;
     min-height: 28px;
@@ -529,21 +713,32 @@ QPushButton#primaryButton:hover {{
     color: {primary_text};
 }}
 
+/* A disabled primary action still reads as the primary one, muted, rather
+   than as a disabled secondary button (plan C13). */
 QPushButton#primaryButton:disabled {{
-    background: {surface};
-    border-color: {border};
+    background: {accent_soft};
+    border-color: {accent_line};
     color: {text_muted};
 }}
 
+/* Floating over the canvas, so it shares the floating-control size (32 px):
+   22 px of content, 4 px padding and a 1 px border on each side. */
 QPushButton#viewerToolButton {{
     background: {surface};
     border: 1px solid {border_strong};
-    border-radius: 8px;
+    border-radius: {radius_card}px;
     color: {text};
     min-width: 34px;
-    min-height: 28px;
+    min-height: 22px;
     padding: 4px 10px;
     font-weight: 600;
+}}
+
+/* Icon-only Overlays in a narrow canvas: a 32 px square, 30 px of content
+   and a 1 px border on each side. */
+QPushButton#viewerToolButton[compact="true"] {{
+    min-width: 30px;
+    padding: 4px 0;
 }}
 
 QPushButton#viewerToolButton:hover {{
@@ -572,13 +767,18 @@ QPushButton#viewerToolButton:checked:hover {{
 QPushButton#viewerZoomButton {{
     background: transparent;
     border: 0;
-    border-radius: 6px;
+    border-radius: {radius_control}px;
     color: {text};
     font-weight: 700;
-    min-width: 30px;
-    min-height: 28px;
+    min-width: 32px;
+    min-height: 32px;
     padding: 0;
     text-align: center;
+}}
+
+QFrame#viewerControlDivider {{
+    background: {border};
+    border: 0;
 }}
 
 QPushButton#viewerZoomButton:hover {{
@@ -602,13 +802,13 @@ QWidget#viewerZoomPanel,
 QLabel#viewerImageBadge {{
     background: {surface};
     border: 1px solid {border_strong};
-    border-radius: 8px;
+    border-radius: {radius_card}px;
 }}
 
 QLabel#imageExportPreview {{
     background: {canvas};
     border: 1px solid {border_strong};
-    border-radius: 8px;
+    border-radius: {radius_card}px;
     padding: 6px;
 }}
 
@@ -616,18 +816,60 @@ QWidget#viewerOverlayPanel {{
     padding: 2px;
 }}
 
+/* The Data collections disclosure in the Overlays panel. With no rule, the
+   native Windows 11 style drew it, and painted the checked (open) state in
+   the system accent blue in both themes. Every state names a fill and a
+   border, so the sheet always draws it: a rule without them hands the button
+   back to the native style (offscreen tests cannot see that). It reads as a
+   row of the panel, like the check boxes beside it, until hovered or open.
+   The arrow takes the text colour. */
+QToolButton#viewerOverlaySectionButton {{
+    background: {surface};
+    border: 1px solid {surface};
+    border-radius: {radius_control}px;
+    color: {text_muted};
+    padding: 2px 8px 2px 0;
+}}
+
+QToolButton#viewerOverlaySectionButton:hover {{
+    background: {surface_alt};
+    border-color: {border};
+    color: {text};
+}}
+
+QToolButton#viewerOverlaySectionButton:checked {{
+    background: {surface_alt};
+    border-color: {border};
+    color: {text_strong};
+}}
+
+QToolButton#viewerOverlaySectionButton:checked:hover {{
+    background: {surface_hi};
+    border-color: {border_strong};
+    color: {text_strong};
+}}
+
+/* Last and as specific as the states above, so keyboard focus always shows:
+   the id rule outranks the app-wide ``QToolButton:focus`` border. */
+QToolButton#viewerOverlaySectionButton:focus,
+QToolButton#viewerOverlaySectionButton:checked:focus {{
+    border-color: {accent};
+}}
+
 QLabel#viewerImageBadge {{
     color: {text};
     padding: 6px 10px;
     font-family: {mono_font};
-    font-size: 9pt;
+    font-size: {type_caption}pt;
 }}
 
+/* No min-width here: the viewer fixes this label's size in code, and a width
+   rule would undo that on every polish, letting each zoom step re-lay out the
+   whole window (plan F5.1). */
 QLabel#viewerZoomLabel {{
     color: {text_muted};
     font-family: {mono_font};
-    font-size: 8pt;
-    min-width: 0;
+    font-size: {type_caption}pt;
     padding: 0;
 }}
 
@@ -644,7 +886,7 @@ QCheckBox::indicator {{
     width: 14px;
     height: 14px;
     border: 1px solid {border_strong};
-    border-radius: 4px;
+    border-radius: {radius_control}px;
     background: {surface};
 }}
 
@@ -707,10 +949,15 @@ QPlainTextEdit,
 QLineEdit {{
     background: {surface};
     border: 1px solid {border};
-    border-radius: 8px;
+    border-radius: {radius_card}px;
     color: {text};
     selection-background-color: {selection};
     selection-color: {selection_text};
+}}
+
+/* An input is a control, not a panel. */
+QLineEdit {{
+    border-radius: {radius_control}px;
 }}
 
 QTreeWidget {{
@@ -721,7 +968,7 @@ QTreeWidget {{
 
 QTreeWidget::item {{
     min-height: 24px;
-    border-radius: 6px;
+    border-radius: {radius_control}px;
     padding: 3px 5px;
 }}
 
@@ -809,7 +1056,7 @@ QScrollBar:horizontal {{
 QScrollBar::handle:vertical,
 QScrollBar::handle:horizontal {{
     background: {scroll_thumb};
-    border-radius: 5px;
+    border-radius: 5px; /* pill */
     min-height: 28px;
     min-width: 28px;
 }}
@@ -838,7 +1085,7 @@ QScrollBar::sub-page:horizontal {{
 
 QPlainTextEdit {{
     font-family: {mono_font};
-    font-size: 9.5pt;
+    font-size: {type_body}pt;
     line-height: 140%;
     padding: 8px;
 }}
@@ -846,14 +1093,14 @@ QPlainTextEdit {{
 QGraphicsView {{
     background: {surface};
     border: 1px solid {border};
-    border-radius: 6px;
+    border-radius: {radius_card}px;
 }}
 
 QLabel#viewerStatus {{
     color: {text_muted};
     background: {surface};
     border: 1px solid {border};
-    border-radius: 8px;
+    border-radius: {radius_card}px;
     padding: 6px 8px;
 }}
 
@@ -861,19 +1108,19 @@ QLabel#frameLabel {{
     color: {text};
     background: {surface};
     border: 1px solid {border};
-    border-radius: 8px;
+    border-radius: {radius_card}px;
     padding: 5px 8px;
 }}
 
 QFrame#dashboardCard {{
     background: {surface};
     border: 1px solid {border};
-    border-radius: 8px;
+    border-radius: {radius_card}px;
 }}
 
 QLabel#cardTitle {{
     color: {text_muted};
-    font-size: 8.5pt;
+    font-size: {type_caption}pt;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0;
@@ -881,20 +1128,20 @@ QLabel#cardTitle {{
 
 QLabel#doseCardHeading {{
     color: {text_muted};
-    font-size: 8.5pt;
+    font-size: {type_caption}pt;
     font-weight: 600;
     letter-spacing: 0;
 }}
 
 QLabel#cardValue {{
     color: {text_strong};
-    font-size: 22pt;
+    font-size: {type_display}pt;
     font-weight: 600;
 }}
 
 QLabel#cardSubvalue {{
     color: {text_muted};
-    font-size: 9.5pt;
+    font-size: {type_caption}pt;
 }}
 
 QSplitter::handle {{
@@ -922,7 +1169,7 @@ QSplitter::handle:hover {{
 QProgressBar {{
     background: {surface};
     border: 1px solid {border_strong};
-    border-radius: 5px;
+    border-radius: 5px; /* pill */
     color: {text_muted};
     min-height: 8px;
     max-height: 10px;
@@ -931,23 +1178,23 @@ QProgressBar {{
 
 QProgressBar::chunk {{
     background: {accent};
-    border-radius: 4px;
+    border-radius: 4px; /* pill */
 }}
 
 QSlider::groove:horizontal {{
     height: 6px;
     background: {border};
-    border-radius: 3px;
+    border-radius: 3px; /* pill */
 }}
 
 QSlider::sub-page:horizontal {{
     background: {accent};
-    border-radius: 3px;
+    border-radius: 3px; /* pill */
 }}
 
 QSlider::add-page:horizontal {{
     background: {border};
-    border-radius: 3px;
+    border-radius: 3px; /* pill */
 }}
 
 QSlider::handle:horizontal {{
@@ -956,12 +1203,12 @@ QSlider::handle:horizontal {{
     width: 16px;
     height: 16px;
     margin: -6px 0;
-    border-radius: 8px;
+    border-radius: 8px; /* pill */
 }}
 
 QSlider#frameScrubber::sub-page:horizontal {{
     background: {border};
-    border-radius: 3px;
+    border-radius: 3px; /* pill */
 }}
 
 QStatusBar {{
@@ -984,11 +1231,10 @@ QLabel#viewerChipStatus,
 QLabel#tabCountChip {{
     background: {surface};
     border: 1px solid {border};
-    border-radius: 10px;
+    border-radius: {radius_control}px;
     color: {text_muted};
     padding: 3px 8px;
-    font-family: {mono_font};
-    font-size: 9pt;
+    font-size: {type_caption}pt;
 }}
 
 QLabel#smallChip,
@@ -1007,7 +1253,7 @@ QLabel#viewerChipStatus {{
 }}
 
 QFrame#sessionPill {{
-    border-radius: 15px;
+    border-radius: 15px; /* pill */
     min-height: 26px;
 }}
 
@@ -1020,15 +1266,14 @@ QLabel#sessionPillIcon {{
 }}
 
 QLabel#sessionPillText {{
-    font-family: {mono_font};
-    font-size: 9pt;
+    font-size: {type_caption}pt;
 }}
 
 QLabel#screenEyebrow,
 QLabel#panelHeader,
 QLabel#viewerPanelHeader {{
     color: {text_muted};
-    font-size: 8.5pt;
+    font-size: {type_caption}pt;
     font-weight: 700;
     letter-spacing: 0;
     text-transform: uppercase;
@@ -1062,39 +1307,39 @@ QLabel#viewerPanelHeader {{
 
 QLabel[tier="landmark"] {{
     color: {text_strong};
-    font-size: 11pt;
+    font-size: {type_lead}pt;
     font-weight: 600;
 }}
 
 QLabel[tier="primary"] {{
     color: {text};
-    font-size: 10pt;
+    font-size: {type_body}pt;
     font-weight: 500;
 }}
 
 QLabel[tier="supporting"] {{
     color: {text_muted};
-    font-size: 8.5pt;
+    font-size: {type_caption}pt;
 }}
 
 /* Dashboard row typography. Previously set with inline style sheets, which
    put type decisions in a fourth place and baked the palette in at
    construction so a theme switch left them stale. */
 QLabel#statusDot {{
-    font-size: 11pt;
+    font-size: {type_lead}pt;
 }}
 
 QLabel#statusDot[compact="true"] {{
-    font-size: 10pt;
+    font-size: {type_body}pt;
 }}
 
 QLabel#progressRowName {{
-    font-size: 10pt;
+    font-size: {type_body}pt;
     font-weight: 600;
 }}
 
 QLabel#progressRowName[compact="true"] {{
-    font-size: 9.2pt;
+    font-size: {type_caption}pt;
 }}
 
 QLabel#warningGroupLabel {{
@@ -1103,7 +1348,7 @@ QLabel#warningGroupLabel {{
 
 QLabel#statStatusText {{
     color: {text};
-    font-size: 9pt;
+    font-size: {type_caption}pt;
 }}
 
 /* One visually primary action per screen; related context is subordinate.
@@ -1112,7 +1357,7 @@ QPushButton#primaryAction {{
     background: {accent};
     color: {primary_text};
     border: 1px solid {accent};
-    border-radius: 5px;
+    border-radius: {radius_control}px;
     padding: 5px 14px;
     font-weight: 600;
 }}
@@ -1128,9 +1373,9 @@ QPushButton#primaryAction:pressed {{
 }}
 
 QPushButton#primaryAction:disabled {{
-    background: {surface_alt};
+    background: {accent_soft};
     color: {text_muted};
-    border-color: {border};
+    border-color: {accent_line};
 }}
 
 QPushButton#secondaryAction {{
@@ -1146,6 +1391,155 @@ QPushButton#secondaryAction:hover {{
     text-decoration: underline;
 }}
 
+/* Session drop: the empty project panel's invitation, and what a drop
+   skipped (widgets/session_drop.py). Tone colours: _session_intake_rules. */
+QWidget#projectDropHint {{
+    background: transparent;
+}}
+
+QLabel#dropHintTitle {{
+    color: {text};
+    font-size: {type_lead}pt;
+    font-weight: 600;
+}}
+
+QLabel#dropHintDetail {{
+    color: {text_muted};
+    font-size: {type_caption}pt;
+}}
+
+QLabel#dropHintShortcut {{
+    color: {text_muted};
+    border: 1px solid {border};
+    border-radius: {radius_control}px;
+    padding: 1px 6px;
+    font-size: {type_caption}pt;
+}}
+
+QFrame#dropReceipt {{
+    background: {surface_alt};
+    border: 1px solid {border_strong};
+    border-radius: {radius_card}px;
+}}
+
+QFrame#dropReceiptSection {{
+    background: transparent;
+    border: none;
+    border-top: 1px solid {border};
+}}
+
+QLabel#dropReceiptTitle {{
+    color: {text_strong};
+    font-weight: 600;
+}}
+
+QLabel#dropReceiptLines {{
+    color: {text_muted};
+    font-size: {type_caption}pt;
+}}
+
+/* The Load sessions window (ui/load_sessions_dialog.py). */
+QDialog#loadSessionsDialog,
+QWidget#loadSessionsBody {{
+    background: {surface};
+}}
+
+QLabel#loadSessionsEmblem {{
+    background: {accent_soft};
+    border: 1px solid {accent_line};
+    border-radius: {radius_card}px;
+}}
+
+QLabel#loadSessionsTitle {{
+    color: {text_strong};
+    font-size: {type_heading}pt;
+    font-weight: 600;
+}}
+
+QLabel#loadSessionsSubtitle,
+QLabel#loadSessionsFooterNote {{
+    color: {text_muted};
+}}
+
+QFrame#loadSessionsDropWell {{
+    background: {panel};
+    border: none;
+    border-radius: {radius_card}px;
+    min-height: 112px;
+}}
+
+QLabel#dropWellTitle {{
+    color: {text_strong};
+    font-size: {type_lead}pt;
+    font-weight: 600;
+}}
+
+QLabel#dropWellHint,
+QLabel#queuedFolderPath,
+QLabel#queuedFolderKind {{
+    color: {text_muted};
+    font-size: {type_caption}pt;
+}}
+
+QLabel#loadSessionsQueueHeading {{
+    color: {text_muted};
+    font-size: {type_caption}pt;
+    font-weight: 700;
+}}
+
+QLabel#queueCount {{
+    font-size: {type_caption}pt;
+}}
+
+QScrollArea#queuedFolderScroll {{
+    background: transparent;
+}}
+
+QFrame#queuedFolderList {{
+    background: {panel};
+    border: 1px solid {border};
+    border-radius: {radius_card}px;
+}}
+
+QFrame#queuedFolderRow {{
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid {border};
+}}
+
+QFrame#queuedFolderRow[last="true"] {{
+    border-bottom: none;
+}}
+
+QLabel#queuedFolderBadge {{
+    background: {surface_hi};
+    border: 1px solid {border_strong};
+    border-radius: {radius_control}px;
+    color: {text};
+    font-size: {type_caption}pt;
+    font-weight: 700;
+}}
+
+QLabel#queuedFolderBadge[empty="true"] {{
+    background: transparent;
+    border: 1px dashed {unknown};
+    color: {text_muted};
+}}
+
+QLabel#queuedFolderName {{
+    color: {text_strong};
+}}
+
+QLabel#queuedFolderReason {{
+    font-size: {type_caption}pt;
+}}
+
+QFrame#loadSessionsFooter {{
+    background: {panel};
+    border: none;
+    border-top: 1px solid {border};
+}}
+
 /* Empty-state panel. Restrained: no illustration, no oversized chrome. */
 QWidget#emptyStatePanel {{
     background: transparent;
@@ -1153,18 +1547,18 @@ QWidget#emptyStatePanel {{
 
 QLabel#emptyStateTitle {{
     color: {text_strong};
-    font-size: 11pt;
+    font-size: {type_lead}pt;
     font-weight: 600;
 }}
 
 QLabel#emptyStateDetail {{
     color: {text};
-    font-size: 9.5pt;
+    font-size: {type_body}pt;
 }}
 
 QLabel#emptyStateEvidence {{
     color: {text_muted};
-    font-size: 8.5pt;
+    font-size: {type_caption}pt;
 }}
 
 /* Status chips. Completing available/queued/pending/selected so a chip's
@@ -1173,26 +1567,26 @@ QLabel#emptyStateEvidence {{
 QLabel[chipState="available"] {{
     color: {overlay_status_complete};
     border: 1px solid {overlay_status_complete};
-    border-radius: 4px;
+    border-radius: {radius_control}px;
     padding: 0 5px;
-    font-size: 8pt;
+    font-size: {type_caption}pt;
 }}
 
 QLabel[chipState="queued"], QLabel[chipState="pending"] {{
     color: {overlay_status_pending};
     border: 1px solid {overlay_status_pending};
-    border-radius: 4px;
+    border-radius: {radius_control}px;
     padding: 0 5px;
-    font-size: 8pt;
+    font-size: {type_caption}pt;
 }}
 
 QLabel[chipState="selected"] {{
     color: {primary_text};
     background: {accent};
     border: 1px solid {accent};
-    border-radius: 4px;
+    border-radius: {radius_control}px;
     padding: 0 5px;
-    font-size: 8pt;
+    font-size: {type_caption}pt;
     font-weight: 600;
 }}
 
@@ -1208,7 +1602,7 @@ QFrame#dashboardCard[cardEmpty="true"] {{
 
 QLabel#projectBadgeLegend {{
     color: {text_muted};
-    font-size: 8pt;
+    font-size: {type_caption}pt;
 }}
 
 QWidget#contextHeader {{
@@ -1218,23 +1612,23 @@ QWidget#contextHeader {{
 
 QLabel#contextScope {{
     color: {text_strong};
-    font-size: 9.5pt;
+    font-size: {type_body}pt;
     font-weight: 600;
 }}
 
 QLabel#contextCrumbs {{
     color: {text};
-    font-size: 9.5pt;
+    font-size: {type_body}pt;
 }}
 
 QLabel#contextNotes {{
     color: {text_muted};
-    font-size: 8.5pt;
+    font-size: {type_caption}pt;
 }}
 
 QPushButton#contextClearFilter {{
     color: {accent};
-    font-size: 8.5pt;
+    font-size: {type_caption}pt;
     font-weight: 600;
     border: none;
     padding: 0 4px;
@@ -1247,54 +1641,51 @@ QPushButton#contextClearFilter:hover {{
 
 QLabel#screenTitle {{
     color: {text_strong};
-    font-size: 21pt;
+    font-size: {type_display}pt;
     font-weight: 600;
 }}
 
 QLabel#viewerTitle {{
     color: {text_strong};
-    font-size: 15pt;
+    font-size: {type_heading}pt;
     font-weight: 600;
 }}
 
 QLabel#panelCount {{
     background: {surface};
     border: 1px solid {border};
-    border-radius: 9px;
+    border-radius: 9px; /* pill */
     color: {text_muted};
     padding: 2px 7px;
-    font-family: {mono_font};
-    font-size: 8.5pt;
+    font-size: {type_caption}pt;
 }}
 
 QLabel#sampleCount {{
     color: {text_muted};
-    font-family: {mono_font};
-    font-size: 9pt;
+    font-size: {type_caption}pt;
 }}
 
 QLabel#sampleBadge {{
     background: {surface_alt};
     border: 1px solid {border};
-    border-radius: 11px;
+    border-radius: 11px; /* pill */
     color: {text};
     padding: 0px 8px;
-    font-family: {mono_font};
-    font-size: 8.5pt;
+    font-size: {type_caption}pt;
     min-height: 22px;
 }}
 
 QLabel#healthValue {{
     color: {text_strong};
     font-family: {mono_font};
-    font-size: 14pt;
+    font-size: {type_title}pt;
     font-weight: 700;
 }}
 
 QToolButton#dashboardFilterButton {{
     background: {surface_alt};
     border: 1px solid {border};
-    border-radius: 8px;
+    border-radius: {radius_control}px;
     color: {text};
     padding: 4px 9px;
     font-weight: 600;
@@ -1319,10 +1710,9 @@ QToolButton#dashboardFilterButton:disabled {{
 QLabel#searchMapSummaryChip {{
     background: {surface_alt};
     border: 1px solid {border};
-    border-radius: 8px;
+    border-radius: {radius_control}px;
     padding: 3px 8px;
-    font-family: {mono_font};
-    font-size: 8.5pt;
+    font-size: {type_caption}pt;
     font-weight: 600;
 }}
 
@@ -1330,7 +1720,7 @@ QTableView#dashboardSearchMapTable {{
     background: {surface};
     alternate-background-color: {surface_alt};
     border: 1px solid {border};
-    border-radius: 8px;
+    border-radius: {radius_card}px;
     color: {text};
     gridline-color: {border};
     selection-background-color: {accent_soft};
@@ -1345,7 +1735,7 @@ QLineEdit#treeSearch,
 QLineEdit#viewerFilter {{
     background: {surface};
     border: 1px solid {border};
-    border-radius: 8px;
+    border-radius: {radius_control}px;
     color: {text};
     padding: 6px 10px;
     min-height: 24px;
@@ -1367,12 +1757,35 @@ QTreeWidget#viewerList {{
 QTreeWidget#projectTree::item,
 QTreeWidget#viewerList::item {{
     min-height: 30px;
-    border-radius: 6px;
+    border-radius: {radius_control}px;
     padding: 5px 8px;
 }}
 
 QTreeWidget#viewerList::item {{
     min-height: 44px;
+}}
+
+/* Hover on these two views is painted by their delegates, faded by
+   ``ui.motion.ItemHoverAnimator``. The generic :hover rule would otherwise
+   paint a second, snapping layer per column and over the branch area. */
+QTreeWidget#projectTree::item:hover,
+QTreeWidget#viewerList::item:hover {{
+    background: transparent;
+}}
+
+/* The main project tree paints its selection as one row-wide fill in its
+   delegate (plan C9). Per-column ``::item:selected`` fills drew the name and
+   the badge as two rounded cells with a seam between them, and
+   ``show-decoration-selected`` added a third block over the expander. The
+   property keeps the report dialog's tree, which shares the object name but
+   has no such delegate, on the sheet's own selection. */
+QTreeWidget#projectTree[paintsRowSelection="true"] {{
+    show-decoration-selected: 0;
+}}
+
+QTreeWidget#projectTree[paintsRowSelection="true"]::item:selected {{
+    background: transparent;
+    color: {selection_text};
 }}
 
 QTabWidget::pane {{
@@ -1396,11 +1809,16 @@ QTabBar::tab:selected {{
     border-bottom: 2px solid {accent};
 }}
 
+/* The main tab bar (#mainTabBar) paints its own tab fills and a sliding
+   underline on springs, and takes only each tab's label from these rules
+   (plan F5.3, ui/widgets/sliding_tab_bar.py). The fills and underline above
+   still style every other tab bar, such as the report dialog's. */
+
 QTabBar QToolButton {{
     background: {surface_alt};
     color: {text};
     border: 1px solid {control_border};
-    border-radius: 4px;
+    border-radius: {radius_control}px;
     margin: 2px;
     padding: 0;
 }}
@@ -1418,7 +1836,7 @@ QPushButton#dashboardFilterButton {{
     background: {surface_alt};
     color: {text};
     border: 1px solid {control_border};
-    border-radius: 6px;
+    border-radius: {radius_control}px;
     min-height: 28px;
     padding: 0 10px;
 }}
@@ -1438,36 +1856,29 @@ QWidget#acquisitionTimeline:focus {{
 QFrame#dashboardCard {{
     background: {surface};
     border: 1px solid {border};
-    border-radius: 8px;
+    border-radius: {radius_card}px;
 }}
 
 QFrame#warningGroup {{
     background: {surface_alt};
     border: 1px solid {border};
-    border-radius: 7px;
+    border-radius: {radius_card}px;
 }}
 
 QLabel#warningCount {{
     background: transparent;
     border: 1px solid {border};
-    border-radius: 11px;
+    border-radius: 11px; /* pill */
     padding: 2px 8px;
-    font-family: {mono_font};
-    font-size: 8.5pt;
+    font-size: {type_caption}pt;
     font-weight: 700;
     min-height: 18px;
-}}
-
-QLabel#cardValue {{
-    font-family: {mono_font};
-    font-size: 26pt;
-    font-weight: 600;
 }}
 
 QGraphicsView {{
     background: {canvas};
     border: 0;
-    border-radius: 8px;
+    border-radius: {radius_card}px;
 }}
 
 QWidget#centralShell,
@@ -1492,11 +1903,30 @@ QScrollArea#metadataScroll {{
 
 
 def build_stylesheet(palette: ThemePalette) -> str:
-    return _QSS_TEMPLATE.format(
+    sheet = _QSS_TEMPLATE.format(
         **palette.__dict__,
         sans_font=SANS_FONT_FAMILY,
         mono_font=MONO_FONT_FAMILY,
         check_icon=_check_indicator_path(palette),
+        radius_control=RADIUS_CONTROL,
+        radius_card=RADIUS_CARD,
+        radius_popover=RADIUS_POPOVER,
+        type_caption=TYPE_CAPTION,
+        type_body=TYPE_BODY,
+        type_lead=TYPE_LEAD,
+        type_title=TYPE_TITLE,
+        type_heading=TYPE_HEADING,
+        type_display=TYPE_DISPLAY,
+    )
+    # After the base ``viewerChipStatus`` rule they refine.
+    return (
+        sheet
+        + "\n"
+        + _status_tone_rules(palette)
+        + "\n"
+        + _dashboard_tone_rules(palette)
+        + "\n"
+        + _session_intake_rules(palette)
     )
 
 
@@ -1580,6 +2010,106 @@ def current_palette() -> ThemePalette:
     return _active_palette
 
 
+_DEFERRED_POLISH_PROPERTY: Final[str] = "_tomo_polish_deferred"
+_STALE_REGION_PROPERTY: Final[str] = "_tomo_theme_region_stale"
+
+
+class _ThemeRegions(QObject):
+    """Parts of the window restyled when shown, not at every theme switch.
+
+    Restyling the application re-polishes every polished widget, visible or
+    not: about 270 ms on a loaded session, two thirds of it for widgets on
+    tab pages nobody is looking at. Qt's application-wide re-polish passes
+    over widgets not marked polished, so just before a switch the widgets of
+    hidden regions lose that mark; each is polished once with the new style
+    when its region is next shown, before it paints. Themes differ only in
+    colour, so nothing moves when a region catches up.
+
+    The widgets are also flagged as having a style of their own for the
+    switch only, which keeps them out of its style-change round too. Both
+    flags are Qt's own and are given back at once (after the switch, or when
+    shown): this relies on how ``QApplication::setStyle`` picks widgets, so
+    re-check it on Qt upgrades (``tests/test_theme_regions.py`` does, in a
+    fresh process; if Qt changes, a switch is only slower, or that test sees
+    a stale colour).
+
+    (Giving a region a style sheet of its own does *not* work: Qt then
+    re-applies that sheet to each of its widgets at every switch, by the slow
+    path, and a switch took 1.8 s instead of 0.3 s.)
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._regions: list[QWidget] = []
+        self._borrowed_set_style: list[QWidget] = []
+
+    def add(self, widget: QWidget) -> None:
+        widget.installEventFilter(self)
+        self._regions.append(widget)
+
+    def before_switch(self) -> None:
+        self._regions = [region for region in self._regions if shiboken6.isValid(region)]
+        for region in self._regions:
+            if region.isVisible() or region.property(_STALE_REGION_PROPERTY):
+                continue
+            for widget in (region, *region.findChildren(QWidget)):
+                if widget.testAttribute(Qt.WidgetAttribute.WA_WState_Polished):
+                    widget.setAttribute(Qt.WidgetAttribute.WA_WState_Polished, False)
+                    widget.setProperty(_DEFERRED_POLISH_PROPERTY, True)
+                # Also out of the switch's style-change round, which makes
+                # each widget recompute its sizes against the new sheet.
+                if not widget.testAttribute(Qt.WidgetAttribute.WA_SetStyle):
+                    widget.setAttribute(Qt.WidgetAttribute.WA_SetStyle, True)
+                    self._borrowed_set_style.append(widget)
+            region.setProperty(_STALE_REGION_PROPERTY, True)
+
+    def after_switch(self) -> None:
+        for widget in self._borrowed_set_style:
+            if shiboken6.isValid(widget):
+                widget.setAttribute(Qt.WidgetAttribute.WA_SetStyle, False)
+        self._borrowed_set_style = []
+
+    def stale(self, widget: QWidget) -> bool:
+        return bool(widget.property(_STALE_REGION_PROPERTY))
+
+    def refresh(self, region: QWidget) -> None:
+        """Polish what the switch passed over in ``region``, with the current style."""
+
+        if not self.stale(region):
+            return
+        region.setProperty(_STALE_REGION_PROPERTY, None)
+        deferred = [
+            widget
+            for widget in (region, *region.findChildren(QWidget))
+            if widget.property(_DEFERRED_POLISH_PROPERTY)
+        ]
+        for widget in deferred:
+            widget.setProperty(_DEFERRED_POLISH_PROPERTY, None)
+            widget.style().polish(widget)
+            widget.setAttribute(Qt.WidgetAttribute.WA_WState_Polished, True)
+        change = QEvent(QEvent.Type.StyleChange)
+        for widget in deferred:
+            QApplication.sendEvent(widget, change)
+            widget.update()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt API
+        if event.type() == QEvent.Type.Show and isinstance(watched, QWidget) and self.stale(watched):
+            self.refresh(watched)
+        return False
+
+
+_THEME_REGIONS = _ThemeRegions()
+
+
+def mark_theme_region(widget: QWidget) -> None:
+    """Restyle ``widget`` (and everything in it) only while or when it shows.
+
+    For large parts of the window that are often hidden, such as tab pages.
+    """
+
+    _THEME_REGIONS.add(widget)
+
+
 def apply_theme(app: QApplication, palette: ThemePalette | None = None) -> ThemePalette:
     """Install the stylesheet for ``palette`` on ``app`` and update icon colour.
 
@@ -1590,8 +2120,25 @@ def apply_theme(app: QApplication, palette: ThemePalette | None = None) -> Theme
     global _active_palette  # noqa: PLW0603 — module-level state mirrors Qt
     chosen = palette or DARK_PALETTE
     _active_palette = chosen
-    app.setFont(QFont(SANS_FONT_NAME, 10))
-    app.setStyleSheet(build_stylesheet(chosen))
+    app.setFont(QFont(SANS_FONT_NAME, TYPE_BODY))
+    sheet = build_stylesheet(chosen)
+    current = app.styleSheet()
+    if current != sheet:
+        # Hidden theme regions are left out, and caught up when shown.
+        _THEME_REGIONS.before_switch()
+        try:
+            if current:
+                # Replacing one application style sheet with another
+                # re-polishes every widget once per ancestor as well (Qt's
+                # style-sheet style recurses into the children of every
+                # widget it already lists): 1.2–1.5 s on a loaded session
+                # (plan F5.8a). Clearing it first takes the path that polishes
+                # each widget once, ~0.35 s for both steps. Nothing paints in
+                # between.
+                app.setStyleSheet("")
+            app.setStyleSheet(sheet)
+        finally:
+            _THEME_REGIONS.after_switch()
     # Late import keeps ``theme`` free of UI-only dependencies at import time.
     from tomography_session_browser.ui.icons import set_default_icon_color
 

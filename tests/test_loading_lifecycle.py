@@ -97,6 +97,10 @@ def test_session_tab_context_refresh_runs_after_activation_returns(
         "_sync_context_panel_to_active_scope",
         lambda: calls.append("sync"),
     )
+    # An empty viewer tab describes the scope as well (see
+    # tests/test_tab_context_sync.py); kept out, so only the Session tab's
+    # own refresh is counted here.
+    monkeypatch.setattr(window, "_describe_tab_display", lambda *_args: None)
 
     tilt_index = main_window.TAB_LABELS.index("Tilt series")
     session_index = main_window.TAB_LABELS.index("Session")
@@ -273,6 +277,46 @@ def test_loading_dashboard_defers_heavy_cards_until_overlay_hidden(monkeypatch, 
     assert calls == [True, False]
 
 
+def test_the_hand_off_finishes_the_dashboard_under_the_overlay(monkeypatch, tmp_path: Path) -> None:
+    """Plan F6.3: the held-back charts are built as the overlay starts to
+    leave, at once and without a second entrance, so the page it reveals is
+    finished; and a leaving overlay holds nothing back."""
+
+    app = _app()
+    session = _large_session(tmp_path, search_maps=8, batch_positions=6, tilt_series=24)
+    prepared = _prepare_session_ui_payload([session], session)
+    window = MainWindow()
+    window._sessions = [session]
+    window._session = session
+    window._active_context = session
+    window._rebuild_sample_index()
+    window.show()
+    app.processEvents()
+    calls: list[tuple[bool, bool]] = []
+
+    def record_dashboard_model(*args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        calls.append((bool(kwargs.get("defer_heavy_cards", False)), bool(kwargs.get("animate", False))))
+
+    monkeypatch.setattr(window.session_dashboard, "set_model", record_dashboard_model)
+    window._loading_task_active = True
+    window._begin_loading("Loading session...")
+    window._render_session_summary(animate_dashboard=True, prepared=prepared)
+    window._loading_task_active = False
+    window.loading_overlay._minimum_visible_ms = 0
+
+    window.loading_overlay.hide_loading(fade=True)
+    assert not window._loading_overlay_active(), "a leaving overlay holds nothing back"
+    deadline = time.monotonic() + 2.0
+    while len(calls) < 2 and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.002)
+
+    assert calls == [(True, False), (False, False)], "without an entrance"
+    assert window.loading_overlay.isVisible(), "under the overlay, before it has gone"
+    window.loading_overlay.hide_loading(fade=False)
+    window.close()
+
+
 def test_staged_loader_splits_session_summary_into_tree_and_dashboard_steps() -> None:
     """The staged loader must run the summary tree rebuild and the
     dashboard widget rebuild as separate stages.
@@ -333,7 +377,8 @@ def test_loading_overlay_records_animation_timer_gaps(monkeypatch) -> None:
     _app()
     overlay = loading_overlay_module.LoadingOverlay()
     assert overlay.accessibleName() == "Loading overlay"
-    assert "metadata" in overlay.accessibleDescription()
+    # The stage rail replaced the footer (plan F6.1); screen readers hear it.
+    assert "Stage 1 of 5: Discover." in overlay.accessibleDescription()
     timestamps = iter([0.0, 0.042, 0.184])
     monkeypatch.setattr(loading_overlay_module.time, "monotonic", lambda: next(timestamps))
 
@@ -548,3 +593,30 @@ def _app() -> QApplication:
     if app is None:
         app = QApplication([])
     return app
+
+
+def test_loading_completion_message_clears_itself(monkeypatch) -> None:
+    """F1.10: "Loading complete" used to stay in the status bar indefinitely.
+
+    Since F5.9 it is a toast, which fades away; the status bar keeps nothing.
+    """
+
+    from tomography_session_browser.ui.widgets import toast
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(toast, "TOAST_MS", 60)
+    window = MainWindow()
+    window.show()
+
+    window._finish_loading("Loading complete", fade=False)
+    assert window.toast.text == "Loading complete" and window.toast.isVisible()
+    assert window.statusBar().currentMessage() == ""
+
+    deadline = time.monotonic() + 3.0
+    while window.toast.isVisible() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+
+    assert not window.toast.isVisible()
+    assert window.statusBar().currentMessage() == ""
+    window.close()

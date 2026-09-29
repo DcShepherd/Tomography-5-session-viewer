@@ -34,10 +34,10 @@ from tomography_session_browser.ui.widgets.time_chart import (
 
 LOGGER = logging.getLogger(__name__)
 
-# Above this count, individual colour-and-shape painter calls are visibly
-# expensive but the 2–4 px symbols are too small for their silhouettes to be
-# useful. Dense plots therefore use the earlier, simple-circle visual language
-# and submit one point batch per series.
+# Above this count, individual painter calls are visibly expensive, so dense
+# plots submit one point batch per series. Every plot draws its points as
+# circles, matching the circular highlight ring; series are told apart by
+# colour and the legend.
 _DENSE_POINT_BATCH_THRESHOLD = 500
 
 
@@ -46,6 +46,8 @@ class DefocusScatterPlot(QWidget):
 
     pointClicked = Signal(str, object)  # tilt_series_id, 1-based frame_index | None
     pointDoubleClicked = Signal(str, object)  # tilt_series_id, 1-based frame_index | None
+    # Right-click or Escape: drop the highlighted tilt series and point.
+    highlightClearRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -70,7 +72,8 @@ class DefocusScatterPlot(QWidget):
         self.setAccessibleDescription(
             "Scatter plot of per-image Defocus metadata values. "
             "Double-click a point to open its linked tilt series, or use Left or Right "
-            "to inspect points and Enter to open one."
+            "to inspect points and Enter to open one. "
+            "Right-click or press Escape to clear the highlight."
         )
 
     # ------------------------------------------------------------------ API
@@ -284,8 +287,8 @@ class DefocusScatterPlot(QWidget):
 
         radius, alpha = _point_style(len(model.points))
         palette = self._series_palette()
-        series_styles = {
-            label: (_color_for_label(label, palette), _series_index(label, 4))
+        series_colors = {
+            label: _color_for_label(label, palette)
             for label in {point.sample_name for point in model.points}
         }
         painter.setPen(Qt.PenStyle.NoPen)
@@ -296,17 +299,12 @@ class DefocusScatterPlot(QWidget):
             y_frac = 0.5 if y_max <= y_min else (y_value - y_min) / (y_max - y_min)
             x = plot.left() + plot.width() * max(0.0, min(x_frac, 1.0))
             y = plot.bottom() - plot.height() * max(0.0, min(y_frac, 1.0))
-            base_color, shape_index = series_styles[point.sample_name]
-            color = QColor(base_color)
+            color = QColor(series_colors[point.sample_name])
             highlighted = self._point_is_highlighted(point)
             color.setAlpha(self._point_alpha(point, alpha))
             painter.setBrush(color)
             rect = QRectF(x - radius, y - radius, radius * 2, radius * 2)
-            _draw_point_symbol(
-                painter,
-                rect,
-                shape_index,
-            )
+            painter.drawEllipse(rect)
             keyboard_highlighted = point_index == self._keyboard_point_index and self.hasFocus()
             if highlighted or keyboard_highlighted:
                 from tomography_session_browser.ui.theme import current_palette
@@ -547,15 +545,7 @@ class DefocusScatterPlot(QWidget):
             dot.setAlpha(230)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(dot)
-            symbol_rect = QRectF(x, y + 4, 7, 7)
-            if len(model.points) > _DENSE_POINT_BATCH_THRESHOLD:
-                painter.drawEllipse(symbol_rect)
-            else:
-                _draw_point_symbol(
-                    painter,
-                    symbol_rect,
-                    _series_index(label, 4),
-                )
+            painter.drawEllipse(QRectF(x, y + 4, 7, 7))
             painter.setPen(colors["label"])
             painter.drawText(QPointF(x + 13, y + metrics.ascent() + 1), text)
             x += chip_width + 8
@@ -595,6 +585,12 @@ class DefocusScatterPlot(QWidget):
         return super().event(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        if event.button() == Qt.MouseButton.RightButton:
+            # Anywhere on the plot. A highlight used to be clearable only by
+            # clicking the same series again or from the project tree.
+            self._request_highlight_clear()
+            event.accept()
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             super().mousePressEvent(event)
             return
@@ -615,6 +611,12 @@ class DefocusScatterPlot(QWidget):
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        if event.key() == Qt.Key.Key_Escape and (
+            self._keyboard_point_index >= 0 or self._highlighted_tilt_series_id
+        ):
+            self._request_highlight_clear()
+            event.accept()
+            return
         points = list(self._model.points) if self._model is not None else []
         if not points:
             super().keyPressEvent(event)
@@ -675,6 +677,19 @@ class DefocusScatterPlot(QWidget):
         else:
             QToolTip.showText(event.globalPos(), "No linked tilt series", self)
         event.accept()
+
+    def _request_highlight_clear(self) -> None:
+        """Clear this plot's point ring and ask for the series highlight to go.
+
+        The series highlight belongs to the main window (it also marks the
+        project tree and the other plots), so it is cleared through the
+        signal rather than locally.
+        """
+
+        self._keyboard_point_index = -1
+        QToolTip.hideText()
+        self.update()
+        self.highlightClearRequested.emit()
 
     def _point_at(self, pos) -> Any | None:
         key = _bin_key(pos.x(), pos.y())
@@ -839,40 +854,6 @@ def _series_index(label: str, count: int) -> int:
         return 0
     digest = sha1(label.encode("utf-8", errors="replace")).digest()
     return int.from_bytes(digest[:2], "big") % count
-
-
-def _draw_point_symbol(painter: QPainter, rect: QRectF, shape_index: int) -> None:
-    """Draw a compact colour-independent series symbol."""
-
-    shape_index %= 4
-    if shape_index == 0:
-        painter.drawEllipse(rect)
-        return
-    if shape_index == 1:
-        painter.drawRect(rect)
-        return
-    center = rect.center()
-    if shape_index == 2:
-        painter.drawPolygon(
-            QPolygonF(
-                [
-                    QPointF(center.x(), rect.top()),
-                    QPointF(rect.right(), center.y()),
-                    QPointF(center.x(), rect.bottom()),
-                    QPointF(rect.left(), center.y()),
-                ]
-            )
-        )
-        return
-    painter.drawPolygon(
-        QPolygonF(
-            [
-                QPointF(center.x(), rect.top()),
-                QPointF(rect.right(), rect.bottom()),
-                QPointF(rect.left(), rect.bottom()),
-            ]
-        )
-    )
 
 
 def _bin_key(x: float, y: float) -> tuple[int, int]:

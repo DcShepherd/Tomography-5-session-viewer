@@ -19,8 +19,23 @@
 # Application source, tests, and public maintenance tools
 !tomography_session_browser/
 !tomography_session_browser/**
+# Only the essential release suite is published. See tests/README.md.
 !tests/
-!tests/**
+!tests/README.md
+!tests/test_release_smoke.py
+!tests/conftest.py
+!tests/navigation_contract.py
+!tests/test_hardening_regression.py
+!tests/test_mrc_metadata_formats.py
+!tests/test_project_model.py
+!tests/test_navigation_service.py
+!tests/test_report_scope.py
+!tests/test_logic_audit_regressions.py
+!tests/test_atlas_reacquisition.py
+!tests/test_atlas_lod_pdf_regression.py
+!tests/test_atlas_tile_count.py
+!tests/test_session_intake.py
+!tests/test_loading_lifecycle.py
 !tools/
 !tools/**
 

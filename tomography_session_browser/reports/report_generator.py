@@ -74,6 +74,7 @@ from tomography_session_browser.services.marker_service import (
     markers_for_object,
     project_marker_to_size,
 )
+from tomography_session_browser.services.atlas_metadata import atlas_projection_mismatch
 from tomography_session_browser.services.timeline_service import parse_datetime
 from tomography_session_browser.services.acquisition_metadata import (
     ACQUISITION_SPOT_LABEL,
@@ -1227,12 +1228,12 @@ def _atlas_image_block(
         f"{len(scope_search_maps)} search map marker(s), "
         f"{len(scope_batch_positions)} batch position marker(s)."
     )
-    return [
-        graphics.keep_with_caption(
-            [overlayed, Spacer(1, 6), graphics.AtlasMarkerPrintLegend()],
-            caption,
-        )
-    ]
+    figure = [overlayed, Spacer(1, 6)]
+    if reason := atlas_projection_mismatch(atlas):
+        caption = f"{_html_escape(label)}. Atlas markers unavailable: {_html_escape(reason)}"
+    else:
+        figure.append(graphics.AtlasMarkerPrintLegend())
+    return [graphics.keep_with_caption(figure, caption)]
 
 
 def _fallback_session_atlas(ctx: _SessionContext, sample: Sample) -> Atlas | None:

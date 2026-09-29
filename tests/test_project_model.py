@@ -606,7 +606,6 @@ def test_linked_root_tab_activation_keeps_aggregate_viewer_lists(monkeypatch, tm
     assert window._viewer_tabs["Search"].list.topLevelItemCount() == 2
     assert window._viewer_tabs["Batch position"].list.topLevelItemCount() == 2
     assert window._viewer_tabs["Tilt series"].list.topLevelItemCount() == 2
-    group_context_text = window.context_panel._raw_text
 
     window._active_context = linked_group
     window._preserve_tree_root_context = False
@@ -619,10 +618,14 @@ def test_linked_root_tab_activation_keeps_aggregate_viewer_lists(monkeypatch, tm
     assert window._viewer_tabs["Search map"].list.topLevelItemCount() == 2
 
     window.tabs.setCurrentIndex(main_window.TAB_LABELS.index("Atlas"))
-    app.processEvents()
+    for _ in range(4):  # the panel follows once the page has painted
+        app.processEvents()
 
     assert window._active_context is linked_group
-    assert window.context_panel._raw_text == group_context_text
+    # The scope stays the group, but the panel describes the image on screen.
+    displayed_atlas = window._viewer_tabs["Atlas"]._current_value
+    assert displayed_atlas is not None
+    assert window.context_panel._raw_text == window._context_description(displayed_atlas)
     assert window._viewer_tabs["Atlas"].list.topLevelItemCount() == 2
     assert window._viewer_tabs["Search map"].list.topLevelItemCount() == 2
     assert window._viewer_tabs["Search"].list.topLevelItemCount() == 2
@@ -630,10 +633,13 @@ def test_linked_root_tab_activation_keeps_aggregate_viewer_lists(monkeypatch, tm
     assert window._viewer_tabs["Tilt series"].list.topLevelItemCount() == 2
 
     window.tabs.setCurrentIndex(main_window.TAB_LABELS.index("Search map"))
-    app.processEvents()
+    for _ in range(4):  # the panel follows once the page has painted
+        app.processEvents()
 
     assert window._active_context is linked_group
-    assert window.context_panel._raw_text == group_context_text
+    displayed_map = window._viewer_tabs["Search map"]._current_value
+    assert displayed_map is not None
+    assert window.context_panel._raw_text == window._context_description(displayed_map)
     assert window._viewer_tabs["Atlas"].list.topLevelItemCount() == 2
     assert window._viewer_tabs["Search map"].list.topLevelItemCount() == 2
     assert window._viewer_tabs["Search"].list.topLevelItemCount() == 2

@@ -118,11 +118,13 @@ The application loads partial sessions. It reports recoverable problems as warni
 
 The screenshots use synthetic data. They contain no microscope or research data.
 
-### 1. Open session folders
+### 1. Load session folders
 
-Start the application. Select **Open folder**. Add an atlas-screening session, a data-collection session, or both. Select **Browse folder...**. Then select each complete session folder.
+Start the application. Drag one or more complete session folders from File Explorer onto the project panel. While you drag, the panel shows which folders can load and why any cannot. Release to load the valid folders. The panel does not accept drops while a load is running.
 
-The application links two sessions only when their recorded metadata supports the link. Use **Import folder** to add another related session. Imported folders are also read-only.
+You can also select **Load sessions** (Ctrl+O). Drop folders on the window, or select **Browse folders…** once for each folder. The list shows each folder as an atlas screening or data collection session, or states why it cannot load. You can queue any number of atlas and data collection folders. Loaded folders are added to the current project.
+
+The application links sessions only when their recorded metadata supports the link. Loaded folders are read-only.
 
 ![Select complete session folders](docs/images/readme/01-select-session-folders.png)
 
@@ -231,7 +233,9 @@ conda activate tomoapp_session
 python -m pip install -e .
 ~~~
 
-Run all tests:
+The public repository includes only the essential release tests. These cover parsing, scientific safeguards, session linking, navigation, loading, report scope, and application startup. The full development suite stays in the development checkout. See [tests/README.md](tests/README.md) for the retained coverage and test-selection policy.
+
+Run the essential release tests:
 
 ~~~text
 conda run -n tomoapp_session python -m pytest --basetemp .pytest_tmp

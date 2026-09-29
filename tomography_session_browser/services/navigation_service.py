@@ -184,7 +184,26 @@ def _display_name(value: Any) -> str:
     name = getattr(value, "name", None)
     if isinstance(name, str) and name:
         return name
+    if isinstance(value, Atlas) and value.image_path is not None:
+        # An Atlas has no name, and its ID is its whole folder path. The
+        # session and sample folders are what tell two candidates apart.
+        sample_folder = value.image_path.parent.parent
+        return f"{sample_folder.parent.name}/{sample_folder.name} atlas"
     return _identity(value) or "unnamed"
+
+
+def _candidate_names(candidates: tuple[Any, ...]) -> list[str]:
+    """Names for an ambiguity, each Atlas told apart by its folder when two
+    read the same (as the project tree's ambiguous-link warning does)."""
+
+    names = [_display_name(item) for item in candidates]
+    repeated = {name for name in names if names.count(name) > 1}
+    return [
+        f"{name} ({item.image_path.parent.parent})"
+        if name in repeated and isinstance(item, Atlas) and item.image_path is not None
+        else name
+        for name, item in zip(names, candidates, strict=True)
+    ]
 
 
 def _signature(value: Any) -> tuple[Any, ...]:
@@ -249,6 +268,8 @@ def _signature(value: Any) -> tuple[Any, ...]:
             _path_signature(value.mdoc_path),
             value.linked_batch_position_id,
         )
+    if isinstance(value, Atlas):
+        return common + (_path_signature(value.image_path),)
     return common
 
 
@@ -367,7 +388,7 @@ def _classify(
     if len(unique) == 1:
         return _navigable(unique[0], provenance=provenance, explanation=navigable_explanation)
     if len(unique) > 1:
-        names = ", ".join(sorted(_display_name(item) for item in unique))
+        names = ", ".join(sorted(_candidate_names(unique)))
         return _ambiguous(
             unique,
             provenance=provenance,
@@ -990,6 +1011,37 @@ def resolve_search_map_overview(
         navigable_explanation="Resolved from the Overview's linked Search map IDs.",
         ambiguous_prefix="Overview link is ambiguous between",
         unresolved_explanation="No unambiguous Overview is linked to this Search map.",
+    )
+
+
+def resolve_item_atlas(
+    *,
+    own_atlas: Atlas | None,
+    linked_atlases: Iterable[Atlas] = (),
+) -> NavigationResolution:
+    """Resolve the Atlas of the grid an item was acquired on.
+
+    For an Overview, Search map, search tile, batch position or tilt series
+    alike. ``own_atlas`` is the Atlas in the folder that holds the item (its
+    sample's, or for a session-level item its session's). A data-collection
+    sample usually has none; its Session.dm records an AtlasId naming an
+    atlas-screening sample instead, and ``linked_atlases`` are the atlases that
+    AtlasId matched (``ui.session_linking.resolve_atlas_for_sample``). Several
+    matches stay inert rather than taking the first.
+    """
+
+    if own_atlas is not None:
+        return _navigable(
+            own_atlas,
+            provenance="sample.atlas",
+            explanation="Resolved from the Atlas in the item's own sample folder.",
+        )
+    return _classify(
+        linked_atlases,
+        provenance="sample.AtlasId",
+        navigable_explanation="Resolved from the sample's AtlasId path.",
+        ambiguous_prefix="Atlas link is ambiguous between",
+        unresolved_explanation="No Atlas is recorded for this item's sample.",
     )
 
 
