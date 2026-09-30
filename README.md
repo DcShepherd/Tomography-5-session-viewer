@@ -153,6 +153,8 @@ At a whole-grid Atlas view, nearby batch positions appear as counted clusters. Z
 
 Use the **Overlays** panel to control clusters, labels, tile grids, the marker legend, and the per-exposure detail layer. The detail layer is off by default. At a linked project node, use **Data collections** to control markers for each collection. Selecting one data-collection node limits Atlas batch markers to that collection.
 
+Select **Remove all overlays** to clear all overlay checkboxes in the current tab, including the scale bar and marker legend. Select individual checkboxes to show overlays again.
+
 In an Overview or Search-map image, middle-click or Shift-click an exposure area to highlight all exposure areas from the same batch position. Left-click an empty area, right-click the image, or press Escape to clear the highlight.
 
 Use the export button above the zoom control, or press **Ctrl+S**, to save the current crop as a high-resolution PNG. The PNG includes visible markers, highlights, the scale bar, and the optional Atlas marker legend. It excludes viewer controls and the pixel-size badge.

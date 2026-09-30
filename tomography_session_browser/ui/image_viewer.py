@@ -1459,6 +1459,12 @@ class ImagePreviewView(QGraphicsView):
             self._visible_marker_types.discard(marker_type)
         self._redraw_markers()
 
+    def hide_all_markers(self) -> None:
+        """Hide every marker layer without discarding its source markers."""
+        self._close_cluster_popup()
+        self._visible_marker_types.clear()
+        self._redraw_markers()
+
     def set_markers(self, markers: list[ImageMarker], selected_marker_id: str | None = None) -> None:
         self._close_cluster_popup()
         self._cluster_cache.clear()
@@ -4560,6 +4566,12 @@ class ViewerTab(QWidget):
         overlay_panel_layout = QVBoxLayout(self.overlay_panel)
         overlay_panel_layout.setContentsMargins(10, 10, 10, 10)
         overlay_panel_layout.setSpacing(6)
+        self.remove_all_overlays_button = QPushButton("Remove all overlays", self.overlay_panel)
+        self.remove_all_overlays_button.setToolTip(
+            "Hide all overlays in this tab, including the scale bar and marker legend"
+        )
+        self.remove_all_overlays_button.clicked.connect(self._remove_all_overlays)
+        overlay_panel_layout.addWidget(self.remove_all_overlays_button)
         if show_marker_controls:
             for marker_type in MARKER_TYPES_WITH_CONTROLS:
                 checkbox = QCheckBox(MARKER_TYPE_LABELS.get(marker_type, marker_type), self.overlay_panel)
@@ -6366,6 +6378,34 @@ class ViewerTab(QWidget):
         self.select_marker(marker.id)
         if self._on_marker_opened is not None:
             self._on_marker_opened(marker)
+
+    def _remove_all_overlays(self) -> None:
+        self.viewer.hide_all_markers()
+        for marker_type, checkbox in self._marker_type_checks.items():
+            # An unavailable layer is already unchecked, but its saved preference
+            # must also be cleared so it stays off when another image provides it.
+            self._user_marker_type_visible[marker_type] = False
+            checkbox.blockSignals(True)
+            checkbox.setChecked(False)
+            checkbox.blockSignals(False)
+        for checkbox in self._atlas_lod_checks.values():
+            checkbox.setChecked(False)
+        collections_changed = False
+        for key, checkbox in self._atlas_collection_checks.items():
+            if not checkbox.isChecked():
+                continue
+            checkbox.blockSignals(True)
+            checkbox.setChecked(False)
+            checkbox.blockSignals(False)
+            if self._on_atlas_collection_visibility_changed is not None:
+                self._on_atlas_collection_visibility_changed(key, False)
+            collections_changed = True
+        if collections_changed:
+            # Rebuild collection-scoped markers once, not once per collection.
+            self._refresh_marker_selection()
+        if self.marker_legend_checkbox is not None:
+            self.marker_legend_checkbox.setChecked(False)
+        self.scale_bar_checkbox.setChecked(False)
 
     def _marker_type_toggled(self, marker_type: str) -> None:
         checkbox = self._marker_type_checks[marker_type]
