@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tomography_session_browser.services.pixel_size import mrc_pixel_size_angstrom as _mrc_pixel_size_angstrom
+
 import logging
 import math
 from dataclasses import replace
@@ -163,38 +165,6 @@ def _mdoc_stack_stem(path: Path) -> str:
 
 def _mdoc_candidates(mrc_path: Path) -> tuple[Path, Path]:
     return mrc_path.with_suffix(".mdoc"), Path(f"{mrc_path}.mdoc")
-
-
-def _mrc_pixel_size_angstrom(metadata: Any, warnings: list[str]) -> float | None:
-    frame_values: list[float] = []
-    for frame in getattr(metadata, "frame_metadata", None) or []:
-        value = frame.get("pixel_size") if isinstance(frame, dict) else None
-        try:
-            numeric = float(value) if value is not None else None
-        except (TypeError, ValueError):
-            numeric = None
-        if numeric is not None and math.isfinite(numeric) and numeric > 0:
-            frame_values.append(numeric)
-    if frame_values:
-        reference = frame_values[0]
-        if any(
-            not math.isclose(value, reference, rel_tol=1e-6, abs_tol=1e-6)
-            for value in frame_values[1:]
-        ):
-            text = ", ".join(f"{value:g}" for value in sorted(set(frame_values)))
-            warnings.append(
-                "MRC extended header has inconsistent pixel_size values: "
-                f"{text}; pixel-size cross-check unavailable."
-            )
-            return None
-        return reference
-    voxel_size = getattr(metadata, "voxel_size", (None, None, None))
-    value = voxel_size[0] if voxel_size else None
-    try:
-        numeric = float(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-    return numeric if numeric is not None and math.isfinite(numeric) and numeric > 0 else None
 
 
 def _resolved_tilt_pixel_size(

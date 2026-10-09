@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.models import Atlas, MrcMetadata, Overview, Sample, SearchMap, Session
 from tomography_session_browser.parsers.mdoc_parser import parse_mdoc
@@ -12,10 +14,10 @@ from tomography_session_browser.parsers.tiltseries_parser import (
     parse_tilt_series_in_folder,
 )
 from tomography_session_browser.parsers.xml_parser import parse_xml_file
-from tomography_session_browser.reports.report_generator import _resolve_overlay_geometry
-from tomography_session_browser.reports.warning_summary import summarise_warnings
-from tomography_session_browser.ui.session_presenter import grouped_warnings
-from tomography_session_browser.ui.session_presenter import session_warnings
+from tomography_session_browser.reports.images import resolve_overlay_geometry as _resolve_overlay_geometry
+from tomography_session_browser.services.warning_classification import summarise_warnings
+from tomography_session_browser.presentation.warnings import grouped_warnings
+from tomography_session_browser.presentation.warnings import session_warnings
 
 
 def test_unknown_folder_loads_as_warning_instead_of_crashing(tmp_path: Path) -> None:
@@ -257,15 +259,15 @@ def test_the_dashboard_and_the_report_count_the_same_things() -> None:
     made the two surfaces look like they were describing different sessions.
     """
 
-    from tomography_session_browser.ui.session_presenter import (
-        _dashboard_warning_groups,
+    from tomography_session_browser.presentation.warnings import (
+        dashboard_warning_groups as _dashboard_warning_groups,
     )
 
     # Three messages, two distinct affected objects.
     warnings = [
-        "vellio_1: NaN values found in frame-dose metadata.",
-        "vellio_1: NaN values found in frame-dose metadata.",
-        "vellio_2: NaN values found in frame-dose metadata.",
+        "alpha_1: NaN values found in frame-dose metadata.",
+        "alpha_1: NaN values found in frame-dose metadata.",
+        "alpha_2: NaN values found in frame-dose metadata.",
     ]
 
     rows = _dashboard_warning_groups(warnings)
@@ -309,3 +311,43 @@ def test_orphan_mdoc_warning_is_a_missing_mrc_error() -> None:
     assert [(row.category, row.severity) for row in rows] == [
         ("Missing MRC file", "error")
     ]
+
+
+# Real parser/service templates, scoped the way ``session_warnings`` scopes
+# them, and the category each must land in. Several used to land in the wrong
+# one: a bare "failed" made any warning a failed tilt series, and a bare
+# "unrecognised"/"unsupported" filed MDOC and MRC-header warnings as a folder
+# layout problem.
+_CLASSIFIED_TEMPLATES = [
+    ("S / Grid1: Screening sample has no parseable Atlas folder.", "Atlas files not found", "warning"),
+    ("S / Grid1 / Atlas: Atlas metadata exists but no Atlas_*.jpg or Atlas_*.mrc was found.", "Atlas files not found", "warning"),
+    ("S / TS_01: TS_01.mdoc:12 unrecognised MDOC line ignored: junk", "Unreadable MDOC lines", "warning"),
+    ("S / TS_01: Unsupported MRC extended header type: XYZ.", "MRC header issues", "warning"),
+    ("S / TS_01: FEI1 extended header metadata block size was not recognised; using generic parser.", "MRC header issues", "warning"),
+    ("S / TS_01: MRC header dimensions are not plausible.", "MRC header issues", "warning"),
+    ("S / TS_01: MRC mode 12 is not supported for pixel preview.", "MRC header issues", "warning"),
+    ("S / TS_01: FEI2 parser did not find alpha_tilt values.", "Tilt-angle metadata fallback", "warning"),
+    ("S / TS_01: MRC data block is incomplete (1,000 bytes on disk; expected at least 2,000).", "Incomplete MRC data", "error"),
+    ("S / Grid1: Batch positions could not be parsed and was skipped: parsing failed at line 3", "Unreadable files or folders", "warning"),
+    ("S / Grid1: TS_02.mrc could not be parsed and was skipped: unpack failed", "Unreadable files or folders", "warning"),
+    ("S / Grid1: Could not list SearchMaps folder: [WinError 5] Access is denied", "Unreadable files or folders", "warning"),
+    ("S / TS_01: MDOC Binning is missing; using TS_01.mrc pixel size 1.6 Å/pixel instead of unbinned PixelSpacing 0.8 Å/pixel.", "Acquisition metadata conflict", "warning"),
+    ("S / TS_01: Pixel size conflict: MDOC PixelSpacing × Binning gives 1.6 Å/pixel; TS_01.mrc reports 1.7 Å/pixel; using MRC metadata.", "Acquisition metadata conflict", "warning"),
+    ("S / Pos_1: Exposure MRC FEI extended header has inconsistent illuminated_area values: 1, 2; beam diameter was not applied.", "Acquisition metadata conflict", "warning"),
+    ("S / TS_01: MDOC section count (35) disagrees with MRC nz (34); validation uses the shared tilt-series validator.", "Acquisition metadata conflict", "warning"),
+    ("S / TS_01: Tilt-angle conflict: MRC extended header and MDOC disagree; using MRC extended header.", "Tilt-angle metadata fallback", "warning"),
+    ("S / Search 3: No matching search-map tile could be resolved for this exposure area.", "Search-tile link unresolved", "warning"),
+    ("S / Search 3: Matched search-map tile has no displayable MRC or JPG image.", "Missing image files", "warning"),
+    ("S / Search 3: Search-map tile association used fallback matching: nearest tile.", "Search-tile link used a fallback", "info"),
+    ("Failed batch alpha_9 could not be associated with a search map from explicit links or image-stage metadata (alpha_9_2).", "Failed tilt series collection", "error"),
+    ("S / TS_01: No matching MDOC file found.", "Missing MDOC file", "warning"),
+    ("S / stack: orphan.mdoc has no matching MRC stack and was skipped.", "Missing MRC file", "error"),
+    ("S / Session: Folder did not match a known Tomography 5 layout.", "Unrecognised folder layout", "warning"),
+]
+
+
+@pytest.mark.parametrize("warning,category,severity", _CLASSIFIED_TEMPLATES)
+def test_parser_warning_templates_land_in_their_category(warning: str, category: str, severity: str) -> None:
+    rows = summarise_warnings([warning])
+
+    assert [(row.category, row.severity) for row in rows] == [(category, severity)]

@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Iterable, Mapping, Sequence
 
+from tomography_session_browser.domain.coerce import float_or_none
 from tomography_session_browser.parsers.xml_parser import as_list, find_all
 
 
@@ -256,7 +257,7 @@ def format_target_defocus_values(
     numeric = sorted(
         numeric_value
         for value in values
-        if (numeric_value := _as_float(value)) is not None
+        if (numeric_value := float_or_none(value)) is not None
     )
     if not numeric:
         return missing
@@ -270,13 +271,16 @@ def format_target_defocus_values(
 
 def _raw_batch_positions(data: Mapping[str, Any]) -> list[Any]:
     for key in ("BatchPositionParameters", "BatchPosition", "Position"):
-        raw = _scoped_batch_position_values(data, key)
+        raw = scoped_batch_position_values(data, key)
         if raw:
             return raw
     return []
 
 
-def _scoped_batch_position_values(data: Mapping[str, Any], key: str) -> list[Any]:
+def scoped_batch_position_values(data: Mapping[str, Any], key: str) -> list[Any]:
+    """Every ``key`` value that sits in a batch-position list (or at the top
+    level), flattened. The same key nested anywhere else is not a position."""
+
     values: list[Any] = []
     for path, value in find_all(data, key):
         if not _valid_batch_position_path(path, key):
@@ -746,15 +750,6 @@ def _format_probe_mode(value: str) -> str:
     if normalised == "microprobe":
         return "Microprobe"
     return value.strip()
-
-
-def _as_float(value: float | int | str | None) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _group_numeric_values(values: Sequence[float], tolerance: float) -> list[float]:

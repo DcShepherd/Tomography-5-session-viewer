@@ -11,8 +11,7 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 import shiboken6
 
-from tomography_session_browser.ui.animations import animations_enabled
-from tomography_session_browser.ui.motion import INTERRUPTING_INPUT, Tween, ease_in_out_cubic
+from tomography_session_browser.ui.motion import INTERRUPTING_INPUT, Tween, ease_in_out_cubic, motion_enabled
 from tomography_session_browser.ui.widgets.loader_orbs import (
     NATIVE_LOADER_PROPERTY,
     ORB_AREA,
@@ -312,7 +311,7 @@ class LoadingOverlay(QWidget):
             if not fade:
                 self._finish_hand_off()
             return
-        if not fade or not animations_enabled(self):
+        if not fade or not motion_enabled(self):
             self._timer.stop()
             self._stop_quick()
             self._give_focus_back()
@@ -325,16 +324,6 @@ class LoadingOverlay(QWidget):
             QTimer.singleShot(remaining_ms, self, lambda: self.hide_loading(fade=True))
             return
         self._begin_hand_off()
-
-    # CamelCase aliases mirror the API named in the user request.
-    def showLoading(self, message: str) -> None:  # noqa: N802
-        self.show_loading(message)
-
-    def updateLoadingMessage(self, message: str) -> None:  # noqa: N802
-        self.update_loading_message(message)
-
-    def hideLoading(self) -> None:  # noqa: N802
-        self.hide_loading()
 
     # -- the hand-off (plan F6.3) ------------------------------------------------
 
@@ -739,7 +728,7 @@ class LoadingOverlay(QWidget):
     # -- painting ---------------------------------------------------------------
 
     def _card_layout(self) -> _CardLayout:
-        from tomography_session_browser.ui.theme import (
+        from tomography_session_browser.presentation.design_tokens import (
             SANS_FONT_NAME,
             SPACE_L,
             SPACE_M,
@@ -854,7 +843,7 @@ class LoadingOverlay(QWidget):
         """The card, and the painted orbs in it unless ``colours`` is None."""
 
         from tomography_session_browser.ui.branding import draw_stack_mark
-        from tomography_session_browser.ui.theme import RADIUS_POPOVER
+        from tomography_session_browser.presentation.design_tokens import RADIUS_POPOVER
 
         painter.setPen(QPen(QColor(palette.border_strong), 1.0))
         painter.setBrush(QColor(palette.surface))
@@ -891,7 +880,7 @@ class LoadingOverlay(QWidget):
         )
 
     def _paint_stage_rail(self, painter: QPainter, palette, font: QFont, left: float, top: float, width: float, label_height: float) -> None:
-        from tomography_session_browser.ui.theme import SPACE_XS
+        from tomography_session_browser.presentation.design_tokens import SPACE_XS
 
         count = len(LOADING_STAGES)
         gap = float(SPACE_XS)

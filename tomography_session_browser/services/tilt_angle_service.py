@@ -61,8 +61,9 @@ def stack_order_mdoc_section_indices(
     if mrc_angles is not None:
         # MRC labels describe the actual image order. Do not pair those images
         # with a separately sorted MDOC, even when both cover the same range.
-        section_angles = [_numeric(section.metadata.get("TiltAngle")) for section in tilt_series.sections]
-        if len(section_angles) != frame_count or any(angle is None for angle in section_angles):
+        raw_angles = [_numeric(section.metadata.get("TiltAngle")) for section in tilt_series.sections]
+        section_angles = [angle for angle in raw_angles if angle is not None]
+        if len(raw_angles) != frame_count or len(section_angles) != len(raw_angles):
             return None
         if not plausible_tilt_angles(section_angles):
             return None
@@ -217,14 +218,6 @@ def _frame_count_for(tilt_series: TiltSeries) -> int:
     if metadata is not None and metadata.nz:
         return metadata.nz
     return len(tilt_series.sections)
-
-
-def _mdoc_stack_order_angles(tilt_series: TiltSeries, frame_count: int) -> list[float] | None:
-    entries = _mdoc_stack_order_angle_entries(tilt_series, frame_count)
-    if entries is None:
-        return None
-    angles, _metadata_indices = entries
-    return angles
 
 
 def _mdoc_stack_order_angle_entries(tilt_series: TiltSeries, frame_count: int) -> tuple[list[float], list[int | None]] | None:

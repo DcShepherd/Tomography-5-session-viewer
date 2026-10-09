@@ -30,6 +30,8 @@ class Settings:
     # Base64 of ``QWidget.saveGeometry()``: window size, position and
     # maximised state. Display preference only; empty means "first run".
     window_geometry: str = ""
+    # The report dialog's "exposure thumbnails" option, as last chosen.
+    report_exposure_thumbnails: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Settings":
@@ -48,6 +50,7 @@ class Settings:
             recent_sessions=[str(p) for p in data.get("recent_sessions", []) if p],
             last_report_directory=str(report_dir) if report_dir else None,
             window_geometry=geometry if isinstance(geometry, str) else defaults.window_geometry,
+            report_exposure_thumbnails=data.get("report_exposure_thumbnails") is True,
         )
 
 

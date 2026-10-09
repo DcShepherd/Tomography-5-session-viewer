@@ -5,6 +5,7 @@ import math
 import re
 from typing import Any, Sequence
 
+from tomography_session_browser.domain.coerce import text_or_none
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.domain.models import BatchPosition, TiltSeries
 from tomography_session_browser.services.atlas_marker_style import (
@@ -189,9 +190,9 @@ def atlas_batch_label_placements(
 def exposure_batch_label(marker: ImageMarker) -> str | None:
     if marker.marker_type != MarkerType.EXPOSURE_AREA:
         return None
-    base = _as_nonempty_str(marker.metadata.get("batch_label"))
+    base = text_or_none(marker.metadata.get("batch_label"))
     if base is None:
-        base = compact_batch_label(_as_nonempty_str(marker.metadata.get("batch_name")) or marker.linked_object_id or "")
+        base = compact_batch_label(text_or_none(marker.metadata.get("batch_name")) or marker.linked_object_id or "")
     if not base:
         return None
     exposure_index = _as_int(marker.metadata.get("exposure_index"))
@@ -245,7 +246,7 @@ def batch_label_markers(
                     continue
             text = exposure_batch_label(marker)
         elif marker.marker_type == MarkerType.TILT_SERIES and marker.metadata.get("inferred_from_stage"):
-            text = _as_nonempty_str(marker.metadata.get("batch_label"))
+            text = text_or_none(marker.metadata.get("batch_label"))
         else:
             text = None
         if not text:
@@ -458,8 +459,8 @@ def _intersection_area(
 
 
 def _fallback_exposure_index(marker: ImageMarker) -> int | None:
-    batch_name = _as_nonempty_str(marker.metadata.get("batch_name")) or marker.linked_object_id
-    area_name = _as_nonempty_str(marker.metadata.get("area_name")) or marker.label
+    batch_name = text_or_none(marker.metadata.get("batch_name")) or marker.linked_object_id
+    area_name = text_or_none(marker.metadata.get("area_name")) or marker.label
     if not area_name:
         return None
     if area_name.casefold() == "exposure":
@@ -496,10 +497,3 @@ def _as_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _as_nonempty_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None

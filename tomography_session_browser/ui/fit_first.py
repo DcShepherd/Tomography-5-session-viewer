@@ -14,6 +14,7 @@ choice here is a transient observation of the current size, never a setting.
 
 from __future__ import annotations
 
+from tomography_session_browser.presentation.tab_keys import TabKey
 from collections.abc import Sequence
 
 #: Tab presentations, richest first. The count is information, so it outlives
@@ -26,9 +27,9 @@ TAB_STEPS = (TAB_STEP_FULL, TAB_STEP_SHORT, TAB_STEP_COUNT, TAB_STEP_ICON)
 
 #: Shorter names for the long tab labels, used before names are dropped.
 TAB_SHORT_LABELS = {
-    "Search map": "Maps",
-    "Search": "Tiles",
-    "Batch position": "Positions",
+    TabKey.SEARCH_MAP: "Maps",
+    TabKey.SEARCH: "Tiles",
+    TabKey.BATCH_POSITION: "Positions",
 }
 
 

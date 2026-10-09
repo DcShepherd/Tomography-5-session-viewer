@@ -1,6 +1,6 @@
 # Tomography Session Browser
 
-Tomography Session Browser is a desktop application for Thermo Fisher Tomography 5 session folders. Use it to review session images and metadata. Use it to find incomplete or failed tilt series. Create scoped PDF reports.
+Tomography Session Browser is a desktop application for Thermo Fisher Tomography 5 session folders. Use it to review session images and metadata. Use it to find incomplete or failed tilt series. Create scoped PDF reports. This is the result of my adventures in vibe coding.
 
 The application is read-only. It does not edit, repair, rename, move, or normalise files in microscope-output folders.
 
@@ -155,13 +155,23 @@ Use the **Overlays** panel to control clusters, labels, tile grids, the marker l
 
 Select **Remove all overlays** to clear all overlay checkboxes in the current tab, including the scale bar and marker legend. Select individual checkboxes to show overlays again.
 
+Double-click an exposure area in an Overview or Search-map image, or select it and press Enter, to open its search tile. This does what the **Search** jump does. If several search tiles match the exposure, or none was recorded for it, the application does not navigate and states the reason. On arrival, the selected exposure is highlighted only when exactly one exposure on the tile matches it; otherwise nothing is highlighted, and the status bar says so.
+
 In an Overview or Search-map image, middle-click or Shift-click an exposure area to highlight all exposure areas from the same batch position. Left-click an empty area, right-click the image, or press Escape to clear the highlight.
 
 Use the export button above the zoom control, or press **Ctrl+S**, to save the current crop as a high-resolution PNG. The PNG includes visible markers, highlights, the scale bar, and the optional Atlas marker legend. It excludes viewer controls and the pixel-size badge.
 
 ### 4. Create a PDF report
 
-Select **Report**. Select a linked group, a session, or data-collection samples. Then select **Generate report**. The report includes supporting Atlas context once when it is needed.
+Select **Report**. Select a linked group, a session, or data-collection samples. Each dataset includes its associated atlas when the matching atlas session is loaded and the link is unambiguous. The default report does not include the full supporting screening session.
+
+Select **Also include supporting atlas-session overviews** to add the full screening overview. This can include unrelated atlases. Select an Atlas session alone to create an atlas-only report. Check the scope preview, then select **Generate report**.
+
+Select **Include exposure thumbnails for each tilt series** to add an image of each exposure area. Tomography 5 keeps a downsampled copy of each tilt-series stack in a `Thumbnails` folder beside the stacks. After the dataset's tilt-series table, an **Exposures** section shows one frame from each copy, four to a page. The frame is the one nearest 0°. For a lamella session, the frame is the one nearest the pretilt, which is the angle where the tilt series started. The section states the stage tilt and the pretilt one time. Each image shows the tilt series' status, the acquisition time, the camera dose for that one image (**Cam. dose**), and the stage position. An image that has no frame at the expected angle shows a warning. The report names each tilt series that has no thumbnail or no recorded tilt angles. The application remembers this choice.
+
+The report opens with a summary page: count cards, a contents list with page numbers and each dataset's tilt-series outcomes, and grouped warnings. Each dataset follows on its own pages. Its atlas shows only batch-position status, as the Atlas tab shows it: the whole atlas at fit zoom beside an enlarged region where each position is numbered. PDF bookmarks link to every dataset and its figure sections.
+
+Reports omit workstation source paths and retain session and dataset names. Tilt-series tables show the original pixel size and MRC pixel size in Å/px. An asterisk marks a metadata estimate when MRC sampling is unavailable. Overview and search-map images omit the template reference rectangle; acquisition overlays remain visible.
 
 ![Select report scope](docs/images/readme/04-report-scope.png)
 
@@ -235,9 +245,9 @@ conda activate tomoapp_session
 python -m pip install -e .
 ~~~
 
-The public repository includes only the essential release tests. These cover parsing, scientific safeguards, session linking, navigation, loading, report scope, and application startup. The full development suite stays in the development checkout. See [tests/README.md](tests/README.md) for the retained coverage and test-selection policy.
+The public repository includes a minimal release suite. It uses synthetic data only. `test_release_smoke.py` starts the application in both themes and checks the loader assets. `test_hardening_regression.py` checks that damaged input produces warnings, not crashes, and that the dashboard and reports count warnings the same way. `test_project_model.py` checks conservative session linking, project grouping, and report generation. `conftest.py` keeps the tests away from your own settings. The full development suite stays in the development checkout, and this suite does not replace it.
 
-Run the essential release tests:
+Run the release tests:
 
 ~~~text
 conda run -n tomoapp_session python -m pytest --basetemp .pytest_tmp

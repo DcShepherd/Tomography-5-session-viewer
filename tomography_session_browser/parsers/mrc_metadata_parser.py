@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from tomography_session_browser.services.loading_profiler import record_aggregate_phase
+from tomography_session_browser.diagnostics.profiling import record_aggregate_phase
 
 
 LOGGER = logging.getLogger(__name__)
@@ -479,15 +479,6 @@ def _safe_int32(data: bytes, offset: int, endian: str) -> int | None:
         return None
 
 
-def _safe_uint32(data: bytes, offset: int, endian: str) -> int | None:
-    if offset < 0 or offset + 4 > len(data):
-        return None
-    try:
-        return struct.unpack(f"{endian}I", data[offset : offset + 4])[0]
-    except struct.error:
-        return None
-
-
 def _safe_int64(data: bytes, offset: int, endian: str) -> int | None:
     if offset < 0 or offset + 8 > len(data):
         return None
@@ -498,7 +489,12 @@ def _safe_int64(data: bytes, offset: int, endian: str) -> int | None:
 
 
 def _read_uint32(record: bytes, offset: int, endian: str) -> int | None:
-    return _safe_uint32(record, offset, endian)
+    if offset < 0 or offset + 4 > len(record):
+        return None
+    try:
+        return struct.unpack(f"{endian}I", record[offset : offset + 4])[0]
+    except struct.error:
+        return None
 
 
 def _read_fei_double(
@@ -696,12 +692,6 @@ def _meters_to_angstrom(value: float | None) -> float | None:
     if value is None or value <= 0:
         return None
     return value * 1e10
-
-
-def _plausible(value: float | None, low: float, high: float) -> float | None:
-    if value is None or not (low <= value <= high):
-        return None
-    return value
 
 
 def _resolved_voxel_size(

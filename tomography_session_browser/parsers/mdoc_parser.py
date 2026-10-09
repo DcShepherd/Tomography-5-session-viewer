@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from tomography_session_browser.domain.models import MdocSection
-from tomography_session_browser.services.loading_profiler import record_aggregate_phase
+from tomography_session_browser.diagnostics.profiling import record_aggregate_phase
 
 
 SECTION_RE = re.compile(r"^\[ZValue\s*=\s*(\d+)\]\s*$")

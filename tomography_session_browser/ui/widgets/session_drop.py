@@ -49,7 +49,7 @@ import shiboken6
 from tomography_session_browser.services.session_intake import DropReceipt, DroppedFolder, FolderCheck, SessionIntake
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.motion import TICKER, ease_out_cubic, motion_enabled
-from tomography_session_browser.ui.theme import (
+from tomography_session_browser.presentation.design_tokens import (
     RADIUS_CONTROL,
     SPACE_L,
     SPACE_M,
@@ -60,8 +60,8 @@ from tomography_session_browser.ui.theme import (
     TYPE_CAPTION,
     TYPE_LEAD,
     ThemePalette,
-    current_palette,
 )
+from tomography_session_browser.ui.theme import current_palette
 
 # Module-level, so a test can see what the overlay tells screen readers.
 _update_accessibility = QAccessible.updateAccessibility
@@ -214,10 +214,6 @@ class Glyph(QWidget):
     def glyph(self) -> tuple[str, str]:
         return self._name, self._tone
 
-    def set_glyph(self, name: str, tone: str) -> None:
-        self._name, self._tone = name, tone
-        self.update()
-
     def paintEvent(self, _event) -> None:  # noqa: N802 - Qt API
         palette = current_palette()
         colour = tone_colour(palette, self._tone)
@@ -300,17 +296,17 @@ class _AmbientClock:
     def start(self) -> None:
         self.elapsed = 0.0
         self._running = True
-        TICKER.add(self)  # type: ignore[arg-type]  # same interface as Spring
+        TICKER.add(self)
 
     def stop(self) -> None:
         self._running = False
-        TICKER.remove(self)  # type: ignore[arg-type]
+        TICKER.remove(self)
 
     def step(self, dt: float) -> None:
         self.elapsed += max(0.0, dt)
         self._on_step(self.elapsed)
 
-    def _notify_settled(self) -> None:
+    def notify_settled(self) -> None:
         return None
 
 

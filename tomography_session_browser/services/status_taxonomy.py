@@ -37,7 +37,10 @@ ACQUISITION_COMPLETE = "Complete"
 ACQUISITION_INCOMPLETE = "Incomplete"
 ACQUISITION_FAILED = "Failed"
 ACQUISITION_PENDING = "Pending"
-ACQUISITION_UNAVAILABLE = "Unavailable"
+# A file that should be on disk and is not, and an item the evidence cannot
+# classify. One word, "Unavailable", used to cover both (decision D3).
+ACQUISITION_MISSING = "Missing"
+ACQUISITION_UNKNOWN = "Unknown"
 
 # How much a relationship can be trusted.
 LINK_LINKED = "Linked"
@@ -61,7 +64,8 @@ ACQUISITION_STATES: tuple[str, ...] = (
     ACQUISITION_INCOMPLETE,
     ACQUISITION_FAILED,
     ACQUISITION_PENDING,
-    ACQUISITION_UNAVAILABLE,
+    ACQUISITION_MISSING,
+    ACQUISITION_UNKNOWN,
 )
 LINK_STATES: tuple[str, ...] = (
     LINK_LINKED,
@@ -94,14 +98,14 @@ _ITEM_STATUS_TO_ACQUISITION: dict[str, str] = {
     "queued": ACQUISITION_PENDING,
     "pending": ACQUISITION_PENDING,
     "scheduled": ACQUISITION_PENDING,
-    "missing": ACQUISITION_UNAVAILABLE,
-    "unknown": ACQUISITION_UNAVAILABLE,
-    "unavailable": ACQUISITION_UNAVAILABLE,
-    "n/a": ACQUISITION_UNAVAILABLE,
-    # An orphaned failed tilt series that no batch claims. It is genuinely
-    # unavailable as *acquisition* data for a batch; its link confidence is
-    # what makes it special, and that is a different dimension.
-    "unattributed": ACQUISITION_UNAVAILABLE,
+    "missing": ACQUISITION_MISSING,
+    "unknown": ACQUISITION_UNKNOWN,
+    "unavailable": ACQUISITION_UNKNOWN,
+    "n/a": ACQUISITION_UNKNOWN,
+    # An orphaned failed tilt series that no batch claims. What it means as
+    # *acquisition* data for a batch is unknown; its link confidence is what
+    # makes it special, and that is a different dimension.
+    "unattributed": ACQUISITION_UNKNOWN,
 }
 
 _SEVERITY_TO_ATTENTION: dict[str, str] = {
@@ -113,7 +117,7 @@ _SEVERITY_TO_ATTENTION: dict[str, str] = {
     "critical": ATTENTION_ERROR,
 }
 
-# services/navigation_service.py resolution states.
+# services/navigation/resolvers.py resolution states.
 _RESOLUTION_TO_LINK: dict[str, str] = {
     "navigable": LINK_LINKED,
     "ambiguous": LINK_AMBIGUOUS,
@@ -125,7 +129,7 @@ def acquisition_state(status: str | None) -> str:
     """Map any existing status string onto the acquisition dimension."""
 
     return _ITEM_STATUS_TO_ACQUISITION.get(
-        (status or "").strip().lower(), ACQUISITION_UNAVAILABLE
+        (status or "").strip().lower(), ACQUISITION_UNKNOWN
     )
 
 

@@ -11,7 +11,7 @@ from PIL import Image
 
 from tomography_session_browser.domain.models import MrcMetadata
 from tomography_session_browser.parsers.mrc_metadata_parser import MrcFrameMetadata, ParsedMrcMetadata, parse_mrc_metadata
-from tomography_session_browser.services.loading_profiler import record_aggregate_phase
+from tomography_session_browser.diagnostics.profiling import record_aggregate_phase
 
 
 LOGGER = logging.getLogger(__name__)
@@ -52,10 +52,6 @@ class MrcInspection:
     def data_offset(self) -> int:
         return MRC_HEADER_BYTES + self.extended_header_bytes
 
-    @property
-    def frame_shape(self) -> tuple[int, int]:
-        return (self.ny, self.nx)
-
 
 @dataclass(slots=True)
 class MrcSlicePreview:
@@ -85,10 +81,6 @@ class MrcPreviewSource:
 
     def frame_count(self) -> int:
         return self.inspection.frame_count
-
-    def get_frame_header(self, index: int) -> MrcInspection:
-        self._check_index(index)
-        return self.inspection
 
     def get_frame_preview(self, index: int = 0, max_size: int = DEFAULT_MAX_PREVIEW_DIMENSION) -> MrcSlicePreview:
         start = time.perf_counter()
@@ -146,9 +138,6 @@ class MrcPreviewSource:
         )
         return result
 
-    def clear_cache(self) -> None:
-        return
-
     def _read_frame(self, index: int) -> np.ndarray:
         dtype = self.inspection.dtype
         shape = self.inspection.shape
@@ -198,12 +187,13 @@ def _inspect_cache_evict_if_needed() -> None:
 
 
 def clear_inspect_mrc_cache() -> None:
-    """Clear the :func:`inspect_mrc` cache. Useful in tests; the cache is
-    keyed by ``(path, mtime_ns, size)`` and is correctness-safe for
-    production paths.
+    """Clear the :func:`inspect_mrc` cache, and the display-window cache
+    keyed the same way. Useful in tests; both are keyed by
+    ``(path, mtime_ns, size)`` and are correctness-safe for production paths.
     """
 
     _INSPECT_CACHE.clear()
+    _DISPLAY_WINDOW_CACHE.clear()
 
 
 # Optional hook for the loading profiler. Modules that want cache-hit
@@ -366,13 +356,6 @@ def _frame_metadata_dict(frame: MrcFrameMetadata) -> dict[str, object]:
     }
 
 
-def read_mrc_slice_preview(path: Path, slice_index: int = 0, max_dimension: int = DEFAULT_MAX_PREVIEW_DIMENSION) -> MrcSlicePreview:
-    try:
-        return MrcPreviewSource(path).get_frame_preview(slice_index, max_dimension)
-    except (OSError, ValueError, IndexError) as exc:
-        return MrcSlicePreview(path, None, max(0, slice_index), 0, [str(exc)])
-
-
 def _frame_to_preview(frame: np.ndarray, max_size: int) -> tuple[np.ndarray, int]:
     if frame.ndim != 2:
         raise ValueError(f"MRC frame must be 2D for display, got shape {frame.shape}")
@@ -401,18 +384,111 @@ def _downsample_for_preview(frame: np.ndarray, shrink: int) -> np.ndarray:
 
 
 def _normalise_to_uint8(frame: np.ndarray) -> np.ndarray:
+    window = _display_window(frame)
+    if window is None:
+        return np.zeros(np.asarray(frame).shape, dtype=np.uint8)
+    return _apply_display_window(frame, *window)
+
+
+def _display_window(frame: np.ndarray) -> tuple[float, float] | None:
+    """The 0.5 and 99.5 percentiles the preview stretches to 0..255."""
+
     numeric = np.asarray(frame)
     finite = numeric[np.isfinite(numeric)]
     if finite.size == 0:
-        return np.zeros(numeric.shape, dtype=np.uint8)
+        return None
     if finite.size > 1_000_000:
         step = math.ceil(finite.size / 1_000_000)
         finite = finite[::step]
     low, high = np.percentile(finite.astype(np.float32, copy=False), [0.5, 99.5])
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
-        return np.zeros(numeric.shape, dtype=np.uint8)
-    scaled = (numeric.astype(np.float32, copy=False) - low) * (255.0 / (high - low))
+        return None
+    return float(low), float(high)
+
+
+def _apply_display_window(frame: np.ndarray, low: float, high: float) -> np.ndarray:
+    scaled = (np.asarray(frame).astype(np.float32, copy=False) - low) * (255.0 / (high - low))
     return np.ascontiguousarray(np.clip(scaled, 0, 255).astype(np.uint8))
+
+
+_DISPLAY_WINDOW_CACHE: dict[tuple, tuple[float, float] | None] = {}
+_DISPLAY_WINDOW_CACHE_MAX = 64
+
+
+def _cached_display_window(path: Path, slice_index: int, frame: np.ndarray) -> tuple[float, float] | None:
+    """The viewer preview's contrast window for a frame, cached per file version."""
+
+    key = (_inspect_cache_key(path), slice_index)
+    if key[0] is not None and key in _DISPLAY_WINDOW_CACHE:
+        return _DISPLAY_WINDOW_CACHE[key]
+    preview = _downsample_for_preview(frame, _shrink_factor(frame.shape, DEFAULT_MAX_PREVIEW_DIMENSION))
+    window = _display_window(preview)
+    if key[0] is not None:
+        if len(_DISPLAY_WINDOW_CACHE) >= _DISPLAY_WINDOW_CACHE_MAX:
+            _DISPLAY_WINDOW_CACHE.pop(next(iter(_DISPLAY_WINDOW_CACHE)))
+        _DISPLAY_WINDOW_CACHE[key] = window
+    return window
+
+
+@dataclass(frozen=True, slots=True)
+class MrcDisplayRegion:
+    """An 8-bit rendering of part of an MRC frame, with the pixels it covers."""
+
+    image: Image.Image
+    box: tuple[int, int, int, int]  # x0, y0, x1, y1 in frame pixels (row 0 at the top)
+    frame_size: tuple[int, int]  # nx, ny
+    downsample_factor: int
+
+
+def read_mrc_display_region(
+    path: Path,
+    box: tuple[int, int, int, int] | None = None,
+    *,
+    max_size: int = DEFAULT_MAX_PREVIEW_DIMENSION,
+    slice_index: int = 0,
+) -> MrcDisplayRegion | None:
+    """Render ``box`` of a frame at up to ``max_size`` px, as the viewer would show it.
+
+    The contrast is the window of the viewer's whole-frame preview (the
+    0.5-99.5 percentiles after its area downsampling), so a crop matches
+    the whole view; the crop itself comes from full-resolution pixels,
+    area-averaged only as far as ``max_size`` needs. The file is
+    memory-mapped read-only. Returns ``None`` if the frame cannot be read.
+    """
+
+    try:
+        source = MrcPreviewSource(path)
+        frame = source._read_frame(slice_index) if source.frame_count() > slice_index else None
+        if frame is None or frame.ndim != 2:
+            return None
+        ny, nx = frame.shape
+        window = _cached_display_window(path, slice_index, frame)
+        if window is None:
+            return None
+        x0, y0, x1, y1 = box if box is not None else (0, 0, nx, ny)
+        x0, y0 = max(0, int(x0)), max(0, int(y0))
+        x1, y1 = min(nx, int(x1)), min(ny, int(y1))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        crop = frame[y0:y1, x0:x1]
+        # Average whole blocks down to no smaller than ``max_size``, then
+        # resample the rest of the way, so the result is close to the size
+        # asked for rather than up to half of it.
+        shrink = max(1, int(max(crop.shape) // max(max_size, 1)))
+        sampled = _downsample_for_preview(crop, shrink)
+        # Area downsampling drops the last partial block; report the pixels used.
+        used_h, used_w = (sampled.shape[0] * shrink, sampled.shape[1] * shrink) if shrink > 1 else crop.shape
+        image = Image.fromarray(_apply_display_window(sampled, *window), mode="L")
+        if max(image.size) > max_size:
+            ratio = max_size / max(image.size)
+            image = image.resize(
+                (max(1, round(image.width * ratio)), max(1, round(image.height * ratio))),
+                Image.Resampling.LANCZOS,
+            )
+        return MrcDisplayRegion(image, (x0, y0, x0 + used_w, y0 + used_h), (nx, ny), shrink)
+    except (OSError, ValueError, IndexError) as exc:
+        LOGGER.debug("Could not render MRC region from %s: %s", path, exc)
+        return None
 
 
 def _numpy_dtype(mode: int, endian: str) -> np.dtype | None:

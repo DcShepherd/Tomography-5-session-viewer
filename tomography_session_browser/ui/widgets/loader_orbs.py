@@ -396,10 +396,6 @@ class QuickOrbs(QObject):
         return self._running
 
     @property
-    def in_view(self) -> bool:
-        return self._in_view
-
-    @property
     def warmed(self) -> bool:
         return (
             self._container is not None

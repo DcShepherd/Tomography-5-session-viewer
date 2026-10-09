@@ -50,10 +50,11 @@ from PySide6.QtCore import QThreadPool, QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from tomography_session_browser.services.settings_service import Settings  # noqa: E402
-from tomography_session_browser.ui import main_window as main_window_module  # noqa: E402
 from tomography_session_browser.ui.branding import brand_window_icon  # noqa: E402
-from tomography_session_browser.ui.main_window import TAB_LABELS, MainWindow  # noqa: E402
-from tomography_session_browser.ui.theme import apply_theme, palette_for  # noqa: E402
+from tomography_session_browser.ui.main_window import MainWindow
+from tomography_session_browser.ui.shell.chrome import TAB_LABELS
+from tomography_session_browser.presentation.design_tokens import palette_for
+from tomography_session_browser.ui.theme import apply_theme
 
 LOAD_TIMEOUT_S = 600
 SETTLE_MS = 1200
@@ -76,14 +77,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     args.out.mkdir(parents=True, exist_ok=True)
 
-    # Never touch the reviewer's real settings file.
-    main_window_module.save_settings = lambda *_a, **_k: None
-    main_window_module.add_recent_session = lambda settings, *_a, **_k: settings
-
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setWindowIcon(brand_window_icon())
     apply_theme(app, palette_for(args.theme[0]))
-    window = MainWindow(settings=Settings(theme=args.theme[0]))
+    # Never touch the reviewer's real settings file.
+    window = MainWindow(settings=Settings(theme=args.theme[0]), save_settings=lambda _settings: None)
     report: dict = {
         "dpr": app.primaryScreen().devicePixelRatio(),
         "screen_available": app.primaryScreen().availableGeometry().getRect(),
@@ -103,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     def capture(name: str) -> None:
         # A toast is news that fades on its own; it would only differ
         # between runs (plan F5.9).
-        window.toast.dismiss()
+        window.ui.toast.dismiss()
         path = args.out / f"{name}.png"
         pixmap = window.grab()
         pixmap.save(str(path), "PNG")
@@ -112,8 +110,8 @@ def main(argv: list[str] | None = None) -> int:
 
     def check_context(name: str, viewer_tab) -> None:
         # The context panel must describe the image on screen.
-        value = getattr(viewer_tab, "_current_value", None)
-        if value is None or window.context_panel._raw_text == window._context_description(value):  # noqa: SLF001
+        value = viewer_tab.parts.tab_selection.current_value if viewer_tab is not None else None
+        if value is None or window.ui.context_panel._raw_text == window.parts.context.context_description(value):  # noqa: SLF001
             return
         report["context_mismatches"].append(name)
         print(f"[ui_capture] MISMATCH {name}: context panel does not describe the displayed item", flush=True)
@@ -124,29 +122,29 @@ def main(argv: list[str] | None = None) -> int:
         yield 600
         for index, session in enumerate(args.session):
             started = time.monotonic()
-            window.load_session(session, replace=index == 0)
+            window.parts.loading.load_session(session, replace=index == 0)
             yield 100
-            while window._loading_overlay_active() and time.monotonic() - started < LOAD_TIMEOUT_S:  # noqa: SLF001
+            while window.parts.loading.loading_overlay_active() and time.monotonic() - started < LOAD_TIMEOUT_S:  # noqa: SLF001
                 yield 50
             # The overlay then hands over to the interface (plan F6.3).
-            while window.loading_overlay.isVisible() and time.monotonic() - started < LOAD_TIMEOUT_S:
+            while window.ui.loading_overlay.isVisible() and time.monotonic() - started < LOAD_TIMEOUT_S:
                 yield 50
             load = {
                 "session": session,
                 "seconds": round(time.monotonic() - started, 2),
-                "loader": window.loading_overlay.performance_snapshot(),
+                "loader": window.ui.loading_overlay.performance_snapshot(),
             }
             report["loads"].append(load)
             print(f"[ui_capture] loaded {Path(session).name} {load}", flush=True)
         yield 800
-        if window.tree.topLevelItemCount():
-            window.tree.setCurrentItem(window.tree.topLevelItem(0))
+        if window.ui.tree.topLevelItemCount():
+            window.ui.tree.setCurrentItem(window.ui.tree.topLevelItem(0))
         for theme_index, theme in enumerate(args.theme):
             if theme_index or theme != args.theme[0]:
-                window.theme_action.setChecked(theme == "light")
+                window.ui.theme_action.setChecked(theme == "light")
                 yield SETTLE_MS
                 # The switch spreads out from the button (plan F5.8b).
-                while window.theme_reveal is not None:
+                while window.parts.theme.active_reveal is not None:
                     yield 50
             for size in args.size:
                 apply_size(size)
@@ -155,8 +153,8 @@ def main(argv: list[str] | None = None) -> int:
                     # The app loads the tab's preview itself, as it does for
                     # a click. Loading it here as well announced a selection,
                     # which hid a context panel left describing another tab.
-                    window.tabs.setCurrentIndex(tab_index)
-                    viewer_tab = window._viewer_tabs.get(label)  # noqa: SLF001
+                    window.ui.tabs.setCurrentIndex(tab_index)
+                    viewer_tab = window.ui.viewer_tabs.get(label)  # noqa: SLF001
                     if viewer_tab is not None:
                         QThreadPool.globalInstance().waitForDone(8000)
                     yield SETTLE_MS

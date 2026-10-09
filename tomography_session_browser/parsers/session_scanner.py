@@ -4,7 +4,6 @@ import logging
 from pathlib import Path
 import re
 from typing import Callable, TypeVar
-from contextlib import nullcontext
 
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.models import Overview, Sample, Session
@@ -12,62 +11,14 @@ from tomography_session_browser.parsers.atlas_parser import parse_atlas_folder
 from tomography_session_browser.parsers.batch_parser import parse_batch_folder
 from tomography_session_browser.parsers.mrc_parser import read_mrc_metadata
 from tomography_session_browser.parsers.path_utils import is_sample_dir, safe_id, sorted_paths
+from tomography_session_browser.parsers.scan_progress import ScanProgress, ScanProgressReporter
 from tomography_session_browser.parsers.searchmap_parser import parse_search_map_folder
-from tomography_session_browser.parsers.search_tile_parser import build_search_tiles
 from tomography_session_browser.parsers.tiltseries_parser import parse_tilt_series_in_folder
 from tomography_session_browser.parsers.xml_parser import find_first, parse_xml_file
-from tomography_session_browser.services.acquisition_metadata import (
-    ACQUISITION_METADATA_KEY,
-    merge_acquisition_settings_metadata,
-)
-from tomography_session_browser.services.loading_profiler import LoadingProfiler
+from tomography_session_browser.diagnostics.profiling import NULL_PROFILE, LoadingProfiler
 
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
-
-#: ``(label, current, total)``: what is being read now, e.g.
-#: ("Reading samples", 4, 13) or ("Reading tilt series", 5, 7).
-ScanProgress = Callable[[str, int, int], None]
-#: The parts of a collection sample, in the order they are read.
-COLLECTION_SAMPLE_PARTS = (
-    "atlas",
-    "overviews",
-    "search maps",
-    "batch positions",
-    "tilt series",
-    "links",
-    "search tiles",
-)
-
-
-class _ProgressReporter:
-    """Tells an optional progress callback what is being read.
-
-    For display only: the callback's errors are logged and ignored, so a
-    progress display can never change or stop what is parsed.
-    """
-
-    def __init__(self, callback: ScanProgress | None) -> None:
-        self._callback = callback
-
-    def _tell(self, label: str, current: int, total: int) -> None:
-        if self._callback is None:
-            return
-        try:
-            self._callback(label, current, total)
-        except Exception:  # noqa: BLE001 - display only; never break a load
-            LOGGER.debug("Load progress callback failed", exc_info=True)
-
-    def each(self, label: str, items: list[T]):
-        """Yield ``items``, telling the callback which one (1-based) is next."""
-
-        for index, item in enumerate(items, 1):
-            self._tell(label, index, len(items))
-            yield item
-
-    def part(self, name: str) -> None:
-        index = COLLECTION_SAMPLE_PARTS.index(name) + 1
-        self._tell(f"Reading {name}", index, len(COLLECTION_SAMPLE_PARTS))
 
 
 class SessionScanner:
@@ -80,20 +31,25 @@ class SessionScanner:
         sample_dirs = self._sample_dirs(path)
         if (path / "Session.dm").exists() and sample_dirs:
             return SessionKind.MULTIGRID
+        # ``SessionKind.SINGLE_COLLECTION`` is never produced here: its old
+        # test (Batch, SearchMaps, an Overview or an MRC with an MDOC) was a
+        # subset of this one, so it could not be reached. Both kinds are
+        # handled alike everywhere; the value stays for callers that pass it.
         if self._looks_like_collection(path):
             return SessionKind.COLLECTION
-        if self._looks_like_single_collection(path):
-            return SessionKind.SINGLE_COLLECTION
         return SessionKind.UNKNOWN
 
     def load(
         self,
         path: Path,
         *,
-        profile: LoadingProfiler | None = None,
+        profile: LoadingProfiler = NULL_PROFILE,
         progress: ScanProgress | None = None,
     ) -> Session:
-        """Parse the session folder at ``path``.
+        """Parse files in the session folder at ``path``.
+
+        This returns raw entities. Use ``SessionLoader.load`` for inferred
+        batch links, exposure-linked search tiles and final summary counts.
 
         ``progress(label, current, total)`` is told what is being read
         ("Reading samples", 4, 13): the samples of a multi-sample session, or
@@ -101,19 +57,19 @@ class SessionScanner:
         and an error in it never stops a load.
         """
 
-        report = _ProgressReporter(progress)
+        report = ScanProgressReporter(progress)
         root = Path(path)
-        with _profile_phase(profile, "classify_layout"):
+        with profile.phase("classify_layout"):
             kind = self.classify(root)
         session = Session(id=safe_id(root), name=root.name, path=root, kind=kind)
 
         if kind == SessionKind.ATLAS_SCREENING:
-            with _profile_phase(profile, "parse_session_xml", count=1):
+            with profile.phase("parse_session_xml", count=1):
                 metadata = parse_xml_file(root / "ScreeningSession.dm")
                 session.metadata_summary["ScreeningSession.dm"] = metadata
                 _append_xml_warning(session.warnings, metadata, "ScreeningSession.dm")
             sample_dirs = self._sample_dirs(root)
-            with _profile_phase(profile, "load_screening_samples", count=len(sample_dirs)):
+            with profile.phase("load_screening_samples", count=len(sample_dirs)):
                 session.samples = [
                     self._load_screening_sample(sample_dir, profile=profile)
                     for sample_dir in report.each("Reading samples", sample_dirs)
@@ -127,12 +83,12 @@ class SessionScanner:
             if root_atlas:
                 session.atlas = root_atlas
         elif kind == SessionKind.MULTIGRID:
-            with _profile_phase(profile, "parse_session_xml", count=1):
+            with profile.phase("parse_session_xml", count=1):
                 metadata = parse_xml_file(root / "Session.dm")
                 session.metadata_summary["Session.dm"] = metadata
                 _append_xml_warning(session.warnings, metadata, "Session.dm")
             sample_dirs = self._sample_dirs(root)
-            with _profile_phase(profile, "load_collection_samples", count=len(sample_dirs)):
+            with profile.phase("load_collection_samples", count=len(sample_dirs)):
                 if len(sample_dirs) == 1:
                     # One sample: its parts are what there is to count.
                     session.samples = [self._load_collection_sample(sample_dirs[0], profile=profile, report=report)]
@@ -150,22 +106,20 @@ class SessionScanner:
             session.batch_positions = sample.batch_positions
             session.tilt_series = sample.tilt_series
             if (root / "Session.dm").exists():
-                with _profile_phase(profile, "parse_session_xml", count=1):
+                with profile.phase("parse_session_xml", count=1):
                     metadata = parse_xml_file(root / "Session.dm")
                     session.metadata_summary["Session.dm"] = metadata
                     _append_xml_warning(session.warnings, metadata, "Session.dm")
         else:
             session.warnings.append("Folder did not match a known Tomography 5 layout.")
 
-        with _profile_phase(profile, "summarise_counts"):
-            session.metadata_summary["counts"] = self._counts(session)
         return session
 
-    def _load_screening_sample(self, path: Path, *, profile: LoadingProfiler | None = None) -> Sample:
+    def _load_screening_sample(self, path: Path, *, profile: LoadingProfiler = NULL_PROFILE) -> Sample:
         sample = Sample(id=safe_id(path), name=path.name, path=path)
         sample_dm = path / "Sample.dm"
         if sample_dm.exists():
-            with _profile_phase(profile, "parse_sample_xml", count=1):
+            with profile.phase("parse_sample_xml", count=1):
                 metadata = parse_xml_file(sample_dm)
                 sample.metadata["Sample.dm"] = metadata
                 _append_xml_warning(sample.warnings, metadata, "Sample.dm")
@@ -184,15 +138,15 @@ class SessionScanner:
         self,
         path: Path,
         *,
-        profile: LoadingProfiler | None = None,
-        report: _ProgressReporter | None = None,
+        profile: LoadingProfiler = NULL_PROFILE,
+        report: ScanProgressReporter | None = None,
     ) -> Sample:
         # ``report`` counts this sample's parts, for a session of one sample.
         part = report.part if report is not None else (lambda _label: None)
         sample = Sample(id=safe_id(path), name=path.name, path=path)
         session_dm = path / "Session.dm"
         if session_dm.exists():
-            with _profile_phase(profile, "parse_sample_session_xml", count=1):
+            with profile.phase("parse_sample_session_xml", count=1):
                 metadata = parse_xml_file(session_dm)
                 sample.metadata["Session.dm"] = metadata
                 _append_xml_warning(sample.warnings, metadata, "Session.dm")
@@ -209,33 +163,14 @@ class SessionScanner:
         part("tilt series")
         sample.tilt_series = _safe_parse("Tilt series", lambda: _profiled_parse(profile, "parse_tilt_series", lambda: parse_tilt_series_in_folder(path, sample.warnings)), [], sample.warnings)
         sample.name = self._sample_display_name(path, sample.metadata.get("Session.dm"), [tilt.name for tilt in sample.tilt_series])
-        part("links")
-        with _profile_phase(profile, "link_batch_positions"):
-            self._link_batch_positions_to_search_maps(sample)
-            self._link_batch_positions_to_tilt_series(sample)
-        part("search tiles")
-        sample.search_tiles = _safe_parse(
-            "Search tiles",
-            lambda: _profiled_parse(
-                profile,
-                "build_search_tiles",
-                lambda: build_search_tiles(
-                    search_maps=sample.search_maps,
-                    batch_positions=sample.batch_positions,
-                    tilt_series=sample.tilt_series,
-                ),
-            ),
-            [],
-            sample.warnings,
-        )
         return sample
 
-    def _parse_search_maps(self, path: Path, warnings: list[str] | None = None, *, profile: LoadingProfiler | None = None):
+    def _parse_search_maps(self, path: Path, warnings: list[str] | None = None, *, profile: LoadingProfiler = NULL_PROFILE):
         search_root = path / "SearchMaps"
         if not search_root.exists():
             return []
         try:
-            with _profile_phase(profile, "discover_search_maps"):
+            with profile.phase("discover_search_maps"):
                 folders = [folder for folder in search_root.iterdir() if folder.is_dir() and folder.name.startswith("SearchMap_")]
         except OSError as exc:
             if warnings is not None:
@@ -244,16 +179,16 @@ class SessionScanner:
             return []
         maps = []
         folders = sorted_paths(folders)
-        with _profile_phase(profile, "parse_search_maps", count=len(folders)):
+        with profile.phase("parse_search_maps", count=len(folders)):
             for folder in folders:
                 parsed = _safe_parse(f"Search map {folder.name}", lambda folder=folder: parse_search_map_folder(folder), None, warnings)
                 if parsed is not None:
                     maps.append(parsed)
         return maps
 
-    def _parse_overviews(self, path: Path, warnings: list[str] | None = None, *, profile: LoadingProfiler | None = None) -> list[Overview]:
+    def _parse_overviews(self, path: Path, warnings: list[str] | None = None, *, profile: LoadingProfiler = NULL_PROFILE) -> list[Overview]:
         try:
-            with _profile_phase(profile, "discover_overviews"):
+            with profile.phase("discover_overviews"):
                 overview_paths = sorted_paths(list((path / "Batch").glob("Overview_*.mrc")) if (path / "Batch").exists() else [])
         except OSError as exc:
             if warnings is not None:
@@ -261,7 +196,7 @@ class SessionScanner:
             LOGGER.warning("Could not list overview images under %s: %s", path, exc)
             return []
         overviews = []
-        with _profile_phase(profile, "parse_overview_mrc_headers", count=len(overview_paths)):
+        with profile.phase("parse_overview_mrc_headers", count=len(overview_paths)):
             for item in overview_paths:
                 parsed = _safe_parse(
                     f"Overview {item.name}",
@@ -293,57 +228,6 @@ class SessionScanner:
             ]
         )
 
-    def _looks_like_single_collection(self, path: Path) -> bool:
-        return any(
-            [
-                (path / "Batch").exists(),
-                (path / "SearchMaps").exists(),
-                any(path.glob("Overview_*.mrc")),
-                any(item.with_suffix(".mdoc").exists() for item in path.glob("*.mrc")),
-            ]
-        )
-
-    def _link_batch_positions_to_tilt_series(self, sample: Sample) -> None:
-        batch_by_name = {position.name: position for position in sample.batch_positions if position.name}
-        batch_names = sorted(batch_by_name, key=len, reverse=True)
-        for tilt in sample.tilt_series:
-            batch = batch_by_name.get(tilt.name)
-            if batch is None:
-                # Strict prefix-only match. We deliberately don't
-                # fuzzy-attach orphaned failed tilts (e.g. sang_1
-                # whose batch was never recorded in
-                # BatchPositionsList.xml) to a sibling batch — that
-                # would tag the sibling's overlays as failed in the
-                # GUI / PDF even though the sibling acquisition
-                # succeeded. Orphans stay orphaned and simply don't
-                # contribute to any search-map bar.
-                batch = next(
-                    (batch_by_name[name] for name in batch_names if tilt.name.startswith(f"{name}_")),
-                    None,
-                )
-            if batch is None:
-                continue
-            tilt.linked_batch_position_id = batch.id
-            if ACQUISITION_METADATA_KEY in batch.metadata:
-                merge_acquisition_settings_metadata(tilt.metadata, batch.metadata, overwrite=False)
-            if tilt.id not in batch.linked_tilt_series_ids:
-                batch.linked_tilt_series_ids.append(tilt.id)
-            search_map = next((item for item in sample.search_maps if item.id == batch.linked_search_map_id), None)
-            if search_map is not None and tilt.id not in search_map.linked_tilt_series_ids:
-                search_map.linked_tilt_series_ids.append(tilt.id)
-
-    def _link_batch_positions_to_search_maps(self, sample: Sample) -> None:
-        search_maps_by_name = {search_map.name: search_map for search_map in sample.search_maps}
-        for batch in sample.batch_positions:
-            tile_set_name = _tile_set_name(batch.metadata.get("PositionOnTileSet"))
-            if tile_set_name is None:
-                continue
-            search_map = search_maps_by_name.get(tile_set_name)
-            if search_map is None:
-                continue
-            batch.linked_search_map_id = search_map.id
-            search_map.linked_batch_position_ids.append(batch.id)
-
     def _sample_display_name(self, path: Path, metadata: object, tilt_names: list[str]) -> str:
         index = _sample_index(path.name)
         label = _metadata_label(metadata)
@@ -356,21 +240,6 @@ class SessionScanner:
             return _with_index(index, fallback)
         return _with_index(index, path.name)
 
-    def _counts(self, session: Session) -> dict[str, int]:
-        samples = session.samples
-        return {
-            "samples": len(samples),
-            "atlases": len(
-                _dedupe_entities(
-                    [atlas for atlas in [session.atlas, *(sample.atlas for sample in samples)] if atlas is not None]
-                )
-            ),
-            "overviews": len(_dedupe_entities([*session.overviews, *(value for sample in samples for value in sample.overviews)])),
-            "search_maps": len(_dedupe_entities([*session.search_maps, *(value for sample in samples for value in sample.search_maps)])),
-            "search_tiles": len(_dedupe_entities([*session.search_tiles, *(value for sample in samples for value in sample.search_tiles)])),
-            "batch_positions": len(_dedupe_entities([*session.batch_positions, *(value for sample in samples for value in sample.batch_positions)])),
-            "tilt_series": len(_dedupe_entities([*session.tilt_series, *(value for sample in samples for value in sample.tilt_series)])),
-        }
 
 
 def _sample_index(name: str) -> int | None:
@@ -390,15 +259,6 @@ def _metadata_label(metadata: object) -> str | None:
         label = label.get("value")
     if isinstance(label, str) and label.strip():
         return label.strip()
-    return None
-
-
-def _tile_set_name(value: object) -> str | None:
-    if not isinstance(value, dict):
-        return None
-    tile_set_name = value.get("TileSetName")
-    if isinstance(tile_set_name, str) and tile_set_name.strip():
-        return tile_set_name.strip()
     return None
 
 
@@ -449,45 +309,6 @@ def _append_xml_warning(warnings: list[str], metadata: object, filename: str) ->
         warnings.append(f"Could not read metadata XML {filename}: {message}")
 
 
-def _profile_phase(profile: LoadingProfiler | None, name: str, *, count: int = 0):
-    return profile.phase(name, count=count) if profile is not None else nullcontext()
-
-
-def _profiled_parse(profile: LoadingProfiler | None, name: str, parser: Callable[[], T]) -> T:
-    with _profile_phase(profile, name):
+def _profiled_parse(profile: LoadingProfiler, name: str, parser: Callable[[], T]) -> T:
+    with profile.phase(name):
         return parser()
-
-
-def _dedupe_entities(values: list[object]) -> list[object]:
-    unique: list[object] = []
-    seen: set[tuple[str, str]] = set()
-    for value in values:
-        key = _entity_identity_key(value)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(value)
-    return unique
-
-
-def _entity_identity_key(value: object) -> tuple[str, str]:
-    for attr in (
-        "mrc_path",
-        "mdoc_path",
-        "xml_path",
-        "dm_path",
-        "image_path",
-        "search_metadata_path",
-        "overview_image_path",
-        "search_image_path",
-        "tracking_image_path",
-        "exposure_image_path",
-        "path",
-    ):
-        path = getattr(value, attr, None)
-        if path:
-            return type(value).__name__, str(Path(path)).replace("\\", "/").casefold()
-    entity_id = getattr(value, "id", None)
-    if entity_id:
-        return type(value).__name__, str(entity_id)
-    return type(value).__name__, str(id(value))

@@ -11,13 +11,16 @@ def run(argv: Sequence[str] | None = None) -> int:
             "PySide6 is not installed. Install dependencies with `pip install -r requirements.txt`."
         ) from exc
 
-    from tomography_session_browser.diagnostics import install_crash_logging
+    from tomography_session_browser.diagnostics.crash_logging import install_crash_logging
     from tomography_session_browser.services.settings_service import load_settings
     from tomography_session_browser.ui.branding import brand_window_icon
     from tomography_session_browser.ui.main_window import MainWindow
-    from tomography_session_browser.ui.theme import apply_theme, palette_for
+    from tomography_session_browser.ui.qt_logging import install_qt_message_handler
+    from tomography_session_browser.presentation.design_tokens import palette_for
+    from tomography_session_browser.ui.theme import apply_theme
 
     install_crash_logging()
+    install_qt_message_handler()
     app = QApplication(list(argv or []))
     app.setWindowIcon(brand_window_icon())
     settings = load_settings()

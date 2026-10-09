@@ -1,0 +1,24 @@
+"""Constants components for the timeline."""
+from __future__ import annotations
+
+
+MAX_UNGROUPED_LANES = 13
+
+
+MAX_GROUPED_LANES = 13
+
+
+DENSITY_THRESHOLD_SEGMENTS = 50
+
+
+DENSITY_BIN_TARGET = 72
+
+
+HIGHLIGHT_FADE_ALPHA_FACTOR = 0.38
+
+
+HIGHLIGHT_RING_ALPHA = 118
+
+
+HIGHLIGHT_RING_WIDTH = 1.0
+

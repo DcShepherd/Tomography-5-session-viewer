@@ -189,10 +189,3 @@ class Session:
     samples: list[Sample] = field(default_factory=list)
     metadata_summary: Metadata = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class Project:
-    id: str
-    name: str
-    sessions: list[Session] = field(default_factory=list)

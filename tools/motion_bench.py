@@ -136,17 +136,15 @@ def _run_child(args: argparse.Namespace) -> int:
 
     from tomography_session_browser.services.settings_service import Settings
     from tomography_session_browser.ui import main_window as main_window_module
-    from tomography_session_browser.ui.animations import animations_enabled
     from tomography_session_browser.ui.motion import TICKER, motion_enabled
-    from tomography_session_browser.ui.theme import apply_theme, palette_for
+    from tomography_session_browser.presentation.design_tokens import palette_for
+    from tomography_session_browser.ui.theme import apply_theme
 
-    # Never touch the reviewer's real settings file.
-    main_window_module.save_settings = lambda *_a, **_k: None
-    main_window_module.add_recent_session = lambda settings, *_a, **_k: settings
     app = QApplication(sys.argv[:1])
     apply_theme(app, palette_for(args.theme))
-    window = main_window_module.MainWindow(settings=Settings(theme=args.theme))
-    overlay = window.loading_overlay
+    # Never touch the reviewer's real settings file.
+    window = main_window_module.MainWindow(settings=Settings(theme=args.theme), save_settings=lambda _settings: None)
+    overlay = window.ui.loading_overlay
     results: dict = {"renderer": None, "loads": [], "themes": []}
     now = time.perf_counter
 
@@ -165,13 +163,13 @@ def _run_child(args: argparse.Namespace) -> int:
         real_hand_off_update(progress)
 
     overlay._hand_off._on_update = hand_off_update  # noqa: SLF001
-    real_finish = window._finish_loading  # noqa: SLF001
+    real_finish = window.parts.loading.finish_loading  # noqa: SLF001
 
     def finish_loading(*a, **k):
         marks.setdefault("finished", now())
         return real_finish(*a, **k)
 
-    window._finish_loading = finish_loading  # noqa: SLF001
+    window.parts.loading.finish_loading = finish_loading  # noqa: SLF001
     overlay.hidden.connect(lambda: marks.setdefault("gone", now()))
     real_start_quick = overlay._start_quick  # noqa: SLF001
 
@@ -185,27 +183,27 @@ def _run_child(args: argparse.Namespace) -> int:
     real_advance = TICKER.advance
 
     def advance(*a, **k):
-        reveal = window.theme_reveal
+        reveal = window.parts.theme.active_reveal
         if reveal is not None and reveal.revealing:
             ticker_frames.append(now())
         return real_advance(*a, **k)
 
     TICKER.advance = advance
-    real_start_reveal = window._start_theme_reveal  # noqa: SLF001
+    real_start_reveal = window.parts.theme.start_theme_reveal  # noqa: SLF001
 
     def start_reveal(palette):
         reveal = real_start_reveal(palette)
         marks.setdefault("seed", now())
         return reveal
 
-    window._start_theme_reveal = start_reveal  # noqa: SLF001
-    real_landed = window._theme_reveal_landed  # noqa: SLF001
+    window.parts.theme.start_theme_reveal = start_reveal  # noqa: SLF001
+    real_landed = window.parts.theme.theme_reveal_landed  # noqa: SLF001
 
     def landed() -> None:
         marks.setdefault("landed", now())
         real_landed()
 
-    window._theme_reveal_landed = landed  # noqa: SLF001
+    window.parts.theme.theme_reveal_landed = landed  # noqa: SLF001
 
     def tour():
         width, height = (int(value) for value in args.size.lower().split("x"))
@@ -215,13 +213,13 @@ def _run_child(args: argparse.Namespace) -> int:
         yield max(1, int(args.warm_up * 1000))
         results["renderer"] = {"kind": overlay.renderer.kind}
         # Without motion there is no hand-off or reveal to measure.
-        results["motion"] = {"hand_off": animations_enabled(overlay), "reveal": motion_enabled(window)}
+        results["motion"] = {"hand_off": motion_enabled(overlay), "reveal": motion_enabled(window)}
         for index, session in enumerate(args.session):
             marks.clear()
             hand_off_frames.clear()
             qInfo(f"MARK load{index}_start")
             started = now()
-            window.load_session(session, replace=index == 0)
+            window.parts.loading.load_session(session, replace=index == 0)
             # Connected before the event loop runs again, so before the orbs'
             # first frame can be reported, even if the load created them.
             quick = overlay._quick  # noqa: SLF001
@@ -231,7 +229,7 @@ def _run_child(args: argparse.Namespace) -> int:
                 else None
             )
             yield 50
-            while window._loading_overlay_active() and now() - started < LOAD_TIMEOUT_S:  # noqa: SLF001
+            while window.parts.loading.loading_overlay_active() and now() - started < LOAD_TIMEOUT_S:  # noqa: SLF001
                 yield 20
             qInfo(f"MARK load{index}_end")
             ended = now()
@@ -262,14 +260,14 @@ def _run_child(args: argparse.Namespace) -> int:
                 }
             )
             yield 800
-        window.toast.dismiss()
+        window.ui.toast.dismiss()
         for target in ("light" if args.theme == "dark" else "dark", args.theme):
             marks.clear()
             ticker_frames.clear()
             clicked = now()
-            window.theme_action.setChecked(target == "light")
+            window.ui.theme_action.setChecked(target == "light")
             yield 50
-            while window.theme_reveal is not None and now() - clicked < 10:
+            while window.parts.theme.active_reveal is not None and now() - clicked < 10:
                 yield 10
             yield 300
             results["themes"].append(

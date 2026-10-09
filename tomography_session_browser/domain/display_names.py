@@ -24,6 +24,24 @@ def count_phrase(count: int, singular: str, plural: str | None = None) -> str:
     return f"{count:,} {noun}"
 
 
+def format_search_tile_display_name(name: str | None, search_map_name: str | None) -> str:
+    """``"SA_control_1 · Tile 17"`` for a search tile named
+    ``"SA_control_1 · Tile 17 · SearchMap_20260924_113244"``.
+
+    Display only (harmonisation B3). Every row of a search map's tiles ended in
+    the same map name, so a narrow list kept only that shared tail
+    ("…archMap_20260924_113244") and dropped the part that tells rows apart.
+    The map name moves to the row's second line; the parsed name, which is the
+    tile's full description, is untouched and stays in the tooltip.
+    """
+
+    text = (name or "").strip()
+    suffix = f" · {search_map_name}" if search_map_name else ""
+    if suffix and text.endswith(suffix) and len(text) > len(suffix):
+        return text[: -len(suffix)]
+    return text
+
+
 def format_overview_display_name(name: str | None) -> str:
     """Return a compact, display-only label for overview names.
 

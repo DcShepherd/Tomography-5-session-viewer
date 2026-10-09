@@ -17,7 +17,8 @@ from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
-from tomography_session_browser.ui.session_presenter import DefocusPlotModel, defocus_point_tooltip
+from tomography_session_browser.presentation.dashboard.models import DefocusPlotModel
+from tomography_session_browser.presentation.dashboard.sections.metrics import defocus_point_tooltip
 from tomography_session_browser.ui.widgets.time_chart import (
     TIME_CHART_AXIS_LABEL_GAP,
     TIME_CHART_BOTTOM_AXIS_SPACE,

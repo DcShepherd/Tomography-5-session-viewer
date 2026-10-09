@@ -20,14 +20,7 @@ from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QHelpEvent, QKeyEvent, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
-from tomography_session_browser.ui.session_presenter import (
-    TILE_STATUS_COMPLETE,
-    TILE_STATUS_FAILED,
-    TILE_STATUS_MISSING,
-    TILE_STATUS_NEUTRAL,
-    TILE_STATUS_WARNING,
-    StatusTileModel,
-)
+from tomography_session_browser.presentation.dashboard.models import TILE_STATUS_COMPLETE, TILE_STATUS_FAILED, TILE_STATUS_MISSING, TILE_STATUS_NEUTRAL, TILE_STATUS_WARNING, StatusTileModel
 from tomography_session_browser.ui.theme import current_palette
 
 
@@ -90,6 +83,8 @@ class StatusTileGrid(QWidget):
         self._color_warning = QColor(theme.chart_amber)
         self._color_failed = QColor(theme.chart_red)
         self._color_missing = QColor(theme.chart_red)
+        # The card's legend dot for a neutral item, and the PDF's tile.
+        self._color_unknown = QColor(theme.unknown)
         self._color_neutral = QColor(theme.chart_grey)
 
     def refresh_theme(self, *, accent: QColor | str | None = None) -> None:
@@ -253,10 +248,11 @@ class StatusTileGrid(QWidget):
         if status == TILE_STATUS_MISSING:
             return self._color_missing
         if status == TILE_STATUS_NEUTRAL:
-            # Neutral items (e.g. "loaded" with no further status) use the
-            # card's accent colour so a uniform set of tiles reads as
-            # "everything is in its expected state".
-            return self._accent
+            # The colour of the card's legend dot for the same items ("2
+            # unknown", "1 pending"). The tiles used the card's accent, so
+            # the Atlases card drew its two unknown atlases in teal beside a
+            # grey "2 unknown".
+            return self._color_unknown
         return self._color_neutral
 
     # ------------------------------------------------------------- mouse / hover

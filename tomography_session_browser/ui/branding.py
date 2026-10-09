@@ -11,7 +11,8 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QIcon, Q
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from tomography_session_browser.ui.theme import MONO_FONT_NAME, SANS_FONT_NAME, current_palette, palette_for
+from tomography_session_browser.presentation.design_tokens import MONO_FONT_NAME, SANS_FONT_NAME, palette_for
+from tomography_session_browser.ui.theme import current_palette
 
 
 _BRAND_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "assets" / "branding"
@@ -68,34 +69,6 @@ def mark_asset_name(theme_name: str) -> str:
     """Return the theme-appropriate mark-only asset."""
 
     return "tomo_mark_light.svg" if theme_name == "light" else "tomo_mark_dark.svg"
-
-
-class StackMarkWidget(QWidget):
-    """Native vector-painted version of the approved 7-ray Stack mark."""
-
-    def __init__(self, parent: QWidget | None = None, *, size: int = _TITLEBAR_MARK_SIZE) -> None:
-        super().__init__(parent)
-        self._theme_name = current_palette().name
-        self.setFixedSize(size, size)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-
-    def set_theme(self, theme_name: str) -> None:
-        if self._theme_name == theme_name:
-            return
-        self._theme_name = theme_name
-        self.update()
-
-    def set_mark_size(self, size: int) -> None:
-        self.setFixedSize(size, size)
-        self.updateGeometry()
-
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt signature
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        try:
-            draw_stack_mark(painter, QRectF(self.rect()), self._theme_name)
-        finally:
-            painter.end()
 
 
 class TitleBarLockup(QWidget):

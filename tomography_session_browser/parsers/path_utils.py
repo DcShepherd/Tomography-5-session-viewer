@@ -15,6 +15,17 @@ def natural_key(value: str) -> list[int | str]:
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", value)]
 
 
+def casefold_natural_key(value: str) -> tuple[int | str, ...]:
+    """``natural_key`` with ``casefold()`` in place of ``lower()``.
+
+    Batch-position labels, PDF captions and navigation's tilt-series order
+    use this one. The two disagree only on a few non-ASCII letters (ß, the
+    micro sign, final sigma), and they stay apart so no ordering moves.
+    """
+
+    return tuple(int(part) if part.isdigit() else part for part in re.split(r"(\d+)", value.casefold()))
+
+
 def is_sample_dir(path: Path) -> bool:
     return path.is_dir() and SAMPLE_NAME_RE.match(path.name) is not None
 

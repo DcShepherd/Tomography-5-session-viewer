@@ -1,6 +1,6 @@
 """Renders an :class:`EmptyState` as a real panel (plan item V1).
 
-The six variants in ``ui/empty_states.py`` were modelled and tested in E1, but
+The six variants in ``presentation/empty_states.py`` were modelled and tested in E1, but
 only the viewer's empty *title* consumed them — so ``load_failed`` and
 ``missing_preview``, both fully specified, could never actually be seen. This
 is the surface they were missing.
@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from tomography_session_browser.ui.empty_states import (
+from tomography_session_browser.presentation.empty_states import (
     KIND_LOAD_FAILED,
     EmptyState,
 )
@@ -80,7 +80,8 @@ class EmptyStatePanel(QWidget):
         button_row.setSpacing(8)
         button_row.addStretch(1)
         self.primary_button = QPushButton("", self)
-        self.primary_button.setObjectName("primaryAction")
+        # The one primary recipe, shared with the dialogs (#primaryButton).
+        self.primary_button.setObjectName("primaryButton")
         self.primary_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.primary_button.clicked.connect(self._emit_primary)
         button_row.addWidget(self.primary_button)

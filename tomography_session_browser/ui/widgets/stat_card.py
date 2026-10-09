@@ -21,19 +21,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from tomography_session_browser.ui.session_presenter import (
-    TILE_STATUS_COMPLETE,
-    TILE_STATUS_FAILED,
-    TILE_STATUS_MISSING,
-    TILE_STATUS_NEUTRAL,
-    TILE_STATUS_WARNING,
-    StatCardModel,
-    StatusTileModel,
-)
+from tomography_session_browser.presentation.dashboard.models import TILE_STATUS_COMPLETE, TILE_STATUS_FAILED, TILE_STATUS_MISSING, TILE_STATUS_NEUTRAL, TILE_STATUS_WARNING, StatCardModel, tile_status_word
 from tomography_session_browser.ui.icons import themed_icon
-from tomography_session_browser.ui.theme import (
+from tomography_session_browser.presentation.design_tokens import (
     SPACE_S,
     SPACE_XS,
+)
+from tomography_session_browser.ui.theme import (
     TIER_PRIMARY,
     TIER_SUPPORTING,
     apply_tier,
@@ -71,13 +65,8 @@ _CARD_HELP = {
     "Batch positions": "Acquisition targets parsed from BatchPositionsList.xml.",
     "Tilt series": "Acquired MRC stacks, classified by tilt-series validation.",
 }
-_STATUS_LABELS = {
-    TILE_STATUS_COMPLETE: "complete",
-    TILE_STATUS_WARNING: "warnings",
-    TILE_STATUS_FAILED: "failed",
-    TILE_STATUS_MISSING: "missing",
-    TILE_STATUS_NEUTRAL: "loaded",
-}
+#: Chip words come from ``presentation.dashboard.models.tile_status_word``, which the
+#: tile tooltips and the PDF cover use too.
 
 
 def _dot_pixmap(colour: str):
@@ -254,7 +243,7 @@ class StatCard(QFrame):
             self._status_dots.append((dot, dot_slot))
             dot.setAccessibleName("")
             chip_layout.addWidget(dot)
-            text = QLabel(f"{count} {_STATUS_LABELS[status]}", chip)
+            text = QLabel(f"{count} {tile_status_word(model.label, status)}", chip)
             # Styled from the sheet, not inline: an inline rule baked the
             # palette in at construction, so a theme switch left the chip text
             # in the old theme's colour until the card was rebuilt.

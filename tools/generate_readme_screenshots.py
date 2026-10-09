@@ -41,17 +41,16 @@ from tomography_session_browser.domain.models import (
 )
 from tomography_session_browser.domain.markers import MarkerType
 from tomography_session_browser.parsers.session_scanner import SessionScanner
-from tomography_session_browser.services.marker_service import (
-    BEAM_DIAMETER_EXPOSURE_MRC_CONTEXT,
-    search_map_markers,
-)
+from tomography_session_browser.services.markers.builders import search_map_markers
+from tomography_session_browser.services.markers.context import BEAM_DIAMETER_EXPOSURE_MRC_CONTEXT
 from tomography_session_browser.services.settings_service import Settings
-from tomography_session_browser.ui import main_window as main_window_module
 from tomography_session_browser.ui.load_sessions_dialog import LoadSessionsDialog
-from tomography_session_browser.ui.main_window import MainWindow, TAB_LABELS
-from tomography_session_browser.ui.report_scope import ReportScopeDialog
+from tomography_session_browser.ui.main_window import MainWindow
+from tomography_session_browser.ui.shell.chrome import TAB_LABELS
+from tomography_session_browser.ui.report_scope_dialog import ReportScopeDialog
 from tomography_session_browser.ui import theme as theme_module
-from tomography_session_browser.ui.theme import apply_theme, palette_for
+from tomography_session_browser.presentation.design_tokens import palette_for
+from tomography_session_browser.ui.theme import apply_theme
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -293,7 +292,7 @@ def _search_map_stage_offset(pixel: tuple[float, float]) -> tuple[float, float]:
     """The stage offset (m) from the map centre that the app draws at ``pixel``.
 
     The inverse of the app's search-map projection, including the Tomography 5
-    point reflection through the image centre (``marker_service``). ``main``
+    point reflection through the image centre (``services/markers``). ``main``
     checks the round trip, so a change there fails here, not in the picture.
     """
 
@@ -586,8 +585,6 @@ def main() -> int:
             QFontDatabase.addApplicationFont(font_path)
     theme_module.MONO_FONT_FAMILY = '"Consolas"'
     apply_theme(app, palette_for("dark"))
-    main_window_module.save_settings = lambda *_args, **_kwargs: None
-    main_window_module.add_recent_session = lambda settings, *_args, **_kwargs: settings
 
     folder_dialog = LoadSessionsDialog(SessionScanner(), "", None)
     folder_dialog.add_paths(
@@ -602,35 +599,23 @@ def main() -> int:
 
     atlas_session, collection_session, search_map = _build_demo_sessions(paths, targets)
     _check_targets_land_on_their_cells(collection_session, search_map, targets)
-    window = MainWindow(settings=Settings(theme="dark"))
+    # Never touch the reviewer's real settings file.
+    window = MainWindow(settings=Settings(theme="dark"), save_settings=lambda _settings: None)
     window.resize(1600, 900)
-    window._integrate_loaded_session(  # noqa: SLF001 - documentation screenshot harness
-        atlas_session,
-        str(atlas_session.path),
-        replace=True,
-        quiet=True,
-        animate=False,
-    )
-    window._integrate_loaded_session(  # noqa: SLF001 - documentation screenshot harness
-        collection_session,
-        str(collection_session.path),
-        replace=False,
-        quiet=True,
-        animate=False,
-    )
-    window.context_dock.hide()
-    window.context_panel_action.setChecked(False)
+    window.parts.loading.show_parsed_sessions([atlas_session, collection_session])
+    window.ui.context_dock.hide()
+    window.ui.context_panel_action.setChecked(False)
     window.show()
     _process_events(app, milliseconds=600)
     _save_widget(window, "02-linked-session-dashboard.png", app)
 
-    window.tabs.setCurrentIndex(TAB_LABELS.index("Search map"))
-    window._viewer_tabs["Search map"].ensure_initial_preview_loaded()  # noqa: SLF001
+    window.ui.tabs.setCurrentIndex(TAB_LABELS.index("Search map"))
+    window.ui.viewer_tabs["Search map"].ensure_initial_preview_loaded()  # noqa: SLF001
     QThreadPool.globalInstance().waitForDone(5000)
     _process_events(app, milliseconds=1000)
     _save_widget(window, "03-search-map-review.png", app)
 
-    groups = window._project_groups()  # noqa: SLF001 - documentation screenshot harness
+    groups = window.parts.scopes.project_groups()  # noqa: SLF001 - documentation screenshot harness
     report_dialog = ReportScopeDialog(groups, current_scope=groups[0] if groups else None)
     report_dialog.resize(660, 600)
     _save_widget(report_dialog, "04-report-scope.png", app)

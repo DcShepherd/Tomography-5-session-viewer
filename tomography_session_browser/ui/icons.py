@@ -17,10 +17,10 @@ from math import ceil
 from typing import Final
 
 from PySide6.QtCore import QByteArray, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
-from tomography_session_browser.ui.theme import DARK_PALETTE
+from tomography_session_browser.presentation.design_tokens import DARK_PALETTE
 
 _ICON_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "assets" / "icons"
 _DEFAULT_SIZE: Final[int] = 18
@@ -104,8 +104,3 @@ def _missing_svg() -> str:
         'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
         '<polygon points="12 2 22 12 12 22 2 12"/></svg>'
     )
-
-
-# Importable QColor for callers that want to subclass / blend.
-def parse_color(color: str) -> QColor:
-    return QColor(color)

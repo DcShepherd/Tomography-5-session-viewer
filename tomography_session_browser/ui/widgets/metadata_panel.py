@@ -13,7 +13,13 @@ with simple, conservative heuristics:
 * a value that looks like a filesystem path is rendered with middle-elision
   and a tooltip + clipboard-copy button;
 * a blank line renders as vertical spacing;
-* anything else is rendered as a single muted row.
+* anything else is rendered as a single muted row;
+* a ``Status`` row whose value is a status word is drawn as the header's
+  status pill, and each ``- warning`` line under ``Warnings:`` as a toned
+  callout (harmonisation C1), when the window supplies the tone rules;
+* a value ending in a parenthetical qualifier shows the qualifier as a muted
+  second line (harmonisation E2): "6.78 Å/px" over "original 3.39 Å/px,
+  binning 2×".
 
 The widget is fully presentational — no domain imports.
 
@@ -29,9 +35,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import re
-from typing import Iterable
+from typing import Callable, Iterable
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFontMetrics, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QFrame,
@@ -48,7 +54,7 @@ from PySide6.QtWidgets import (
 
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.motion import SmoothScroller
-from tomography_session_browser.ui.theme import SPACE_M, SPACE_S, SPACE_XS
+from tomography_session_browser.presentation.design_tokens import SPACE_M, SPACE_S, SPACE_XS
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 
 _PATH_HINTS = ("/", "\\")
@@ -92,6 +98,11 @@ _KEY_OUTLIER_RATIO = 1.5
 # Room between the value column and the scroll bar.
 _BODY_RIGHT_MARGIN = SPACE_S
 _EMPTY_TITLE = "No selection"
+#: Keys whose value is a status word, drawn as the status pill.
+_STATUS_KEYS = frozenset({"Status"})
+#: The section whose ``- warning`` lines are drawn as callouts.
+_WARNINGS_SECTION = "Warnings"
+_WARNING_PREFIX = "- "
 
 # Display-only glue for values. A number stays with its unit, and a unit such
 # as "Å/px" never breaks at its slash (Qt's line breaker allows a break after
@@ -155,7 +166,8 @@ def _display_key(key: str) -> str:
 
 
 def _key_label(key: str) -> QLabel:
-    label = QLabel(f"{_display_key(key)}:")
+    # No trailing colon: the key column already separates key from value.
+    label = QLabel(_display_key(key))
     label.setObjectName("metaKey")
     label.setMinimumWidth(_KEY_COLUMN_MIN_WIDTH)
     label.setMaximumWidth(_KEY_COLUMN_MAX_WIDTH)
@@ -179,6 +191,30 @@ def _looks_like_path(key: str, value: str) -> bool:
     if value.startswith("/") and len(value) > 12:
         return True
     return False
+
+
+def split_qualifier(value: str) -> tuple[str, str | None]:
+    """``"6.78 Å/px (original 3.39 Å/px, binning 2×)"`` → the value and its
+    qualifier, or the value and ``None`` when it has no trailing one."""
+
+    text = value.strip()
+    if not text.endswith(")"):
+        return value, None
+    depth = 0
+    for index in range(len(text) - 1, -1, -1):
+        character = text[index]
+        if character == ")":
+            depth += 1
+        elif character == "(":
+            depth -= 1
+            if depth == 0:
+                main = text[:index].rstrip()
+                qualifier = text[index + 1 : -1].strip()
+                # "(none)" alone, or "f(x)" without a space, is not a qualifier.
+                if not main or not qualifier or not text[index - 1].isspace():
+                    return value, None
+                return main, qualifier
+    return value, None
 
 
 def _display_value_and_tooltip(key: str, value: str) -> tuple[str, str | None]:
@@ -238,6 +274,7 @@ class _ValueLabel(QLabel):
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
         self.setMinimumWidth(1)
         self._full = ""
+        self._copy_full = ""
         self._extra_tooltip: str | None = None
         self._single_token: bool | None = None
         self.set_value(value, tooltip)
@@ -245,8 +282,10 @@ class _ValueLabel(QLabel):
     def value(self) -> str:
         return self._full
 
-    def set_value(self, value: str, tooltip: str | None = None) -> None:
+    def set_value(self, value: str, tooltip: str | None = None, *, copy_text: str | None = None) -> None:
         self._full = value
+        # What "Copy value" gives: the whole source value, qualifier included.
+        self._copy_full = copy_text if copy_text is not None else value
         self._extra_tooltip = tooltip or None
         single_token = bool(value) and not any(character.isspace() for character in value)
         if single_token != self._single_token:
@@ -285,8 +324,13 @@ class _ValueLabel(QLabel):
 
     def _text_to_copy(self) -> str:
         if self._single_token and super().text() != self._full:
-            return self._full
-        return clean_copied_text(self.selectedText() or self._full)
+            return self._copy_full
+        selected = self.selectedText()
+        # The whole value selected copies the source, with the qualifier
+        # shown on the line below (E2); part of it copies just that part.
+        if not selected or selected == super().text():
+            return clean_copied_text(self._copy_full)
+        return clean_copied_text(selected)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt signature
         if event.matches(QKeySequence.StandardKey.Copy):
@@ -301,7 +345,7 @@ class _ValueLabel(QLabel):
         copy_selection.setEnabled(self.hasSelectedText())
         copy_selection.triggered.connect(lambda: _set_clipboard(self._text_to_copy()))
         copy_value = menu.addAction("Copy value")
-        copy_value.triggered.connect(lambda: _set_clipboard(self._full))
+        copy_value.triggered.connect(lambda: _set_clipboard(self._copy_full))
         menu.exec(event.globalPos())
 
 
@@ -368,14 +412,105 @@ class _KeyValueRow(QWidget):
 
         layout.addWidget(_key_label(key))
 
-        self._value_label = _ValueLabel(value, tooltip, self)
-        layout.addWidget(self._value_label, stretch=1)
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        self._value_label = _ValueLabel("", None, self)
+        column.addWidget(self._value_label)
+        # A trailing "(…)" qualifier, on its own muted line.
+        self._detail_label = QLabel(self)
+        self._detail_label.setObjectName("metaValueDetail")
+        self._detail_label.setWordWrap(True)
+        self._detail_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._detail_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
+        self._detail_label.setVisible(False)
+        column.addWidget(self._detail_label)
+        layout.addLayout(column, stretch=1)
+        self.set_value(value, tooltip)
 
     def set_value(self, value: str, tooltip: str | None = None) -> None:
-        self._value_label.set_value(value, tooltip)
+        main, qualifier = split_qualifier(value) if tooltip is None else (value, None)
+        self._value_label.set_value(main, tooltip, copy_text=value)
+        if qualifier is not None:
+            shown = display_value(qualifier)
+            if self._detail_label.text() != shown:
+                self._detail_label.setText(shown)
+        self._detail_label.setVisible(qualifier is not None)
         row_tooltip = tooltip or ""
         if self.toolTip() != row_tooltip:
             self.setToolTip(row_tooltip)
+
+
+class _StatusRow(QWidget):
+    """``Status`` as the header's pill: one status, drawn one way (C1)."""
+
+    def __init__(self, key: str, value: str, tone: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.key = key
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(SPACE_S)
+        layout.addWidget(_key_label(key))
+        self._pill = QLabel(self)
+        self._pill.setObjectName("viewerChipStatus")
+        self._pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._pill.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self._pill, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        layout.addStretch(1)
+        self.set_value(value, tone)
+
+    def value(self) -> str:
+        return self._pill.text()
+
+    def set_value(self, value: str, tone: str | None = None) -> None:
+        if self._pill.text() != value:
+            self._pill.setText(value)
+            self._pill.setAccessibleName(f"{self.key}: {value}")
+        if tone is not None and self._pill.property("tone") != tone:
+            self._pill.setProperty("tone", tone)
+            style = self._pill.style()
+            style.unpolish(self._pill)
+            style.polish(self._pill)
+
+
+class _CalloutRow(QFrame):
+    """One warning, in the dashboard's tone for its severity (C1).
+
+    ``Title: detail`` warnings show the title in bold over the detail; the
+    whole warning stays selectable and is the accessible name.
+    """
+
+    def __init__(self, text: str, tone: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("metaCallout")
+        self.setProperty("tone", tone)
+        self.setAccessibleName(f"Warning: {text}")
+        self.warning = text
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(SPACE_S, SPACE_S, SPACE_S, SPACE_S)
+        layout.setSpacing(SPACE_S)
+        dot = QLabel("\u25cf", self)
+        dot.setObjectName("statusDot")
+        dot.setProperty("compact", True)
+        dot.setProperty("tone", tone)
+        layout.addWidget(dot, alignment=Qt.AlignmentFlag.AlignTop)
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        title, separator, detail = text.partition(": ")
+        if not separator or not detail.strip():
+            title, detail = text, ""
+        self._title = QLabel(display_value(title.strip()), self)
+        self._title.setObjectName("metaCalloutTitle")
+        self._detail = QLabel(display_value(detail.strip()), self)
+        self._detail.setObjectName("metaCalloutDetail")
+        for label in (self._title, self._detail):
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
+            column.addWidget(label)
+        self._detail.setVisible(bool(detail.strip()))
+        layout.addLayout(column, stretch=1)
 
 
 class _SectionHeader(QLabel):
@@ -402,15 +537,19 @@ class _RowSpec:
     in place without rebuilding the widget.
     """
 
-    kind: str  # "section" | "kv" | "path" | "plain" | "spacer"
+    kind: str  # "section" | "kv" | "path" | "plain" | "spacer" | "status" | "callout"
     signature: tuple
     value: str
     indented: bool
     tooltip: str | None = None
+    tone: str | None = None
 
 
 class MetadataPanel(QWidget):
     """Right-hand context panel: structured rows with elided paths."""
+
+    #: The title changed; the window decides whether it repeats the page's.
+    title_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -453,6 +592,11 @@ class MetadataPanel(QWidget):
         # in place or rebuild.
         self._row_specs: list[_RowSpec] = []
         self._row_widgets: list[QWidget] = []
+        # Tone rules supplied by the window (the panel has no domain imports):
+        # a status word to the header pill's tone, a warning to its
+        # dashboard tone. Without them, rows render as plain key/values.
+        self._status_tone: Callable[[str], str | None] | None = None
+        self._warning_tone: Callable[[str], str] | None = None
 
         self._placeholder = "Metadata, warnings, and linked objects will appear here."
         self.set_text(self._placeholder)
@@ -460,14 +604,35 @@ class MetadataPanel(QWidget):
     # ----- public API -----
 
     def set_title(self, text: str) -> None:
-        self._title.setText(text or _EMPTY_TITLE)
+        title = text or _EMPTY_TITLE
+        changed = title != self._title.text_full()
+        self._title.setText(title)
+        if changed:
+            self.title_changed.emit(title)
+
+    def set_title_shown(self, shown: bool) -> None:
+        """Hide the title line when the page beside the panel already names
+        the same item (harmonisation A1); ``text()`` still returns it."""
+
+        if self._title.isHidden() == shown:
+            self._title.setVisible(shown)
+
+    def set_status_tone(self, rule: Callable[[str], str | None] | None) -> None:
+        """``rule(word)`` is the header pill's tone for a status word, or None."""
+
+        self._status_tone = rule
+
+    def set_warning_tone(self, rule: Callable[[str], str] | None) -> None:
+        """``rule(warning)`` is the dashboard tone of one raw warning."""
+
+        self._warning_tone = rule
 
     def set_text(self, text: str) -> None:
         self._raw_text = text or ""
         if not text or not text.strip():
             specs = [_RowSpec("plain", ("plain", self._placeholder), self._placeholder, False)]
         else:
-            specs = list(self._parse(text.splitlines()))
+            specs = self._without_title_echo(list(self._parse(text.splitlines())))
 
         # Fast path: same structure as last render → just update mutable
         # values on the existing widgets. This is the common case for tilt
@@ -599,7 +764,21 @@ class MetadataPanel(QWidget):
                 widget.set_value(spec.value, spec.tooltip)  # type: ignore[attr-defined]
             elif spec.kind == "path":
                 widget.set_value(spec.value)  # type: ignore[attr-defined]
+            elif spec.kind == "status":
+                widget.set_value(spec.value, spec.tone)  # type: ignore[attr-defined]
         self._row_specs = list(specs)
+
+    def _without_title_echo(self, specs: list[_RowSpec]) -> list[_RowSpec]:
+        """Drop a first row that only repeats the title ("Tilt series:
+        SA_control_1" under "SA_control_1"; harmonisation A1/E2)."""
+
+        title = self._title.text_full()
+        if specs and specs[0].kind == "kv" and not specs[0].indented and specs[0].value == title:
+            specs = specs[1:]
+            # The blank line after it would open the panel with a gap.
+            while specs and specs[0].kind == "spacer":
+                specs = specs[1:]
+        return specs
 
     def _build_widget(self, spec: _RowSpec) -> QWidget:
         if spec.kind == "spacer":
@@ -612,6 +791,10 @@ class MetadataPanel(QWidget):
             row: QWidget = _PathRow(spec.signature[1], spec.value)
         elif spec.kind == "kv":
             row = _KeyValueRow(spec.signature[1], spec.value, spec.tooltip)
+        elif spec.kind == "status":
+            row = _StatusRow(spec.signature[1], spec.value, spec.tone or "neutral")
+        elif spec.kind == "callout":
+            row = _CalloutRow(spec.value, spec.tone or "warn")
         else:  # plain
             row = _PlainRow(spec.value)
         if spec.indented:
@@ -619,6 +802,7 @@ class MetadataPanel(QWidget):
         return row
 
     def _parse(self, lines: Iterable[str]) -> Iterable[_RowSpec]:
+        section = ""
         for raw in lines:
             line = raw.rstrip()
             if not line.strip():
@@ -626,15 +810,30 @@ class MetadataPanel(QWidget):
                 continue
             stripped = line.lstrip()
             indented = len(line) - len(stripped) > 0
+            if (
+                section == _WARNINGS_SECTION
+                and indented
+                and stripped.startswith(_WARNING_PREFIX)
+                and self._warning_tone is not None
+            ):
+                warning = stripped[len(_WARNING_PREFIX):].strip()
+                yield _RowSpec("callout", ("callout", warning), warning, indented, tone=self._warning_tone(warning))
+                continue
             if ":" in stripped:
                 key, _, value = stripped.partition(":")
                 key = key.strip()
                 value = value.strip()
                 if value == "":
+                    if not indented:
+                        section = key
                     yield _RowSpec("section", ("section", key), key, indented)
                     continue
                 if _looks_like_path(key, value):
                     yield _RowSpec("path", ("path", key, indented), value, indented)
+                    continue
+                tone = self._status_tone(value) if key in _STATUS_KEYS and self._status_tone is not None else None
+                if tone is not None:
+                    yield _RowSpec("status", ("status", key, indented), value, indented, tone=tone)
                     continue
                 value, tooltip = _display_value_and_tooltip(key, value)
                 yield _RowSpec("kv", ("kv", key, indented), value, indented, tooltip)

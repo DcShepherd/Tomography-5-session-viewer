@@ -6,10 +6,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from tomography_session_browser.domain.coerce import text_or_none
 from tomography_session_browser.domain.models import BatchPosition
 from tomography_session_browser.parsers.mrc_parser import read_mrc_metadata
 from tomography_session_browser.parsers.path_utils import safe_id, sorted_paths
-from tomography_session_browser.parsers.xml_parser import as_list, find_all, parse_xml_file
+from tomography_session_browser.parsers.xml_parser import parse_xml_file
 from tomography_session_browser.services.acquisition_metadata import (
     ACQUISITION_SPOT_LABEL,
     LEGACY_SPOT_LABEL,
@@ -20,6 +21,7 @@ from tomography_session_browser.services.acquisition_metadata import (
     apply_acquisition_settings,
     extract_acquisition_settings,
     extract_batch_position_settings,
+    scoped_batch_position_values,
 )
 
 
@@ -117,7 +119,7 @@ def _positions_from_xml(path: Path, warnings: list[str] | None = None) -> list[B
     message = _xml_warning(path, data)
     if message and warnings is not None:
         warnings.append(message)
-    raw_positions = _scoped_batch_position_values(data, "BatchPositionParameters")
+    raw_positions = scoped_batch_position_values(data, "BatchPositionParameters")
     positions: list[BatchPosition] = []
     for index, raw in enumerate(raw_positions):
         if not isinstance(raw, dict):
@@ -446,7 +448,7 @@ def _beam_diameter_candidates(data: Any, path: tuple[str, ...] = (), order: list
     if order is None:
         order = [0]
     if isinstance(data, dict):
-        key_label = _as_nonempty_str(data.get("Key"))
+        key_label = text_or_none(data.get("Key"))
         if key_label and "Value" in data:
             yield from _beam_diameter_candidates(data.get("Value"), (*path, key_label), order)
         for key, item in data.items():
@@ -501,44 +503,12 @@ def _beam_diameter_value(value: Any) -> float | str | None:
     return value
 
 
-def _as_nonempty_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
 def _positive_int(value: Any) -> int | None:
     try:
         numeric = int(value)
     except (TypeError, ValueError):
         return None
     return numeric if numeric > 0 else None
-
-
-def _scoped_batch_position_values(data: dict[str, Any], key: str) -> list[Any]:
-    values: list[Any] = []
-    for path, value in find_all(data, key):
-        if not _valid_batch_position_path(path, key):
-            continue
-        values.extend(as_list(value))
-    return values
-
-
-def _valid_batch_position_path(path: tuple[str, ...], key: str) -> bool:
-    if not path or path[-1] != key:
-        return False
-    if len(path) == 1:
-        return True
-    parent = re.sub(r"[^a-z0-9]", "", path[-2].casefold())
-    return parent in {
-        "batchpositions",
-        "batchpositionslist",
-        "batchpositionlist",
-        "positions",
-        "arrayofbatchpositionparameters",
-        "root",
-    }
 
 
 def _append_xml_warning(path: Path, data: dict[str, Any], positions: list[BatchPosition]) -> None:

@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from tomography_session_browser.ui.session_presenter import (
-    DoseInformationPlotModel,
-    dose_information_point_tooltip,
-)
+from tomography_session_browser.presentation.dashboard.models import DoseInformationPlotModel
+from tomography_session_browser.presentation.dashboard.sections.metrics import dose_information_point_tooltip
 from tomography_session_browser.ui.widgets.defocus_plot import DefocusScatterPlot
 
 

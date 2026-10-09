@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=args.log_level.upper(), format="%(levelname)s %(name)s: %(message)s")
 
     # Local imports keep argument parsing fast and avoid loading PySide6.
-    from tomography_session_browser.services.loading_profiler import (
+    from tomography_session_browser.diagnostics.profiling import (
         LoadingProfiler,
         active_profile,
     )
@@ -96,10 +96,8 @@ def main(argv: list[str] | None = None) -> int:
             from tomography_session_browser.services.timeline_service import (
                 build_session_timeline,
             )
-            from tomography_session_browser.ui.session_presenter import (
-                session_dashboard_model,
-                session_warnings,
-            )
+            from tomography_session_browser.presentation.dashboard.dashboard import session_dashboard_model
+            from tomography_session_browser.presentation.warnings import session_warnings
 
             scope_value = session if session is not None else None
             if scope_value is not None:

@@ -32,15 +32,17 @@ from PySide6.QtWidgets import (
 )
 
 from tomography_session_browser.domain.display_names import count_phrase
+from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.services.session_intake import (
     DroppedFolder,
     FolderCheck,
     SessionIntake,
     assess_paths,
-    path_identity_key,
 )
+from tomography_session_browser.ui.folder_picker import select_session_folder
 from tomography_session_browser.ui.icons import themed_icon
-from tomography_session_browser.ui.theme import SPACE_L, SPACE_M, SPACE_S, SPACE_XL, SPACE_XS, SPACE_XXL, current_palette
+from tomography_session_browser.presentation.design_tokens import SPACE_L, SPACE_M, SPACE_S, SPACE_XL, SPACE_XS, SPACE_XXL
+from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 from tomography_session_browser.ui.widgets.session_drop import (
     Glyph,
@@ -397,11 +399,8 @@ class LoadSessionsDialog(QDialog):
     # -- browsing and dropping ------------------------------------------------------
 
     def _browse(self) -> None:
-        # Imported here: main_window imports this module.
-        from tomography_session_browser.ui.main_window import _select_session_folder
-
         start = str(Path(self._paths[-1]).parent) if self._paths else self._start_path
-        path = _select_session_folder(self, "Select session folder", start, "Add folder")
+        path = select_session_folder(self, "Select session folder", start, "Add folder")
         if path:
             self.add_paths([path])
 

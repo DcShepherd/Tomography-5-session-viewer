@@ -93,11 +93,13 @@ def main(argv: list[str] | None = None) -> int:
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
 
-    from tomography_session_browser.diagnostics import install_crash_logging
+    from tomography_session_browser.diagnostics.crash_logging import install_crash_logging
     from tomography_session_browser.services.settings_service import load_settings
     from tomography_session_browser.ui.main_window import MainWindow
+    from tomography_session_browser.ui.qt_logging import install_qt_message_handler
 
     install_crash_logging(also_stream=False)
+    install_qt_message_handler()
     app = QApplication.instance() or QApplication([])
     settings = load_settings()
     window = MainWindow(settings=settings)
@@ -121,18 +123,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # Failure path: the load-failed signal is wired up; we listen for a
     # critical message box by monkeypatching the window's signal.
-    original_failed = window._on_session_load_failed
+    original_failed = window.parts.loading.on_session_load_failed
 
-    def _capture_failed(path: str, replace: bool, quiet: bool, animate: bool, error: str) -> None:
+    def _capture_failed(path: str, error: str) -> None:
         completed["done"] = True
         completed["error"] = error
-        original_failed(path, replace, quiet, animate, error)
+        original_failed(path, error)
 
-    window._on_session_load_failed = _capture_failed  # type: ignore[assignment]
+    window.parts.loading.on_session_load_failed = _capture_failed  # type: ignore[assignment]
 
     # Kick off the load after the event loop starts. Use a single-shot
     # timer so the load is queued from the right thread.
-    QTimer.singleShot(0, lambda: window.load_session(str(session_path), replace=True, quiet=True, animate=False))
+    QTimer.singleShot(0, lambda: window.parts.loading.load_session(str(session_path), replace=True, quiet=True, animate=False))
 
     # Watchdog: time out after the configured number of seconds.
     deadline_timer = QTimer()

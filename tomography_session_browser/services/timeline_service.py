@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Iterable
 
-from tomography_session_browser.domain.models import Sample, Session, TiltSeries
+from tomography_session_browser.domain.models import Session, TiltSeries
 
 
 _DATETIME_FORMATS: tuple[str, ...] = (
@@ -172,13 +172,6 @@ def _parse_datetime_text(text: str) -> datetime | None:
 #: the cached helper stays cheap. A race between threads is benign — the
 #: worst case is one wasted parse attempt.
 _last_successful_format: list[str | None] = [None]
-
-
-def clear_datetime_cache() -> None:
-    """Drop memoised timestamp parses (used by tests)."""
-
-    _parse_datetime_text.cache_clear()
-    _last_successful_format[0] = None
 
 
 def datetime_sort_key(value: Any) -> tuple[bool, datetime]:

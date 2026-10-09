@@ -36,9 +36,11 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from tomography_session_browser.domain.coerce import float_or_none
 from tomography_session_browser.domain.models import TiltSeries
 from tomography_session_browser.services.tilt_angle_service import plausible_tilt_angles
 
@@ -83,14 +85,6 @@ class TiltSeriesValidation:
     tilt_increment: float | None
     reason: str
     evidence_source: str
-
-    @property
-    def is_failed(self) -> bool:
-        return self.status == STATUS_FAILED
-
-    @property
-    def is_complete(self) -> bool:
-        return self.status == STATUS_COMPLETE
 
 
 def calculate_expected_tilt_count(
@@ -190,6 +184,28 @@ def validate_session_tilt_series(
     majority = _majority(counts)
 
     return [validate_tilt_series(ts, session_majority_count=majority) for ts in series_list]
+
+
+def validate_tilt_series_by_group(
+    tilt_series: Iterable[TiltSeries],
+    group_key: Callable[[TiltSeries], Hashable],
+) -> list[TiltSeriesValidation]:
+    """Validate each group of series with that group's own session majority.
+
+    ``group_key`` names the data-collection group (a grid) a series belongs
+    to. The majority fallback is then never taken across grids with different
+    tilt schemes. Results come back in input order.
+    """
+
+    series_list = list(tilt_series)
+    groups: dict[Hashable, list[TiltSeries]] = {}
+    for series in series_list:
+        groups.setdefault(group_key(series), []).append(series)
+    by_object: dict[int, TiltSeriesValidation] = {}
+    for members in groups.values():
+        for series, validation in zip(members, validate_session_tilt_series(members), strict=True):
+            by_object[id(series)] = validation
+    return [by_object[id(series)] for series in series_list]
 
 
 def summarise_validations(validations: Iterable[TiltSeriesValidation]) -> dict[str, int]:
@@ -323,9 +339,9 @@ def _expected_from_mrc_planned_scheme(
         raw_fields = frame.get("raw_fields") if isinstance(frame, dict) else None
         if not isinstance(raw_fields, dict):
             continue
-        min_tilt = _safe_float(raw_fields.get("start_tilt_angle"))
-        max_tilt = _safe_float(raw_fields.get("end_tilt_angle"))
-        increment = _safe_float(raw_fields.get("tilt_per_image"))
+        min_tilt = float_or_none(raw_fields.get("start_tilt_angle"))
+        max_tilt = float_or_none(raw_fields.get("end_tilt_angle"))
+        increment = float_or_none(raw_fields.get("tilt_per_image"))
         if (
             min_tilt is None
             or max_tilt is None
@@ -378,7 +394,7 @@ def _mdoc_tilt_angles(tilt_series: TiltSeries) -> list[float]:
     for section in tilt_series.sections:
         meta = section.metadata or {}
         for key in ("TiltAngle", "tilt_angle", "Tilt"):
-            value = _safe_float(meta.get(key))
+            value = float_or_none(meta.get(key))
             if value is not None:
                 angles.append(value)
                 break
@@ -442,22 +458,13 @@ def _modal_increment(values: list[float]) -> float | None:
     return counter.most_common(1)[0][0]
 
 
-def _safe_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _walk_float(node: Any, keys: tuple[str, ...]) -> float | None:
     """Search a (possibly nested) dict for the first matching key as float."""
 
     if isinstance(node, dict):
         for key in keys:
             if key in node:
-                value = _safe_float(node[key])
+                value = float_or_none(node[key])
                 if value is not None:
                     return value
         for value in node.values():

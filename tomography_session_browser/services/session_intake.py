@@ -22,6 +22,7 @@ import time
 
 from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.domain.enums import SessionKind
+from tomography_session_browser.domain.identity import path_identity_key
 
 #: How long a drag may spend classifying before the rest wait for the drop.
 #: Classification is cheap on a local disk, but a slow network share must not
@@ -108,13 +109,11 @@ class DroppedFolder:
         return self.note or _REASONS.get(self.status, "")
 
 
-def path_identity_key(path: str | Path) -> str:
-    """The key two spellings of one folder share (as the project tree uses)."""
+def names_a_file(path: Path) -> bool:
+    """``path`` is a file, not a folder: an existing file, or a ``.dm``
+    session file (even a missing one)."""
 
-    value = Path(path)
-    if not value.is_absolute():
-        value = Path.cwd() / value
-    return str(value).replace("\\", "/").casefold()
+    return path.is_file() or (path.suffix.casefold() == ".dm" and not path.is_dir())
 
 
 def check_folder(
@@ -128,7 +127,7 @@ def check_folder(
     path = Path(raw_path)
     text = str(path)
     try:
-        if path.is_file() or (path.suffix.casefold() == ".dm" and not path.is_dir()):
+        if names_a_file(path):
             parent = path.parent
             parent_folder = str(parent) if parent.is_dir() else None
             return DroppedFolder(text, FolderCheck.SESSION_FILE, parent_folder=parent_folder)

@@ -19,14 +19,15 @@ _ROOT = Path(__file__).resolve().parents[1]
 _STARTUP = """
 import sys
 from PySide6.QtWidgets import QApplication
+from tomography_session_browser.presentation.design_tokens import palette_for
 from tomography_session_browser.services.settings_service import Settings
 from tomography_session_browser.ui.main_window import MainWindow
-from tomography_session_browser.ui.theme import apply_theme, palette_for
+from tomography_session_browser.ui.theme import apply_theme
 
 app = QApplication([])
 theme = sys.argv[1]
 apply_theme(app, palette_for(theme))
-window = MainWindow(settings=Settings(theme=theme))
+window = MainWindow(settings=Settings(theme=theme), save_settings=lambda _settings: None)
 window.show()
 app.processEvents()
 assert window.isVisible()

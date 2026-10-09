@@ -1,17 +1,27 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable
 
+from tomography_session_browser.domain.coerce import int_or_zero
 from tomography_session_browser.domain.display_names import count_phrase as _count_phrase
-from tomography_session_browser.domain.models import Atlas, BatchPosition, SearchMap, SearchTile, TiltSeries
+from tomography_session_browser.domain.models import Atlas, BatchPosition, Sample, SearchMap, SearchTile, TiltSeries
 from tomography_session_browser.domain.units import ANGSTROM_PER_PIXEL
 from tomography_session_browser.parsers.path_utils import natural_key
-from tomography_session_browser.parsers.xml_parser import find_first
 from tomography_session_browser.services.batch_inference import (
     batch_inference_key,
-    batch_inference_keys,
+    entity_owner_keys,
     inferred_batch_label_for_tilt,
+    inferred_group_token,
+    inferred_label_matches_batch,
+)
+from tomography_session_browser.services.entity_links import (
+    explicitly_linked_tilt_ids,
+    planned_exposures_for_batch_position,
+    search_map_batches,
+    tilt_on_batch,
 )
 from tomography_session_browser.services.timeline_service import datetime_sort_key
 from tomography_session_browser.services.tilt_series_validation import (
@@ -21,7 +31,7 @@ from tomography_session_browser.services.tilt_series_validation import (
     STATUS_UNKNOWN,
     TiltSeriesValidation,
     actual_tilt_count,
-    validate_session_tilt_series,
+    validate_tilt_series_by_group,
 )
 
 
@@ -31,6 +41,17 @@ STATUS_INCOMPLETE_LABEL = "incomplete"
 STATUS_FAILED_LABEL = "failed"
 STATUS_MISSING = "missing"
 STATUS_UNKNOWN_LABEL = "unknown"
+#: Planned but not acquired yet: queued exposures, or a recorded "Queued".
+STATUS_PENDING = "pending"
+
+
+#: Row tags a list filter can ask for exactly, as ``is:<tag>``. The
+#: dashboard's drill-down buttons count by the same predicates, so a button
+#: and the rows it opens cannot disagree (free text such as "mdoc" matched
+#: the wrong rows and "unknown" matched none).
+TAG_MISSING_MDOC = "missing-mdoc"
+TAG_ORPHANED_FAILED = "orphaned-failed"
+TAG_INFERRED_BATCH_PREFIX = "inferred-batch:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +59,35 @@ class ItemListStatus:
     status: str
     summary: str
     tooltip: str = ""
+    tags: frozenset[str] = frozenset()
+
+
+def filter_tag_query(tag: str) -> str:
+    """The list-filter text that shows exactly the rows carrying ``tag``."""
+
+    return f"is:{tag}"
+
+
+def validation_status_tag(validation_status: str) -> str:
+    """Tag for a tilt series' validator verdict (``complete``, ``failed``...)."""
+
+    return validation_status
+
+
+def inferred_batch_tag(label: str | None, owner: str | None = None) -> str:
+    """Tag for failed tilt series grouped under one inferred batch label.
+
+    Carries the grid when known (``batch_inference.inferred_group_token``),
+    matching the dashboard tile that opens these rows.
+    """
+
+    return f"{TAG_INFERRED_BATCH_PREFIX}{inferred_group_token(label, owner)}"
+
+
+def tilt_series_lacks_mdoc(tilt: TiltSeries) -> bool:
+    """No MDOC, or an MDOC without sections: the "Missing MDOC" predicate."""
+
+    return tilt.mdoc_path is None or not tilt.sections
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +98,12 @@ class ItemStatusContext:
     tilt_series: tuple[TiltSeries, ...]
     validations: dict[str, TiltSeriesValidation]
     inferred_batch_labels: dict[str, str]
+    #: ``entity.id`` → grid (sample folder), from ``batch_inference.entity_owner_keys``.
+    #: Empty when the caller knows no samples: matching is then by name alone.
+    owners: Mapping[str, str] = field(default_factory=dict)
+    # Operation-local snapshots; rebuilding the context refreshes availability.
+    tilt_statuses: Mapping[int, str] = field(default_factory=dict)
+    map_tile_counts: Mapping[int, tuple[int, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,20 +135,37 @@ def build_item_status_context(
     search_tiles: Iterable[SearchTile] = (),
     batch_positions: Iterable[BatchPosition] = (),
     tilt_series: Iterable[TiltSeries] = (),
+    samples: Iterable[Sample] = (),
+    validations: Mapping[str, TiltSeriesValidation] | None = None,
+    exists: Callable[[Path], bool] | None = None,
 ) -> ItemStatusContext:
     """Build the shared status context for viewer-list rows.
 
     This mirrors the dashboard/report source of truth: tilt series are
-    classified through ``validate_session_tilt_series`` and search maps /
+    classified through ``validate_tilt_series_by_grid`` and search maps /
     batch positions derive their list badges from the linked tilt series and
     planned exposure counts.
+
+    ``samples`` says which grid holds each entity (any superset will do). It
+    keeps name-inferred batch matches on one grid and gives each grid its own
+    expected tilt count.
+
+    ``validations`` is that classification when the caller already holds it
+    for exactly these ``tilt_series`` and ``samples`` (``MarkerContext``
+    keeps one), so it is not worked out again.
     """
 
     search_maps = tuple(search_maps)
     search_tiles = tuple(search_tiles)
     batch_positions = tuple(batch_positions)
     tilt_series = tuple(tilt_series)
-    validations = {v.tilt_series_id: v for v in validate_session_tilt_series(tilt_series)}
+    owners = entity_owner_keys(samples)
+    validations = (
+        dict(validations)
+        if validations is not None
+        else {v.tilt_series_id: v for v in validate_tilt_series_by_grid(tilt_series, owners)}
+    )
+    available = {path: (path.exists() if exists is None else exists(path)) for path in {tilt.mrc_path for tilt in tilt_series} if path is not None}
     return ItemStatusContext(
         search_maps=search_maps,
         search_tiles=search_tiles,
@@ -104,7 +177,26 @@ def build_item_status_context(
             tilt_series,
             validations,
         ),
+        owners=owners,
+        tilt_statuses={id(tilt): _status_from_validation(tilt, validations.get(tilt.id), available=available) for tilt in tilt_series},
+        map_tile_counts={id(value): search_map_tile_counts(value) for value in search_maps},
     )
+
+
+def validate_tilt_series_by_grid(
+    tilt_series: Iterable[TiltSeries],
+    owners: Mapping[str, str] | None = None,
+) -> list[TiltSeriesValidation]:
+    """Validate each grid's tilt series against that grid's own expected count.
+
+    The expected count falls back to the most common image count among a
+    grid's series. Taken across a whole project it mixed grids with different
+    tilt schemes, so a series could read Complete in its sample and Incomplete
+    at project scope. Series no sample owns are validated together.
+    """
+
+    owners = owners or {}
+    return validate_tilt_series_by_group(tilt_series, lambda tilt: owners.get(tilt.id))
 
 
 def item_list_status(value: Any, context: ItemStatusContext | None, *, include_inferred: bool = True) -> ItemListStatus:
@@ -134,7 +226,7 @@ def batch_position_status_counts(
         context,
         include_inferred=include_inferred,
     )
-    planned = _planned_exposures_for_batch(batch, linked_tilts)
+    planned = planned_exposures_for_batch_position(batch, linked_tilts)
     counts = _status_counts(linked_tilts, context)
     counts.missing += max(planned - len(linked_tilts), 0)
     return BatchPositionStatusCounts(
@@ -147,48 +239,19 @@ def batch_position_status_counts(
     )
 
 
-def batch_positions_for_search_map(
-    search_map: SearchMap,
-    context: ItemStatusContext,
-) -> list[BatchPosition]:
-    """Batches linked to ``search_map`` in either metadata direction.
-
-    Tomography 5 records the relationship on whichever side happened to be
-    written, so a row that reads only ``BatchPosition.linked_search_map_id``
-    disagrees with navigation, which also honours
-    ``SearchMap.linked_batch_position_ids``. Both directions are accepted here
-    and deduplicated by batch ID, so metadata written on both sides counts
-    once.
-
-    Only explicit metadata participates. Inferred failed-batch labels stay out:
-    an orphaned failed tilt series must not make a Search map claim a batch
-    that no metadata links to it.
-    """
-
-    reciprocal_ids = set(search_map.linked_batch_position_ids or [])
-    linked: list[BatchPosition] = []
-    seen: set[str] = set()
-    for batch in context.batch_positions:
-        if batch.id in seen:
-            continue
-        if batch.linked_search_map_id == search_map.id or batch.id in reciprocal_ids:
-            linked.append(batch)
-            seen.add(batch.id)
-    return linked
-
-
 def _search_map_status(search_map: SearchMap, context: ItemStatusContext) -> ItemListStatus:
-    linked_batches = batch_positions_for_search_map(search_map, context)
+    linked_batches = search_map_batches(search_map, context.batch_positions)
     counts = _StatusCounts()
     planned = 0
     for batch in linked_batches:
         batch_tilts = _tilt_series_for_batch(batch, context)
-        batch_planned = _planned_exposures_for_batch(batch, batch_tilts)
+        batch_planned = planned_exposures_for_batch_position(batch, batch_tilts)
         planned += batch_planned
         counts += _status_counts(batch_tilts, context)
         counts.missing += max(batch_planned - len(batch_tilts), 0)
 
-    tile_planned, tile_acquired = _search_map_tile_counts(search_map)
+    tile_counts = context.map_tile_counts.get(id(search_map))
+    tile_planned, tile_acquired = tile_counts if tile_counts is not None else search_map_tile_counts(search_map)
     tile_count = tile_acquired or len({path.stem for path in search_map.tile_paths})
     if planned:
         status = _status_from_counts(counts, planned=planned)
@@ -226,9 +289,9 @@ def _search_tile_status(search_tile: SearchTile, context: ItemStatusContext) -> 
     )
     if batch is None:
         status = STATUS_DONE if search_tile.image_path is not None else STATUS_MISSING
+        # The row's name already says "<exposure> · Tile N" (display_names.
+        # format_search_tile_display_name); its second line says where.
         parts = []
-        if search_tile.tile_index is not None:
-            parts.append(f"tile {search_tile.tile_index}")
         if search_tile.search_map_name:
             parts.append(search_tile.search_map_name)
         if search_tile.image_path is None:
@@ -247,10 +310,14 @@ def _search_tile_status(search_tile: SearchTile, context: ItemStatusContext) -> 
         status = batch_status.status
     if search_tile.image_path is None:
         status = _combine_status(status, STATUS_MISSING)
+    # The row's name already says "<exposure> · Tile N"; the second line
+    # names the map, then the batch when the exposure is not the batch itself.
     parts: list[str] = []
-    if search_tile.tile_index is not None:
-        parts.append(f"tile {search_tile.tile_index}")
-    if search_tile.batch_position_name:
+    if search_tile.search_map_name:
+        parts.append(search_tile.search_map_name)
+    if search_tile.batch_position_name and not (search_tile.name or "").startswith(
+        f"{search_tile.batch_position_name} · "
+    ):
         parts.append(search_tile.batch_position_name)
     if search_tile.linked_tilt_series_ids:
         parts.append(_count_phrase(len(search_tile.linked_tilt_series_ids), "tilt series", "tilt series"))
@@ -258,7 +325,7 @@ def _search_tile_status(search_tile: SearchTile, context: ItemStatusContext) -> 
         parts.append("no image")
     tooltip_lines = [
         search_tile.name,
-        f"Status: {status}",
+        f"Status: {display_status_label(status)}",
         f"Search map: {search_tile.search_map_name or 'unknown'}",
         f"Batch position: {search_tile.batch_position_name or 'unknown'}",
         f"Linked tilt series: {len(search_tile.linked_tilt_series_ids)}",
@@ -288,13 +355,16 @@ def batch_position_status_from_counts(batch: BatchPosition, details: BatchPositi
         unknown=details.unknown,
     )
 
-    explicit_status = _normalise_batch_status(batch.status)
+    explicit_status = normalise_recorded_batch_status(batch.status)
     if planned == 0:
         status = explicit_status or STATUS_UNKNOWN_LABEL
     elif explicit_status == STATUS_FAILED_LABEL and not counts.failed:
+        # The microscope's "Failed" is one failed exposure, then the batch is
+        # classified like any other row: a batch that also completed a tilt
+        # series is partial, not failed. Failed only when nothing succeeded.
         counts.failed += 1
         counts.missing = max(counts.missing - 1, 0)
-        status = STATUS_FAILED_LABEL
+        status = _status_from_counts(counts, planned=planned)
     else:
         status = _status_from_counts(counts, planned=planned)
 
@@ -315,7 +385,7 @@ def batch_position_status_from_counts(batch: BatchPosition, details: BatchPositi
 
 def _tilt_series_status(tilt: TiltSeries, context: ItemStatusContext) -> ItemListStatus:
     validation = context.validations.get(tilt.id)
-    status = _status_from_validation(tilt, validation)
+    status = _tilt_status(tilt, context)
     parts: list[str] = []
     if validation is not None:
         if validation.expected_count:
@@ -323,7 +393,7 @@ def _tilt_series_status(tilt: TiltSeries, context: ItemStatusContext) -> ItemLis
         else:
             parts.append(_count_phrase(validation.actual_count, "frame"))
     else:
-        actual = _actual_tilt_count(tilt)
+        actual = actual_tilt_count(tilt)
         parts.append(_count_phrase(actual, "frame") if actual else "unknown frames")
     if tilt.pixel_size:
         parts.append(f"{tilt.pixel_size:g} {ANGSTROM_PER_PIXEL}")
@@ -332,11 +402,29 @@ def _tilt_series_status(tilt: TiltSeries, context: ItemStatusContext) -> ItemLis
         parts.append(f"inferred batch position {inferred}")
     tooltip_lines = [tilt.name]
     if validation is not None:
-        tooltip_lines.append(f"Status: {_display_status(status)}")
+        tooltip_lines.append(f"Status: {display_status_label(status)}")
         tooltip_lines.append(f"Reason: {validation.reason}")
     if inferred:
         tooltip_lines.append(f"Inferred batch position: {inferred}")
-    return ItemListStatus(status=status, summary=" · ".join(parts), tooltip="\n".join(tooltip_lines))
+    tags: set[str] = set()
+    if validation is not None:
+        tags.add(validation_status_tag(validation.status))
+    if tilt_series_lacks_mdoc(tilt):
+        tags.add(TAG_MISSING_MDOC)
+    if inferred:
+        tags.add(inferred_batch_tag(inferred, context.owners.get(tilt.id)))
+        inferred_key = batch_inference_key(inferred)
+        if not any(
+            inferred_label_matches_batch(inferred, batch, tilt_id=tilt.id, owners=context.owners)
+            for batch in context.batch_positions
+        ):
+            tags.add(TAG_ORPHANED_FAILED)
+    return ItemListStatus(
+        status=status,
+        summary=" · ".join(parts),
+        tooltip="\n".join(tooltip_lines),
+        tags=frozenset(tags),
+    )
 
 
 @dataclass(slots=True)
@@ -362,7 +450,7 @@ def _status_counts(
 ) -> _StatusCounts:
     counts = _StatusCounts()
     for tilt in tilt_series:
-        status = _status_from_validation(tilt, context.validations.get(tilt.id))
+        status = _tilt_status(tilt, context)
         if status == STATUS_DONE:
             counts.complete += 1
         elif status == STATUS_FAILED_LABEL:
@@ -386,7 +474,9 @@ def _status_from_counts(counts: _StatusCounts, *, planned: int) -> str:
     if counts.complete or counts.failed or counts.incomplete:
         return STATUS_PARTIAL
     if counts.missing >= planned:
-        return STATUS_MISSING
+        # Nothing acquired yet of what was planned: pending, not "missing"
+        # (that word is for a file that should be on disk and is not).
+        return STATUS_PENDING
     return STATUS_INCOMPLETE_LABEL
 
 
@@ -394,6 +484,7 @@ def _combine_status(left: str, right: str) -> str:
     order = {
         STATUS_DONE: 0,
         STATUS_UNKNOWN_LABEL: 1,
+        STATUS_PENDING: 2,
         STATUS_MISSING: 2,
         STATUS_INCOMPLETE_LABEL: 3,
         STATUS_PARTIAL: 4,
@@ -402,11 +493,18 @@ def _combine_status(left: str, right: str) -> str:
     return left if order.get(left, 1) >= order.get(right, 1) else right
 
 
+def _tilt_status(tilt: TiltSeries, context: ItemStatusContext) -> str:
+    cached = context.tilt_statuses.get(id(tilt))
+    return cached if cached is not None else _status_from_validation(tilt, context.validations.get(tilt.id))
+
+
 def _status_from_validation(
     tilt: TiltSeries,
     validation: TiltSeriesValidation | None,
+    *,
+    available: Mapping[Path, bool] | None = None,
 ) -> str:
-    if tilt.mrc_path is None or not tilt.mrc_path.exists():
+    if tilt.mrc_path is None or not (available[tilt.mrc_path] if available is not None else tilt.mrc_path.exists()):
         return STATUS_MISSING
     if validation is None:
         return STATUS_UNKNOWN_LABEL
@@ -421,13 +519,22 @@ def _status_from_validation(
     return STATUS_UNKNOWN_LABEL
 
 
-def _normalise_batch_status(status: str | None) -> str | None:
+def normalise_recorded_batch_status(status: str | None) -> str | None:
+    """Read the status the microscope recorded for a batch position.
+
+    The one reading of the raw word; the dashboard tiles use it too, so a
+    word cannot mean "pending" in one place and "warning" in another.
+    ``None`` for an empty or unrecognised word.
+    """
+
     raw = (status or "").strip().lower()
     if raw in {"acquired", "done", "complete", "completed"}:
         return STATUS_DONE
     if raw in {"failed", "error"}:
         return STATUS_FAILED_LABEL
-    if raw in {"pending", "queued", "scheduled", "missing"}:
+    if raw in {"pending", "queued", "scheduled"}:
+        return STATUS_PENDING
+    if raw == "missing":
         return STATUS_MISSING
     if raw in {"partial", "incomplete", "warning"}:
         return STATUS_PARTIAL
@@ -440,22 +547,19 @@ def _tilt_series_for_batch(
     *,
     include_inferred: bool = True,
 ) -> list[TiltSeries]:
-    linked_ids = set(batch.linked_tilt_series_ids or [])
-    batch_keys = _batch_inference_keys(batch)
     linked: list[TiltSeries] = []
     seen: set[str] = set()
     for tilt in context.tilt_series:
         if tilt.id in seen:
             continue
-        inferred_key = (
-            batch_inference_key(context.inferred_batch_labels.get(tilt.id))
-            if include_inferred
-            else ""
-        )
+        inferred_label = context.inferred_batch_labels.get(tilt.id) if include_inferred else None
         if (
-            tilt.id in linked_ids
-            or tilt.linked_batch_position_id == batch.id
-            or (inferred_key and inferred_key in batch_keys)
+            tilt_on_batch(tilt, batch)
+            # Same name *and* same grid: "Position_1" repeats on every grid.
+            or (
+                inferred_label is not None
+                and inferred_label_matches_batch(inferred_label, batch, tilt_id=tilt.id, owners=context.owners)
+            )
         ):
             linked.append(tilt)
             seen.add(tilt.id)
@@ -468,42 +572,19 @@ def _tilt_series_for_batch(
     return linked
 
 
-def _planned_exposures_for_batch(batch: BatchPosition, linked_tilts: list[TiltSeries]) -> int:
-    planned = planned_exposures_from_metadata(batch.metadata or {})
-    if planned:
-        return max(planned, len(linked_tilts))
-    if batch.exposure_image_paths:
-        return max(len(batch.exposure_image_paths), len(linked_tilts))
-    if batch.linked_tilt_series_ids:
-        return max(len(batch.linked_tilt_series_ids), len(linked_tilts))
-    return len(linked_tilts)
+def search_map_tile_counts(search_map: SearchMap) -> tuple[int, int]:
+    """``(planned, acquired)`` tiles of a search map's own mosaic."""
 
-
-def planned_exposures_from_metadata(metadata: dict[str, Any]) -> int:
-    """Count recorded exposure slots, excluding XML nil placeholders."""
-    main = metadata.get("ExposureTemplateAreaParameters")
-    has_main = isinstance(main, dict) and (
-        not isinstance(main.get("_attributes"), dict)
-        or main["_attributes"].get("nil") != "true"
-    )
-
-    raw_areas = find_first(metadata.get("AdditionalExposureTemplateAreas"), "ExposureTemplateAreaParameters")
-    if isinstance(raw_areas, dict):
-        raw_areas = [raw_areas]
-    if isinstance(raw_areas, list):
-        additional_count = sum(
-            1
-            for entry in raw_areas
-            if isinstance(entry, dict)
-            and (
-                not isinstance(entry.get("_attributes"), dict)
-                or entry["_attributes"].get("nil") != "true"
-            )
-        )
-    else:
-        additional_count = 0
-
-    return (1 if has_main else 0) + additional_count
+    metadata = search_map.metadata or {}
+    planned = _walk_int(metadata, "NumberOfTilesPlanned")
+    acquired = _walk_int(metadata, "NumberOfTilesAcquired")
+    if planned == 0:
+        grid = _walk_grid_size(metadata)
+        if grid is not None:
+            planned = grid
+    if acquired == 0:
+        acquired = len({path.stem for path in search_map.tile_paths})
+    return planned, acquired
 
 
 def atlas_tile_count(atlas: Atlas) -> int:
@@ -522,23 +603,10 @@ def atlas_tile_count(atlas: Atlas) -> int:
     return len({path.stem for path in atlas.tile_paths})
 
 
-def _search_map_tile_counts(search_map: SearchMap) -> tuple[int, int]:
-    metadata = search_map.metadata or {}
-    planned = _walk_int(metadata, "NumberOfTilesPlanned")
-    acquired = _walk_int(metadata, "NumberOfTilesAcquired")
-    if planned == 0:
-        grid = _walk_grid_size(metadata)
-        if grid is not None:
-            planned = grid
-    if acquired == 0:
-        acquired = len({path.stem for path in search_map.tile_paths})
-    return planned, acquired
-
-
 def _walk_int(node: Any, key: str) -> int:
     if isinstance(node, dict):
         if key in node:
-            return _safe_int(node[key])
+            return int_or_zero(node[key])
         for value in node.values():
             found = _walk_int(value, key)
             if found:
@@ -555,14 +623,14 @@ def _walk_grid_size(node: Any) -> int | None:
     if isinstance(node, dict):
         grid = node.get("GridSize")
         if isinstance(grid, dict):
-            width = _safe_int(grid.get("width"))
-            height = _safe_int(grid.get("height"))
+            width = int_or_zero(grid.get("width"))
+            height = int_or_zero(grid.get("height"))
             product = width * height
             if product > 0:
                 return product
         if "GridSizeX" in node and "GridSizeY" in node:
-            x = _safe_int(node.get("GridSizeX"))
-            y = _safe_int(node.get("GridSizeY"))
+            x = int_or_zero(node.get("GridSizeX"))
+            y = int_or_zero(node.get("GridSizeY"))
             return x * y if x and y else None
         for value in node.values():
             found = _walk_grid_size(value)
@@ -576,23 +644,12 @@ def _walk_grid_size(node: Any) -> int | None:
     return None
 
 
-def _safe_int(value: Any) -> int:
-    try:
-        return int(float(str(value)))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _actual_tilt_count(tilt: TiltSeries) -> int:
-    return actual_tilt_count(tilt)
-
-
 def _inferred_failed_batch_labels(
     batch_positions: tuple[BatchPosition, ...],
     tilt_series: tuple[TiltSeries, ...],
     validations: dict[str, TiltSeriesValidation],
 ) -> dict[str, str]:
-    explicitly_linked = _explicitly_linked_tilt_ids(batch_positions, tilt_series)
+    explicitly_linked = explicitly_linked_tilt_ids(batch_positions, tilt_series)
     labels: dict[str, str] = {}
     for tilt in tilt_series:
         if tilt.id in explicitly_linked or tilt.linked_batch_position_id:
@@ -606,41 +663,20 @@ def _inferred_failed_batch_labels(
     return labels
 
 
-def _explicitly_linked_tilt_ids(
-    batch_positions: tuple[BatchPosition, ...],
-    tilt_series: tuple[TiltSeries, ...],
-) -> set[str]:
-    known_batch_ids = {batch.id for batch in batch_positions}
-    linked = {tilt.id for tilt in tilt_series if tilt.linked_batch_position_id in known_batch_ids}
-    for batch in batch_positions:
-        linked.update(batch.linked_tilt_series_ids or [])
-    return linked
-
-
-def _batch_inference_keys(batch: BatchPosition) -> set[str]:
-    return batch_inference_keys(batch)
-
-
 def _join_tooltip(title: str, parts: list[str], *, status: str) -> str:
-    lines = [title, f"Status: {_display_status(status)}"]
+    lines = [title, f"Status: {display_status_label(status)}"]
     lines.extend(parts)
     return "\n".join(lines)
 
 
-def _display_status(status: str) -> str:
-    if status == STATUS_DONE:
-        return "complete"
-    if status == STATUS_PARTIAL:
-        return "incomplete"
-    if status == STATUS_MISSING:
-        return "missing"
-    if status == STATUS_UNKNOWN_LABEL:
-        return "unavailable"
-    return status
-
-
 def display_status_label(status: str) -> str:
-    """Return the consistent user-facing label for an internal item status."""
+    """Return the consistent user-facing label for an internal item status.
+
+    The validator's words throughout (Complete, Incomplete, Failed, Unknown),
+    "Missing" for a file that is not on disk and "Pending" for planned work
+    not acquired yet. "Unavailable" used to cover both Missing and Unknown,
+    while the dashboard said "Unknown" for the same tilt series.
+    """
 
     normalized = (status or "").strip().lower()
     labels = {
@@ -652,11 +688,11 @@ def display_status_label(status: str) -> str:
         STATUS_INCOMPLETE_LABEL: "Incomplete",
         STATUS_FAILED_LABEL: "Failed",
         "error": "Failed",
-        STATUS_MISSING: "Unavailable",
-        STATUS_UNKNOWN_LABEL: "Unavailable",
-        "n/a": "Unavailable",
+        STATUS_MISSING: "Missing",
+        STATUS_UNKNOWN_LABEL: "Unknown",
+        "n/a": "Unknown",
         "queued": "Pending",
-        "pending": "Pending",
+        STATUS_PENDING: "Pending",
         "warning": "Warning",
     }
     return labels.get(normalized, normalized.replace("_", " ").title())

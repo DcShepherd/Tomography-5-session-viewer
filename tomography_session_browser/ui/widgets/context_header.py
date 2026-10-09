@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from tomography_session_browser.ui.context_stack import CRUMB_SEPARATOR, ContextStack
+from tomography_session_browser.presentation.context_stack import CRUMB_SEPARATOR, ContextStack
 from tomography_session_browser.ui.theme import (
     TIER_LANDMARK,
     TIER_PRIMARY,
@@ -51,7 +51,7 @@ class _ScopeLabel(ElidedLabel):
     """The scope: keeps up to ``SCOPE_MIN_WIDTH_PX`` before it elides, but
     never more room than its own text needs.
 
-    A flat 160 px floor left a shorter scope such as ``Demo_Collection (LS)``
+    A flat 160 px floor left a shorter scope such as ``Session_20260101 (LS)``
     sitting in a wider box, with a visible gap before ``› Section`` (plan
     C10). The floor now follows the text up to that cap, so a long name still
     cannot widen the window, and a short one sits flush against its crumbs.
