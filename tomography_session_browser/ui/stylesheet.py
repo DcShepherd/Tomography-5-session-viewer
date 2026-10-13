@@ -1067,6 +1067,20 @@ QPushButton#secondaryAction:hover {{
     text-decoration: underline;
 }}
 
+/* Dashboard warning actions are QToolButtons. Style both text and surface so
+   a dark Linux desktop palette cannot supply a black native button. */
+QToolButton#inlineLink {{
+    background: transparent;
+    border: 0;
+    color: {link_text};
+    padding: 4px 8px;
+}}
+
+QToolButton#inlineLink:hover {{
+    color: {link_text_hover};
+    text-decoration: underline;
+}}
+
 /* Session drop: the empty project panel's invitation, and what a drop
    skipped (widgets/session_drop.py). Tone colours: _session_intake_rules. */
 QWidget#projectDropHint {{
@@ -1216,24 +1230,24 @@ QFrame#loadSessionsFooter {{
     border-top: 1px solid {border};
 }}
 
-/* Empty-state panel. Restrained: no illustration, no oversized chrome. */
+/* Empty states sit over the near-black image canvas in both themes. */
 QWidget#emptyStatePanel {{
     background: transparent;
 }}
 
 QLabel#emptyStateTitle {{
-    color: {text_strong};
+    color: {canvas_text_strong};
     font-size: {type_lead}pt;
     font-weight: 600;
 }}
 
 QLabel#emptyStateDetail {{
-    color: {text};
+    color: {canvas_text};
     font-size: {type_body}pt;
 }}
 
 QLabel#emptyStateEvidence {{
-    color: {text_muted};
+    color: {canvas_text_muted};
     font-size: {type_caption}pt;
 }}
 
