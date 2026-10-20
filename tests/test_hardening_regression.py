@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+import struct
 
+import numpy as np
 import pytest
 
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.models import Atlas, MrcMetadata, Overview, Sample, SearchMap, Session
 from tomography_session_browser.parsers.mdoc_parser import parse_mdoc
+from tomography_session_browser.parsers.mrc_parser import (
+    MRC_HEADER_BYTES,
+    MrcPreviewSource,
+    _display_window,
+    read_mrc_display_region,
+)
 from tomography_session_browser.parsers.session_scanner import SessionScanner
 from tomography_session_browser.parsers.tiltseries_parser import (
     find_unpaired_mrcs,
@@ -352,3 +360,52 @@ def test_parser_warning_templates_land_in_their_category(warning: str, category:
     rows = summarise_warnings([warning])
 
     assert [(row.category, row.severity) for row in rows] == [(category, severity)]
+
+
+def _lamella_atlas_mrc(path: Path) -> np.ndarray:
+    """A lamella atlas: zero fill, a few lamellae near 127, stray counts of 1-2."""
+
+    rng = np.random.default_rng(7)
+    frame = np.zeros((1600, 1600), dtype=np.uint16)
+    lamella = np.zeros(frame.shape, dtype=bool)
+    for y0, y1, x0, x1 in ((900, 925, 700, 760), (980, 1005, 820, 880), (1100, 1125, 760, 820), (1200, 1225, 900, 960)):
+        lamella[y0:y1, x0:x1] = True
+    frame[lamella] = np.clip(rng.normal(127, 3, lamella.sum()), 115, 141).astype(np.uint16)
+    stray = ~lamella & (rng.random(frame.shape) < 0.0008)
+    frame[stray] = np.where(rng.random(stray.sum()) < 0.875, 1, 2).astype(np.uint16)
+    header = bytearray(MRC_HEADER_BYTES)
+    struct.pack_into("<4i", header, 0, 1600, 1600, 1, 6)
+    struct.pack_into("<3f", header, 40, 1600.0, 1600.0, 1.0)
+    struct.pack_into("<3i", header, 64, 1, 2, 3)
+    header[208:212] = b"MAP "
+    path.write_bytes(bytes(header) + frame.astype("<u2").tobytes())
+    return lamella
+
+
+def test_lamella_atlas_is_neither_black_nor_speckled(tmp_path: Path) -> None:
+    path = tmp_path / "Atlas_1.mrc"
+    lamella = _lamella_atlas_mrc(path)
+
+    viewer = np.asarray(MrcPreviewSource(path).get_frame_preview(0, max_size=1600).image)
+    assert np.median(viewer[lamella]) > 200
+    assert np.percentile(viewer[~lamella], 99.9) < 16
+
+    region = read_mrc_display_region(path, max_size=1600)
+    assert region is not None and np.median(np.asarray(region.image)[lamella]) > 200
+
+    thumbnail = MrcPreviewSource(path).get_frame_preview(0, max_size=512)
+    pixels = np.asarray(thumbnail.image)
+    shrink = thumbnail.downsample_factor
+    h, w = pixels.shape
+    blocks = lamella[: h * shrink, : w * shrink].reshape(h, shrink, w, shrink)
+    outside = ~blocks.any(axis=(1, 3))
+    assert np.median(pixels[blocks.all(axis=(1, 3))]) > 200
+    assert np.count_nonzero(pixels[outside] > 32) <= outside.sum() * 0.001
+
+
+def test_frame_with_a_fill_border_keeps_its_percentile_window() -> None:
+    frame = np.random.default_rng(3).normal(3000, 200, (400, 400)).astype(np.float32)
+    frame[:, :120] = 0
+    low, high = np.percentile(frame, [0.5, 99.5])
+
+    assert _display_window(frame) == (float(low), float(high))

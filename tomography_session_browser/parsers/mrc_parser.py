@@ -18,7 +18,15 @@ LOGGER = logging.getLogger(__name__)
 
 MRC_HEADER_BYTES = 1024
 DEFAULT_MAX_PREVIEW_DIMENSION = 2048
-NORMALISATION = "area_downsample_percentile_0.5_99.5"
+NORMALISATION = "area_downsample_percentile_0.5_99.5_fill_aware"
+
+# Above this share of pixels at the frame's minimum, the minimum is treated as
+# fill (masked or unacquired area) rather than image content.
+_FILL_DOMINANT_FRACTION = 0.5
+# A window whose top is below this share of the content's own top has
+# collapsed into the fill and its stray counts. Sparse counting images and
+# grid atlases with a zero surround stay well above it.
+_COLLAPSED_WINDOW_FRACTION = 0.1
 
 # Even 64 * 65535 is below float32's exact-integer limit (2**24), so every
 # intermediate sum is exact. This also bounds the number of strided passes.
@@ -402,7 +410,14 @@ def _normalise_to_uint8(frame: np.ndarray) -> np.ndarray:
 
 
 def _display_window(frame: np.ndarray) -> tuple[float, float] | None:
-    """The 0.5 and 99.5 percentiles the preview stretches to 0..255."""
+    """The 0.5 and 99.5 percentiles the preview stretches to 0..255.
+
+    A frame that is mostly one minimum value (a lamella atlas: zero fill with a
+    few acquired lamellae) can have its upper percentile land in the fill or
+    in sparse stray counts, so it renders black or speckled. When that window
+    has collapsed, the fill stays black and the top comes from the pixels
+    above it.
+    """
 
     numeric = np.asarray(frame)
     finite = numeric[np.isfinite(numeric)]
@@ -411,7 +426,17 @@ def _display_window(frame: np.ndarray) -> tuple[float, float] | None:
     if finite.size > 1_000_000:
         step = math.ceil(finite.size / 1_000_000)
         finite = finite[::step]
-    low, high = np.percentile(finite.astype(np.float32, copy=False), [0.5, 99.5])
+    finite = finite.astype(np.float32, copy=False)
+    low, high = np.percentile(finite, [0.5, 99.5])
+    fill = finite.min()
+    if np.count_nonzero(finite == fill) > finite.size * _FILL_DOMINANT_FRACTION:
+        content = finite[finite > fill]
+        if content.size:
+            content_high = np.percentile(content, 99.5)
+            # Only a window that collapsed into the fill is replaced; a grid
+            # atlas with a large zero surround keeps its usual window.
+            if high - fill < (content_high - fill) * _COLLAPSED_WINDOW_FRACTION:
+                low, high = fill, content_high
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
         return None
     return float(low), float(high)
