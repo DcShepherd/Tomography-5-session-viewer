@@ -288,8 +288,10 @@ class PreviewInteraction:
             marker.selected = False
         if self.selection_cleared is not None:
             self.selection_cleared()
-        else:
-            self.view._redraw_markers()
+        # Always a full redraw: the tab's path redraws only markers whose
+        # selection it changes, and they were all unselected above, so it would
+        # leave the old selection and the highlight rings on screen.
+        self.view._redraw_markers()
 
     def close_cluster_popup(self) -> None:
         if self.cluster_member_popup is not None:

@@ -30,8 +30,8 @@ from tomography_session_browser.ui.viewer.viewer_tab import ViewerTab
 from tomography_session_browser.ui.branding import (
     TitleBarLockup,
 )
-from tomography_session_browser.ui.widgets.context_drawer import (
-    ContextDrawer,
+from tomography_session_browser.ui.widgets.panel_drawer import (
+    PanelDrawer,
 )
 from tomography_session_browser.ui.widgets.context_header import (
     ContextHeader,
@@ -88,7 +88,8 @@ class WindowUi:
     compact_action: QAction
     compact_button: QAction
     context_dock: QDockWidget
-    context_drawer: ContextDrawer
+    context_drawer: PanelDrawer
+    project_drawer: PanelDrawer
     context_header: ContextHeader
     context_panel: MetadataPanel
     context_panel_action: QAction

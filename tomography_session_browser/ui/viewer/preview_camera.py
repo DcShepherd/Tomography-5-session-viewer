@@ -193,15 +193,20 @@ class PreviewCamera:
         )
         if scale <= 0:
             return False
+        fit = self.fit_target()
+        if fit is None:
+            return False
+        self.pending_initial_fit_flag = False
+        self.has_user_interacted = True
+        if scale <= fit[0]:
+            self.apply_fit()
+            return True
         self.view.resetTransform()
         self.view.scale(scale, scale)
         self.view.centerOn(target.center())
-        self.pending_initial_fit_flag = False
-        self.has_user_interacted = True
         # A remembered crop is the user's own framing, not a fit to follow.
         self.fit_mode = False
-        visible = self.view.mapToScene(viewport_rect).boundingRect()
-        self.zoom = item_rect.width() / visible.width() if visible.width() > 0 else 1.0
+        self.zoom = scale / fit[0]
         return True
 
     def forget_remembered_views(self) -> None:
@@ -259,29 +264,45 @@ class PreviewCamera:
         if self.refit_from is not None:
             self.view._end_refit_ease()  # zoom on from wherever the refit had got to
         self.view._close_cluster_popup()
-        was_fit = self.fit_mode
-        self.view._mark_user_interacted("wheel_zoom")
         spring = self.wheel_zoom
         if not spring.is_animating:
-            spring.reset(math.log(max(self.zoom, 1e-6)))
-        target = spring.target + math.log(factor)
-        if self.view.parts.marker_layer.atlas_lod_enabled:
-            target = min(math.log(MAX_ATLAS_ZOOM), max(0.0, target))
-            if abs(target - spring.target) < 1e-9 and not spring.is_animating:
-                # Zooming out at the Atlas floor changes nothing; stay fitted.
-                self.fit_mode = was_fit
+            fit = self.fit_target()
+            if fit is None:
                 return
+            self.zoom = abs(self.view.transform().m11()) / fit[0]
+            spring.reset(math.log(max(self.zoom, 1e-6)))
+        target = max(0.0, spring.target + math.log(factor))
+        if self.view.parts.marker_layer.atlas_lod_enabled:
+            target = min(math.log(MAX_ATLAS_ZOOM), target)
+        if abs(target - spring.target) < 1e-9 and not spring.is_animating:
+            return
+        self.view._mark_user_interacted("wheel_zoom")
         self.wheel_anchor = (QPointF(anchor_view), self.view.mapToScene(anchor_view.toPoint()))
         spring.set_target(target)
 
     def wheel_zoom_step(self, log_zoom: float) -> None:
         if self.view.parts.preview_image.pixmap_item is None or self.wheel_anchor is None:
             return
-        zoom = math.exp(log_zoom)
+        if log_zoom <= 1e-9 and self.wheel_zoom.target <= 1e-9:
+            # Land on the exact Fit transform, including its centre and mode.
+            # Stop here if retargeting momentum reaches the floor early.
+            self.apply_fit()
+            return
+        zoom = max(1.0, math.exp(log_zoom))
         factor = zoom / max(self.zoom, 1e-6)
         self.zoom = zoom
         anchor_view, anchor_scene = self.wheel_anchor
         self.view.scale(factor, factor)
+        # Hiding a scroll bar can enlarge the viewport during scale(). Keep
+        # that same frame above its new Fit, too, without retargeting the spring.
+        fit = self.fit_target()
+        scale = abs(self.view.transform().m11())
+        if fit is not None and scale < fit[0]:
+            if self.wheel_zoom.settled:
+                self.apply_fit()
+                return
+            floor_factor = fit[0] / scale
+            self.view.scale(floor_factor, floor_factor)
         # Re-anchor against the fixed viewport point every step, so scroll-bar
         # rounding cannot accumulate into a drift across the animation.
         drift = self.view.mapToScene(anchor_view.toPoint()) - anchor_scene
@@ -556,14 +577,15 @@ class PreviewCamera:
         if found is None:
             return
         centre, radius = found
-        framing = None
         if self.arrival_frames:
             # Frame the marker itself, not the cluster that holds it at fit:
             # the cluster breaks up as the camera flies in.
             own = self.view._own_marker_geometry(marker_id)
             if own is not None:
                 centre, radius = own
-            framing = self.view._framing_for(radius)
+        if not self.point_on_image(centre):
+            return
+        framing = self.view._framing_for(radius) if self.arrival_frames else None
         if framing is not None:
             scale, zoom = framing
             self.view.fly_to(centre, scale, zoom=zoom, on_landed=lambda: self.view._pulse_marker(marker_id))
@@ -636,8 +658,13 @@ class PreviewCamera:
         """Pan to a marker the keyboard moved to off-screen."""
 
         found = marker_scene_geometry(marker)
-        if found is not None and not self.view.is_fit_mode and not self.view._comfortably_in_view(found[0]):
+        if found is not None and self.point_on_image(found[0]) and not self.view.is_fit_mode and not self.view._comfortably_in_view(found[0]):
             self.view.fly_to(found[0])
+
+    def point_on_image(self, point: QPointF) -> bool:
+        """Camera cues must never lead the reviewer outside the picture."""
+        item = self.view.parts.preview_image.pixmap_item
+        return item is not None and item.boundingRect().contains(point)
 
     def pulse_marker(self, marker_id: str) -> None:
         if not motion_enabled(self.view) or self.view.parts.preview_image.pixmap_item is None:
@@ -647,6 +674,8 @@ class PreviewCamera:
             return
 
         centre, scene_radius = found
+        if not self.point_on_image(centre):
+            return
         rect = self.view.parts.preview_image.pixmap_item.boundingRect()
         if rect.width() <= 0 or rect.height() <= 0:
             return
@@ -685,18 +714,21 @@ class PreviewCamera:
             return
         self.view._stop_view_motion()
         self.view._close_cluster_popup()
-        was_fit = self.fit_mode
-        self.view._mark_user_interacted("button_zoom")
+        fit = self.fit_target()
+        if fit is None:
+            return
+        self.zoom = abs(self.view.transform().m11()) / fit[0]
+        target_zoom = max(1.0, self.zoom * factor)
         if self.view.parts.marker_layer.atlas_lod_enabled:
-            target_zoom = min(MAX_ATLAS_ZOOM, max(1.0, self.zoom * factor))
-            factor = target_zoom / max(self.zoom, 0.01)
-            if abs(factor - 1.0) < 1e-6:
-                # Zooming out at the Atlas floor changes nothing; stay fitted.
-                self.fit_mode = was_fit
-                return
-            self.zoom = target_zoom
-        else:
-            self.zoom *= factor
+            target_zoom = min(MAX_ATLAS_ZOOM, target_zoom)
+        if target_zoom <= 1.0 + 1e-9:
+            self.apply_fit()
+            return
+        factor = target_zoom / max(self.zoom, 0.01)
+        if abs(factor - 1.0) < 1e-6:
+            return
+        self.view._mark_user_interacted("button_zoom")
+        self.zoom = target_zoom
         anchor_scene = self.view.mapToScene(self.view.viewport().rect().center())
         self.view.scale(factor, factor)
         self.view.centerOn(anchor_scene)

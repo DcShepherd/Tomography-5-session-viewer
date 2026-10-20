@@ -377,16 +377,18 @@ class NavigationContext:
 
     def tilt_resolution_for_exposure_marker(
         self,
-        marker: ImageMarker,
+        marker: ImageMarker | None,
         *,
         batch: BatchPosition | None = None,
         marker_context: MarkerContext | None = None,
     ) -> ExposureTiltSeriesResolution:
-        if marker.marker_type not in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}:
+        if marker is None or marker.marker_type not in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}:
+            hint = "Select an exposure area to jump to its tilt series."
             return ExposureTiltSeriesResolution(
                 None,
                 None,
-                "No tilt series is associated with the selected exposure area.",
+                hint,
+                resolution=NavigationResolution(explanation=hint, selection_required=True),
             )
         batch = batch or self.batch_for_exposure_marker(marker)
         if batch is None:
@@ -394,6 +396,7 @@ class NavigationContext:
                 None,
                 None,
                 "No tilt series is associated with the selected exposure area.",
+                resolution=NavigationResolution(explanation="No tilt series is associated with the selected exposure area."),
             )
         marker_context = marker_context or self.marker_context_for(batch)
         return resolve_exposure_tilt_series(

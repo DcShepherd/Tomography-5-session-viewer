@@ -82,6 +82,9 @@ class DashboardState:
 class HistoryState:
     history: NavigationHistory
     suppress_history_record: bool
+    #: The arrival or refusal text a route last posted, while it may still be
+    #: showing; the next navigation clears it (``HistoryController.begin_navigation``).
+    navigation_message: str
 
 
 class LoadingState:
@@ -174,6 +177,7 @@ class WindowState:
         self.review.pending_filter_notice: str | None = None
         self.history.history = NavigationHistory()
         self.history.suppress_history_record = False
+        self.history.navigation_message = ''
         self.review.project_tree_activation_guard: int | None = None
         self.dashboard.dashboard_filter_reason = ''
         self.review.session_context_sync_generation = 0

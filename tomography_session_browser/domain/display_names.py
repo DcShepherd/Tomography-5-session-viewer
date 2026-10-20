@@ -2,10 +2,27 @@ from __future__ import annotations
 
 import re
 
+from tomography_session_browser.domain.enums import SessionKind
+
 
 _SEARCH_MAP_OVERVIEW_RE = re.compile(
     r"^SearchMap_(?P<date>\d{8})_(?P<time>\d{6})\s*/\s*Overview$"
 )
+
+
+#: What a session folder is, in a reviewer's words.
+SESSION_KIND_LABELS: dict[str, str] = {
+    SessionKind.ATLAS_SCREENING: "Atlas screening",
+    SessionKind.MULTIGRID: "Multigrid collection",
+    SessionKind.COLLECTION: "Data collection",
+    SessionKind.SINGLE_COLLECTION: "Single data collection",
+}
+
+
+def session_kind_label(kind: SessionKind | str) -> str:
+    """The reviewer's name for a session kind; empty for one the parser could not tell."""
+
+    return SESSION_KIND_LABELS.get(str(kind), "")
 
 
 def count_phrase(count: int, singular: str, plural: str | None = None) -> str:

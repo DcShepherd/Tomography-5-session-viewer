@@ -20,8 +20,11 @@ from tomography_session_browser.ui.shell.chrome import (
 )
 from tomography_session_browser.domain.models import (
     BatchPosition,
+    Sample,
+    Session,
     TiltSeries,
 )
+from tomography_session_browser.presentation.scopes import LinkedSampleGroup
 from tomography_session_browser.diagnostics.profiling import (
     record_aggregate_phase,
 )
@@ -43,6 +46,7 @@ from tomography_session_browser.presentation.empty_states import (
 )
 from tomography_session_browser.presentation.project_tree import (
     ProjectTreeGroup,
+    scope_ancestors,
 )
 from tomography_session_browser.ui.widgets.toast import (
     TONE_INFO,
@@ -56,9 +60,6 @@ from tomography_session_browser.presentation.describe.context import (
     describe_loaded_sessions,
     describe_project_group,
     tilt_validation_for,
-)
-from tomography_session_browser.presentation.describe.entities import (
-    describe_object,
 )
 
 LOGGER = logging.getLogger("tomography_session_browser.ui.main_window")
@@ -82,6 +83,9 @@ class ContextController(QObject):
 
     def on_tab_changed(self, index: int) -> None:
         if self.parts.viewers.applying_payload is None:
+            # The reviewer chose another tab: a navigation, so the last route's
+            # message ends, and a scope still being prepared is abandoned.
+            self.parts.history.clear_navigation_message()
             self.parts.viewers.cancel_scope_preparation()
         if 0 <= index < len(TAB_LABELS):
             label = TAB_LABELS[index]
@@ -90,6 +94,7 @@ class ContextController(QObject):
                 # A tilt-series zoom lasts while the reviewer stays with the
                 # series. Leaving the tab drops it, so the series is fitted
                 # when they come back.
+                tilt_tab.parts.frame_scrubber.leave_tab()
                 tilt_tab.discard_zoom()
             self.state.review.session_context_sync_generation += 1
             self.state.review.settings.last_tab = str(label)
@@ -194,12 +199,23 @@ class ContextController(QObject):
             title = self.parts.scopes.label_for(context)
             describe = lambda: self.parts.context.context_description(context)  # noqa: E731
 
-        scope_key = f"{type(context).__name__}:{id(context)}"
+        self.parts.context.show_scope_description(f"{type(context).__name__}:{id(context)}", title, describe)
+
+
+    def show_scope_description(self, scope_key: str, title: str, describe: Callable[[], str]) -> None:
+        """Show a scope's summary in the panel, and name the heading for it.
+
+        The one way a scope reaches the panel: the panel remembers that what it
+        shows is a scope, so the Session tab, whose page titles that scope, can
+        hide the panel's own title line.
+        """
+
         self.parts.context_panel.show_scope(scope_key, title, describe)
+        self.parts.context.sync_context_heading()
 
 
     def refresh_context_header(self) -> None:
-        """Restate where the reviewer is, and why anything is unavailable."""
+        """Restate where the reviewer is."""
 
         # A drill-down's reason lives exactly as long as the filter it explains.
         # This is the command that owns the reset; ``current_context_stack()``
@@ -207,7 +223,6 @@ class ContextController(QObject):
         if not self.parts.context.active_tab_filter_text():
             self.state.dashboard.dashboard_filter_reason = ""
         self.ui.context_header.set_context_stack(self.parts.context.current_context_stack())
-        self.ui.context_header.set_unavailable_reasons(self.parts.context.unavailable_action_reasons())
 
 
     def active_tab_filter_text(self) -> str:
@@ -217,33 +232,7 @@ class ContextController(QObject):
         if not 0 <= index < len(TAB_LABELS):
             return ""
         tab = self.ui.viewer_tabs.get(TAB_LABELS[index])
-        return tab.list_filter.text().strip() if tab is not None else ""
-
-
-    def unavailable_action_reasons(self) -> tuple[str, ...]:
-        """Reasons the current selection's offered jumps are disabled.
-
-        These previously lived only in hover tooltips, which a keyboard user
-        never sees. The header shows them inline instead.
-        """
-
-        label = TAB_LABELS[self.ui.tabs.currentIndex()]
-        if label == TabKey.SESSION:
-            return ()
-        tab = self.ui.viewer_tabs.get(label)
-        current = getattr(tab.parts.tab_selection, 'current_value', None) if tab is not None else None
-        if current is None:
-            return ()
-        try:
-            actions = self.parts.navigation.viewer_navigation_actions(current)
-        except Exception:  # pragma: no cover - header must never break the page
-            LOGGER.warning("Could not derive navigation actions for the context header", exc_info=True)
-            return ()
-        return tuple(
-            action.tooltip
-            for action in actions
-            if not action.enabled and action.tooltip
-        )
+        return tab.filter_description() if tab is not None else ""
 
 
     def on_empty_state_action(self, command: str) -> None:
@@ -308,7 +297,7 @@ class ContextController(QObject):
         tab = self.ui.viewer_tabs.get(label)
         if tab is None:
             return
-        tab.list_filter.clear()
+        tab.set_query("")
         self.parts.context.refresh_context_header()
 
 
@@ -334,18 +323,12 @@ class ContextController(QObject):
         if section_key and section_key != TabKey.SESSION:
             tab = self.ui.viewer_tabs.get(section_key)
             if tab is not None:
-                state = tab.capture_view_state()
                 current = getattr(tab.parts.tab_selection, 'current_value', None)
                 selection_name = self.parts.scopes.label_for(current) if current is not None else ""
-                marker_name = self.parts.context.marker_display_name(tab, state.marker_id)
-                filter_text = state.filter_text
+                marker_name = self.parts.context.marker_display_name(tab, tab.parts.tab_selection.selected_marker_id())
+                filter_text = tab.filter_description()
                 if filter_text:
-                    filter_total = tab.list.topLevelItemCount()
-                    filter_visible = sum(
-                        1
-                        for index in range(filter_total)
-                        if not tab.list.topLevelItem(index).isHidden()
-                    )
+                    filter_visible, filter_total = tab.parts.list_pane.rows.counts()
 
         # A dashboard drill-down explains its own filter; that reason outranks
         # the scope's standing relationship note while the filter is applied.
@@ -361,6 +344,11 @@ class ContextController(QObject):
         return build_context_stack(
             scope_name=describe_scope_value(scope_value),
             scope_kind=scope_kind,
+            ancestors=[
+                describe_scope_value(ancestor)
+                for ancestor in scope_ancestors(scope_value, self.parts.scopes.project_groups())
+            ],
+            titles_scope=section_key == TabKey.SESSION,
             section_key=section_key,
             selection_name=selection_name,
             marker_name=marker_name,
@@ -416,30 +404,48 @@ class ContextController(QObject):
         self.ui.toast.show_message(text, tone=tone)
 
 
+    def post_navigation_message(self, text: str, timeout: int = 0) -> None:
+        """Say where a route went, or why it would not go.
+
+        An untimed message stays until the next navigation begins and clears
+        it (``HistoryController.begin_navigation``); one with a timeout ends
+        itself. The text is remembered so that only this message is cleared,
+        never a status the bar shows for other work.
+        """
+
+        self.state.history.navigation_message = text if not timeout else ""
+        self.window.statusBar().showMessage(text, timeout)
+
+
     def show_arrival_message(self, text: str, timeout: int = 0) -> None:
         """Post an arrival message, folding in any filter notice it would hide."""
 
         notice = self.state.review.pending_filter_notice
         self.state.review.pending_filter_notice = None
-        self.window.statusBar().showMessage(f"{text} {notice}" if notice else text, timeout)
+        self.parts.context.post_navigation_message(f"{text} {notice}" if notice else text, timeout)
 
 
-    def viewer_frame_changed(self, value: Any, frame_index: int, frame_count: int) -> None:
-        if self.state.review.suppress_viewer_context or self.state.review.preserve_tree_root_context:
+    def viewer_frame_changed(self, value: Any, frame_index: int | None, frame_count: int) -> None:
+        if self.state.review.suppress_viewer_context:
+            return
+        if self.state.review.preserve_tree_root_context and not self.parts.context_panel.describes(value):
             return
         if not isinstance(value, TiltSeries):
             return
         viewer = self.ui.viewer_tabs.get(TabKey.TILT_SERIES)
         if self.ui.tabs.currentIndex() != TAB_LABELS.index(TabKey.TILT_SERIES) or viewer is None or viewer.parts.tab_selection.current_value is not value:
             return
-        self.ui.context_panel.set_title(self.parts.scopes.label_for(value))
+        lines = [self.parts.context.context_description(value), "",
+                 *self.frame_context_lines(viewer, value, frame_index, frame_count)]
+        self.parts.context_panel.show_item(self.parts.scopes.label_for(value), "\n".join(lines), item=value)
+
+    def frame_context_lines(self, viewer: ViewerTab, value: TiltSeries, frame_index: int | None, frame_count: int) -> list[str]:
+        scrubber = viewer.parts.frame_scrubber
+        pending = scrubber.pending_text(frame_count)
+        if frame_index is None:
+            return [scrubber.frame_text(frame_count).replace("\n", "; ")]
         lines = [
-            describe_object(
-                value,
-                tilt_validation=tilt_validation_for(value, self.state.viewer.viewer_tilt_validations, self.state.review.workspace),
-            ),
-            "",
-            "Current frame:",
+            "Displayed frame:",
             f"  Frame: {frame_index + 1} of {frame_count}",
             f"  Raw stack index: {frame_index}",
         ]
@@ -453,24 +459,35 @@ class ContextController(QObject):
             beam_shift = compact_pair(frame_metadata.get("beam_shift_x"), frame_metadata.get("beam_shift_y"))
             if beam_shift:
                 lines.append(f"  Beam shift X/Y: {beam_shift}")
-        self.ui.context_panel.set_text("\n".join(lines))
+        if pending:
+            lines.append(f"  {pending}")
+        return lines
 
 
     def sync_context_heading(self) -> None:
         """Name the item once (harmonisation A1): ``ContextPanel.sync_heading``
-        with the title of the page the current tab shows."""
+        with the item the page of the current tab titles."""
 
         index = self.ui.tabs.currentIndex()
         label = TAB_LABELS[index] if 0 <= index < len(TAB_LABELS) else ""
-        viewer_tab = self.ui.viewer_tabs.get(label)
-        page_title = viewer_tab.header_title.text_full() if viewer_tab is not None else None
-        self.parts.context_panel.sync_heading(label, page_title)
+        self.parts.context_panel.sync_heading(label, self.parts.context.page_item())
 
 
     def set_context(self, label: str, value: Any) -> None:
         timer = QElapsedTimer()
         timer.start()
-        self.parts.context_panel.show_item(label, self.parts.context.context_description(value))
+        description = self.parts.context.context_description(value)
+        if (isinstance(value, TiltSeries) and value is self.parts.context.page_item()
+                and not self.state.review.suppress_viewer_context):
+            viewer = self.ui.viewer_tabs[TabKey.TILT_SERIES]
+            description += "\n\n" + "\n".join(self.frame_context_lines(
+                viewer, value, viewer.parts.frame_scrubber.displayed_frame_index(), viewer.slice_slider.maximum() + 1))
+        self.parts.context_panel.show_item(
+            label,
+            description,
+            item=value,
+            scope=isinstance(value, Session | Sample | LinkedSampleGroup | ProjectTreeGroup),
+        )
         self.parts.context.refresh_context_header()
         self.parts.context.sync_context_heading()
         elapsed_ms = timer.elapsed()
@@ -488,10 +505,28 @@ class ContextController(QObject):
             LOGGER.debug("Could not record context panel timing", exc_info=True)
 
 
+    def page_item(self) -> Any:
+        """The item the active tab's page titles, or None (Session tab, empty tab)."""
+
+        index = self.ui.tabs.currentIndex()
+        tab = self.ui.viewer_tabs.get(TAB_LABELS[index]) if 0 <= index < len(TAB_LABELS) else None
+        return tab.parts.tab_selection.current_value if tab is not None else None
+
+    def describes_page_item(self, value: Any) -> bool:
+        """Whether the panel would describe the item the page already titles.
+
+        Decided here, once, for the text (``context_description``) and for the
+        heading (``sync_context_heading``): a marker selection, a scope or an
+        item the tab does not show is not the page's item.
+        """
+
+        return value is not None and value is self.parts.context.page_item()
+
     def context_description(self, value: Any) -> str:
         batch_tab = self.ui.viewer_tabs.get(TabKey.BATCH_POSITION)
         return ContextDescriber(self.state.review.workspace, self.parts.scopes.context_for_object).describe(
             value,
+            describes_page_item=self.parts.context.describes_page_item(value),
             tilt_validation=(
                 tilt_validation_for(value, self.state.viewer.viewer_tilt_validations, self.state.review.workspace)
                 if isinstance(value, TiltSeries)

@@ -38,8 +38,8 @@ def inferred_failed_tilt_markers(
     """Approximate location markers for failed orphaned tilt series.
 
     A failed tilt series whose batch position never made it into
-    ``BatchPositionsList.xml`` (e.g. the ``alpha_1`` /
-    ``alpha_1_2`` failures) doesn't reach the regular batch-driven
+    ``BatchPositionsList.xml`` (e.g. the Beta ``beta_1`` /
+    ``beta_1_2`` failures) doesn't reach the regular batch-driven
     marker code path. We can still locate them on the SearchMap /
     Overview by reading the stage position from the tilt series'
     MRC extended-header metadata and projecting it through the same

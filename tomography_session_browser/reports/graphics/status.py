@@ -4,16 +4,13 @@ from dataclasses import dataclass
 from typing import Sequence
 from reportlab.lib import colors
 from reportlab.platypus import Flowable
-from tomography_session_browser.presentation.design_tokens import LIGHT_PALETTE
+from tomography_session_browser.presentation.design_tokens import LIGHT_PALETTE, NORMAL_STATUS_GLYPHS
 from tomography_session_browser.reports import styles
 
 
 def draw_dot(canvas, cx: float, cy: float, radius: float, colour: colors.Color) -> None:
     canvas.setFillColor(colour)
     canvas.circle(cx, cy, radius, stroke=0, fill=1)
-
-
-NORMAL_STATUS_GLYPHS: dict[str, str] = {"complete": "disc", "available": "disc", "pending": "ring"}
 
 
 def is_normal_status(status: str) -> bool:

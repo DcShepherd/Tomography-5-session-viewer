@@ -10,8 +10,9 @@ from tomography_session_browser.ui.list_decorations import paint_selection_marke
 from tomography_session_browser.ui.motion import ItemHoverAnimator, blend
 from tomography_session_browser.services.atlas_marker_style import LEAF_STATUS_WIDTH_DP
 from tomography_session_browser.ui.theme import current_palette
-from tomography_session_browser.presentation.design_tokens import RADIUS_CONTROL, SPACE_M, SPACE_S, SPACE_XS, STATUS_TONE_COLOURS, STATUS_TONE_FILL_ALPHA, TYPE_BODY, TYPE_CAPTION
-from tomography_session_browser.ui.viewer.constants import LIST_PRIMARY_ROLE, LIST_ROW_HEIGHT_PX, LIST_ROW_NAME_HEIGHT_PX, LIST_ROW_SUMMARY_HEIGHT_PX, LIST_STATUS_ROLE, LIST_SUMMARY_ROLE, MIN_SHARED_PREFIX_CHARS, NAME_PREFIX_BOUNDARIES, SHARED_NAME_PREFIX_PROPERTY
+from tomography_session_browser.presentation.design_tokens import NORMAL_STATUS_GLYPHS, RADIUS_CONTROL, SPACE_M, SPACE_S, SPACE_XS, STATUS_TONE_COLOURS, STATUS_TONE_FILL_ALPHA, TYPE_BODY, TYPE_CAPTION
+from tomography_session_browser.ui.viewer.group_rows import group_row_size, paint_group_row
+from tomography_session_browser.ui.viewer.constants import VIEWER_ENTRY_ROLE, LIST_PRIMARY_ROLE, LIST_ROW_HEIGHT_PX, LIST_ROW_SINGLE_HEIGHT_PX, LIST_ROW_NAME_HEIGHT_PX, LIST_ROW_SUMMARY_HEIGHT_PX, LIST_STATUS_ROLE, LIST_SUMMARY_ROLE, MIN_SHARED_PREFIX_CHARS, NAME_PREFIX_BOUNDARIES, SHARED_NAME_PREFIX_PROPERTY
 
 
 def shared_name_prefix(names: list[str]) -> str:
@@ -59,13 +60,32 @@ def fit_list_name(name: str, metrics: QFontMetrics, width: int, shared_prefix: s
     return metrics.elidedText(name, Qt.TextElideMode.ElideMiddle, width)
 
 
+def list_name_top(rect: QRect, *, has_summary: bool) -> int:
+    """Where a row's name is drawn: at the top, over its summary line, or
+    centred when it has no summary (a complete row is just its name and glyph).
+    Single-line names are centred in their compact row."""
+
+    if has_summary:
+        return rect.top() + SPACE_S
+    return rect.center().y() - LIST_ROW_NAME_HEIGHT_PX // 2
+
+
 class ViewerListDelegate(QStyledItemDelegate):
     hover_animator: ItemHoverAnimator | None = None
 
     def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:  # noqa: N802 - Qt API
-        return QSize(super().sizeHint(option, index).width(), LIST_ROW_HEIGHT_PX)
+        entry = index.data(VIEWER_ENTRY_ROLE)
+        width = super().sizeHint(option, index).width()
+        if entry is not None:
+            return group_row_size(entry, width)
+        height = LIST_ROW_HEIGHT_PX if index.data(LIST_SUMMARY_ROLE) else LIST_ROW_SINGLE_HEIGHT_PX
+        return QSize(width, height)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:  # noqa: N802 - Qt API
+        entry = index.data(VIEWER_ENTRY_ROLE)
+        if entry is not None:
+            paint_group_row(painter, option, index, entry)
+            return
 
         theme = current_palette()
         primary = str(index.data(LIST_PRIMARY_ROLE) or index.data(Qt.ItemDataRole.DisplayRole) or "")
@@ -112,7 +132,7 @@ class ViewerListDelegate(QStyledItemDelegate):
             )
             left += icon_size + SPACE_S
         right = rect.right() - SPACE_M
-        top = rect.top() + SPACE_S
+        top = list_name_top(rect, has_summary=bool(summary))
 
         badge_font = QFont(option.font)
         badge_font.setPointSizeF(TYPE_CAPTION)
@@ -164,9 +184,6 @@ class ViewerListDelegate(QStyledItemDelegate):
             draw_centered_badge_text(painter, mark_rect, status)
 
         painter.restore()
-
-
-NORMAL_STATUS_GLYPHS = {"complete": "disc", "available": "disc", "pending": "ring"}
 
 
 LIST_STATUS_GLYPH_PX = 14
@@ -241,7 +258,7 @@ def status_tone(status: str) -> str:
     """The ``design_tokens.STATUS_TONE_COLOURS`` tone a status word is drawn in."""
 
     raw = status.strip().lower()
-    if raw in {"done", "ok", "acquired", "complete", "completed", "available"}:
+    if raw in {"done", "ok", "acquired", "complete", "completed", "available", "with acquisitions", "no acquisitions"}:
         return "good"
     if raw in {"partial", "incomplete", "warning", "warn"}:
         return "warn"

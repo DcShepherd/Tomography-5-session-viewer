@@ -70,22 +70,25 @@ class ResponsiveCardGrid(QWidget):
     of the first row spans 2 and each of the second spans 3.
     """
 
-    def __init__(self, cards: list[QWidget], parent: QWidget | None = None) -> None:
+    #: ``(width, columns)``: the columns from the widest width reached down.
+    BREAKPOINTS: tuple[tuple[int, int], ...] = ((1120, 5), (680, 3), (440, 2))
+
+    def __init__(
+        self,
+        cards: list[QWidget],
+        parent: QWidget | None = None,
+        *,
+        breakpoints: tuple[tuple[int, int], ...] | None = None,
+    ) -> None:
         super().__init__(parent)
         self._cards = list(cards)
+        self._breakpoints = breakpoints or self.BREAKPOINTS
         self._columns = 0
         self._layout: QGridLayout | None = None
         self._reflow(self._column_count_for_width(self.width()))
 
-    @staticmethod
-    def _column_count_for_width(width: int) -> int:
-        if width >= 1120:
-            return 5
-        if width >= 680:
-            return 3
-        if width >= 440:
-            return 2
-        return 1
+    def _column_count_for_width(self, width: int) -> int:
+        return next((columns for reached, columns in self._breakpoints if width >= reached), 1)
 
     def _reflow(self, columns: int) -> None:
         rows = balanced_rows(len(self._cards), columns) or [0]

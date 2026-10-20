@@ -30,7 +30,7 @@ ENTITY_DISPLAY_LABELS: dict[str, str] = {
     TabKey.SEARCH: "Search tiles",
     TabKey.BATCH_POSITION: "Batch positions",
     TabKey.TILT_SERIES: "Tilt series",
-    TabKey.SESSION: "Session",
+    TabKey.SESSION: "Summary",
 }
 
 # Singular forms, for sentences about one object rather than a section.
@@ -108,6 +108,12 @@ class ContextStack:
 
     scope: str = ""
     scope_kind: str = ""
+    #: The scopes above ``scope`` in the project tree, coarsest first.
+    ancestors: tuple[str, ...] = ()
+    #: The page titles the scope itself (the Session tab), so the crumbs stop
+    #: above it; on a viewer tab the page titles an item and the scope is the
+    #: last crumb.
+    titles_scope: bool = False
     section: str = ""
     selection: str = ""
     marker: str = ""
@@ -136,9 +142,23 @@ class ContextStack:
         return self.selection or self.marker
 
     def crumbs(self) -> tuple[str, ...]:
-        """The context path, coarsest first, with empty levels omitted."""
+        """The breadcrumb: the ancestors of whatever the page titles.
 
-        parts = [self.scope_label, self.section, self.selection_label]
+        On a viewer tab that is the item, so the trail is the ancestors and
+        the scope. On the Session tab it is the scope, so the trail is the
+        ancestors only. The section is the tab's own name and the selection
+        the page's title: neither is repeated here.
+        """
+
+        trail = [*self.ancestors]
+        if not self.titles_scope and self.scope_label:
+            trail.append(self.scope_label)
+        return tuple(trail)
+
+    def full_path(self) -> tuple[str, ...]:
+        """Every level, coarsest first, with empty levels omitted."""
+
+        parts = [*self.ancestors, self.scope_label, self.section, self.selection_label]
         return tuple(part for part in parts if part)
 
     @property
@@ -156,30 +176,26 @@ class ContextStack:
         return f"{self.filter_visible} of {self.filter_total}"
 
     def view_state_notes(self) -> tuple[str, ...]:
-        """Everything currently narrowing or annotating what is on screen."""
+        """Relationship notes; the list owns the visible filter and its count."""
 
-        notes: list[str] = []
-        if self.has_filter:
-            summary = self.filter_summary
-            notes.append(f"Filtered — {summary}" if summary else "Filtered")
-        if self.relationship:
-            notes.append(self.relationship)
-        return tuple(notes)
+        return (self.relationship,) if self.relationship else ()
 
     def to_text(self) -> str:
         """Single-line rendering, e.g. for a status strip or a tooltip."""
 
-        return CRUMB_SEPARATOR.join(self.crumbs())
+        return CRUMB_SEPARATOR.join(self.full_path())
 
     @property
     def is_empty(self) -> bool:
-        return not self.crumbs()
+        return not self.full_path()
 
 
 def build_context_stack(
     *,
     scope_name: str | None = None,
     scope_kind: str = "",
+    ancestors: tuple[str, ...] | list[str] = (),
+    titles_scope: bool = False,
     section_key: str | None = None,
     selection_name: str | None = None,
     marker_name: str | None = None,
@@ -194,9 +210,12 @@ def build_context_stack(
     so callers cannot leak a raw key such as ``Search`` into the interface.
     """
 
+    scope = (scope_name or "").strip()
     return ContextStack(
-        scope=(scope_name or "").strip(),
+        scope=scope,
         scope_kind=scope_kind or "",
+        ancestors=tuple(name.strip() for name in ancestors if name and name.strip()),
+        titles_scope=titles_scope,
         section=entity_display_label(section_key),
         selection=(selection_name or "").strip(),
         marker=(marker_name or "").strip(),

@@ -37,8 +37,13 @@ from tomography_session_browser.services.acquisition_metadata import (
 )
 from tomography_session_browser.services.item_status import display_status_label
 from tomography_session_browser.services.tilt_series_validation import (
+    HARD_FAILURE_THRESHOLD,
+    SOURCE_INFERRED_MAJORITY,
+    SOURCE_MDOC,
     SOURCE_MRC_EXTENDED,
     SOURCE_SESSION_METADATA,
+    STATUS_FAILED,
+    UNREADABLE_STACK_REASON,
     TiltSeriesValidation,
     actual_tilt_count,
 )
@@ -71,32 +76,46 @@ def microscope_state_lines(metadata: dict[str, Any]) -> list[str]:
     return lines
 
 
+_EXPECTED_SOURCE_PHRASES = {
+    SOURCE_SESSION_METADATA: "session metadata",
+    SOURCE_MDOC: "the MDOC file",
+    SOURCE_MRC_EXTENDED: "the MRC extended header",
+    SOURCE_INFERRED_MAJORITY: "the inferred session majority",
+}
+
+
 def tilt_series_validation_lines(
     tilt_series: TiltSeries,
     *,
     validation: TiltSeriesValidation | None = None,
+    with_status: bool = True,
 ) -> list[str]:
     """Validation summary used by the right-hand context panel.
 
-    Surfaces the same data the dashboard tile tooltips show — status,
-    actual / expected counts, evidence source, and the human-readable
-    reason — so the user can see *why* a tilt series was flagged FAILED or
-    INCOMPLETE without leaving the Tilt-series tab.
+    Surfaces what the dashboard tile tooltips show about *why* a tilt series
+    was flagged Failed or Incomplete without leaving the Tilt-series tab:
+    the expected count and where it came from, the range, and the rule that
+    failed it. The image count is the Summary's; the verdict is the status
+    pill's, so ``with_status`` is false when the page beside the panel
+    already carries that pill.
     """
 
     validation = validation or standalone_tilt_validation(tilt_series)
     if validation is None:
         return []
-    expected_text = str(validation.expected_count) if validation.expected_count is not None else "unknown"
-    lines = [
+    lines: list[str] = []
+    if with_status:
         # The reviewer's word, as the header pill and the batch rows say it
         # ("Complete", not "COMPLETE"): the context panel draws it as the
         # same pill (harmonisation C1).
-        f"Status: {display_status_label(validation.status)}",
-        f"Tilt images: {validation.actual_count} / {expected_text} expected",
-    ]
-    if validation.evidence_source and validation.evidence_source != "none":
-        lines.append(f"Expected source: {validation.evidence_source.replace('_', ' ')}")
+        lines.append(f"Status: {display_status_label(validation.status)}")
+    source = _EXPECTED_SOURCE_PHRASES.get(validation.evidence_source or "")
+    if validation.expected_count is None:
+        lines.append("Expected: unknown")
+    elif source:
+        lines.append(f"Expected: {validation.expected_count}, from {source}")
+    else:
+        lines.append(f"Expected: {validation.expected_count}")
     if validation.min_tilt is not None and validation.max_tilt is not None:
         range_label = (
             "Planned range"
@@ -112,9 +131,24 @@ def tilt_series_validation_lines(
             lines.append(
                 f"{range_label}: {validation.min_tilt:g}° to {validation.max_tilt:g}°"
             )
-    if validation.reason:
-        lines.append(f"Reason: {validation.reason}")
+    lines.extend(_validation_rule_lines(validation))
     return lines
+
+
+def _validation_rule_lines(validation: TiltSeriesValidation) -> list[str]:
+    """The rule behind a verdict, when the counts alone do not state it.
+
+    "7 of 9 expected images present" only repeats the Summary and the
+    expected row, so a complete or incomplete series says nothing more. A
+    series under the hard floor names that rule; a missing stack or an
+    unreadable one keeps the validator's own explanation.
+    """
+
+    if validation.actual_count == 0 or validation.reason == UNREADABLE_STACK_REASON:
+        return [f"Reason: {validation.reason}"] if validation.reason else []
+    if validation.status == STATUS_FAILED and validation.actual_count < HARD_FAILURE_THRESHOLD:
+        return [f"Rule: fewer than {HARD_FAILURE_THRESHOLD} tilt images"]
+    return []
 
 
 def tilt_series_quality_lines(
@@ -270,9 +304,25 @@ def metadata_value(metadata: Any, key: str) -> str:
     return display_value(value)
 
 
-def common_metadata_value(metadata_values: list[Any], key: str) -> str:
-    values = [metadata_value(metadata, key) for metadata in metadata_values]
-    return common_text(values)
+def magnification_value(metadata: Any) -> str:
+    """The nominal magnification as text; a recorded zero reads "unknown".
+
+    Tomography writes ``NominalMagnification`` as 0 for an atlas it never
+    acquired. Zero is not a magnification, so it says what a missing value
+    says. Counted files (tile images, tiles) keep their zeros.
+    """
+
+    text = metadata_value(metadata, "NominalMagnification")
+    try:
+        return "unknown" if float(text) == 0 else text
+    except ValueError:
+        return text
+
+
+def common_magnification_value(metadata_values: list[Any]) -> str:
+    """One magnification for several items, unknown ones left out."""
+
+    return common_text([magnification_value(metadata) for metadata in metadata_values])
 
 
 def xml_pixel_size(metadata: Any) -> str:

@@ -44,7 +44,7 @@ from tomography_session_browser.services.tilt_series_validation import (
 JumpKey = Literal["atlas", "overview", "search_map", "search", "batch", "tilt_series"]
 JUMP_LABELS: Mapping[JumpKey, str] = MappingProxyType({
     "atlas": "Atlas", "overview": "Overview", "search_map": "Search map",
-    "search": "Search", "batch": "Batch", "tilt_series": "Tilt series",
+    "search": "Search tile", "batch": "Batch", "tilt_series": "Tilt series",
 })
 
 
@@ -88,8 +88,13 @@ def _tooltip(explanation: str, target: Any, context: NavigationContext) -> str:
 
 
 def _linked_tooltip(kind: str, resolution: NavigationResolution, context: NavigationContext, inferred: str = "") -> str:
-    return (f"Open linked {kind}: {_label(resolution.target, context)}" if resolution.navigable
-            else f"No linked {kind} found.{inferred}")
+    if resolution.navigable:
+        return f"Open linked {kind}: {_label(resolution.target, context)}"
+    if resolution.ambiguous and resolution.explanation:
+        # The resolver's own words, which name the candidates: "no link" would
+        # say the metadata is silent where it in fact disagrees.
+        return resolution.explanation
+    return f"No linked {kind} found.{inferred}"
 
 
 def _markers(target: Any, context: NavigationContext, marker_context: MarkerContext):
@@ -116,7 +121,8 @@ def _tilt(source: TiltSeries, context: NavigationContext) -> dict[JumpKey, Jump]
         "overview": (targets.overview_resolution, "overview"),
     }
     return {key: _jump(resolution, _linked_tooltip(kind, resolution, context, inferred),
-                       marker_id_for_tilt_navigation, context, markers, source, batch=targets.batch_position)
+                       marker_id_for_tilt_navigation, context, markers, source, batch=targets.batch_position,
+                       clear_unmatched=key == "batch")
             for key, (resolution, kind) in resolutions.items()}
 
 
@@ -146,15 +152,8 @@ def _batch(source: BatchPosition, context: NavigationContext) -> dict[JumpKey, J
     result: dict[JumpKey, Jump] = {key: _jump(resolution, _linked_tooltip(kind, resolution, context),
                          marker_id_for_batch_position_navigation, context, markers, source)
               for key, (resolution, kind) in resolutions.items()}
-    selected = context.selected_marker
-    if selected is None:
-        resolution = NavigationResolution(explanation="No tilt series is associated with the selected exposure area.")
-        tooltip = resolution.explanation
-    else:
-        exposure = context.tilt_resolution_for_exposure_marker(selected, batch=source, marker_context=markers)
-        resolution, tooltip = exposure.resolution, exposure.tooltip
-        if not resolution.explanation:
-            resolution = NavigationResolution(explanation=tooltip)
+    exposure = context.tilt_resolution_for_exposure_marker(context.selected_marker, batch=source, marker_context=markers)
+    resolution, tooltip = exposure.resolution, exposure.tooltip
     result["tilt_series"] = Jump(resolution, _tooltip(tooltip, resolution.target, context), tilt_hand_off=True)
     return result
 
@@ -163,7 +162,7 @@ def _exposure_search(source: Overview | SearchMap, context: NavigationContext, m
     selected = context.selected_marker
     if selected is None or selected.marker_type not in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}:
         explanation = "Select an exposure area to jump to its linked search item."
-        return Jump(NavigationResolution(explanation=explanation), explanation)
+        return Jump(NavigationResolution(explanation=explanation, selection_required=True), explanation)
     resolution = context.search_tile_resolution_for_exposure_marker(selected)
     target = resolution.target if resolution.navigable else None
     # An arrival that matches no single exposure clears the tile's default

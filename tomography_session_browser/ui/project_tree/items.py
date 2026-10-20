@@ -29,6 +29,7 @@ from tomography_session_browser.domain.models import (
 )
 from tomography_session_browser.domain.traversal import has_collection_data
 from tomography_session_browser.presentation.project_tree import (
+    SESSION_KIND_BADGES,
     PROJECT_BADGE_MEANINGS,
     ProjectTreeGroup,
     project_group_badge,
@@ -37,7 +38,7 @@ from tomography_session_browser.presentation.project_tree import (
     session_key,
 )
 from tomography_session_browser.presentation.scopes import EntityGroup, LinkedSampleGroup
-from tomography_session_browser.presentation.workspace import Workspace, atlas_display_key
+from tomography_session_browser.presentation.workspace import EntityKind, Workspace, atlas_display_key
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.navigation_icons import PROJECT_GROUP_ICONS, TAB_ICONS, TREE_ENTITY_GROUP_ICONS
 from tomography_session_browser.ui.project_tree.widgets import EXPANSION_ROLE, OBJECT_ROLE, RECENT_PATH_ROLE
@@ -83,7 +84,7 @@ class ProjectTreeItems:
 
     def populate_group_item(self, group_item: QTreeWidgetItem, group: ProjectTreeGroup) -> None:
         if group.kind == "linked" and group.atlas_session is not None:
-            atlas_item = self.item("Atlas", group.atlas_session)
+            atlas_item = self.item(group.atlas_session.name, group.atlas_session)
             self._populate_session_item(atlas_item, group.atlas_session)
             group_item.addChild(atlas_item)
             for session in group.collection_sessions:
@@ -107,11 +108,14 @@ class ProjectTreeItems:
         return session.samples
 
     def item(self, label: str, value: Any) -> QTreeWidgetItem:
-        tag = tree_tag_for(value)
+        tag = tree_tag_for(value, self._workspace)
         item = QTreeWidgetItem([label, tag])
         item.setToolTip(0, label)
         if tag:
-            item.setToolTip(1, tree_tag_tooltip_for(value))
+            meaning = tree_tag_tooltip_for(value, tag)
+            item.setToolTip(1, meaning)
+            item.setData(1, Qt.ItemDataRole.AccessibleTextRole, meaning)
+            item.setData(0, Qt.ItemDataRole.AccessibleTextRole, f"{label}, {meaning}")
         item.setData(0, OBJECT_ROLE, value)
         item.setData(0, EXPANSION_ROLE, tree_expansion_id_for(label, value))
         style_tree_item(item)
@@ -292,30 +296,20 @@ def tree_expansion_id_for(label: str, value: Any) -> str:
     return f"label:{label}"
 
 
-def tree_tag_for(value: Any) -> str:
-    if isinstance(value, Sample):
-        count = len(value.batch_positions)
-        return f"{count} bp" if count else ""
-    if isinstance(value, LinkedSampleGroup):
-        count = len(value.batch_positions)
-        return f"{count} bp" if count else ""
+def tree_tag_for(value: Any, workspace: Workspace) -> str:
+    if isinstance(value, (Sample, LinkedSampleGroup)):
+        samples = value.samples if isinstance(value, LinkedSampleGroup) else [value]
+        if any(has_collection_data(sample) for sample in samples):
+            return str(len(workspace.entities(EntityKind.TILT_SERIES, value)))
+        return ""
     if isinstance(value, Session):
-        if value.kind == SessionKind.ATLAS_SCREENING:
-            return "AT"
-        if value.kind in {SessionKind.MULTIGRID, SessionKind.COLLECTION, SessionKind.SINGLE_COLLECTION}:
-            return "DC"
-        return "?"
+        return SESSION_KIND_BADGES.get(value.kind.value, "?")
     return ""
 
 
-def tree_tag_tooltip_for(value: Any) -> str:
-    if isinstance(value, Sample):
-        count = len(value.batch_positions)
-        return f"{count} batch position{'s' if count != 1 else ''}"
-    if isinstance(value, LinkedSampleGroup):
-        count = len(value.batch_positions)
-        return f"{count} linked batch position{'s' if count != 1 else ''}"
+def tree_tag_tooltip_for(value: Any, tag: str) -> str:
+    if isinstance(value, (Sample, LinkedSampleGroup)):
+        return f"{tag} tilt series" if tag else ""
     if isinstance(value, Session):
-        tag = tree_tag_for(value)
         return session_badge_tooltip(tag) if tag != "?" else "Unknown session type"
     return ""

@@ -107,6 +107,8 @@ class Workspace:
     _project_marker_contexts: dict[frozenset[str], MarkerContext] = field(
         default_factory=dict, init=False, repr=False,
     )
+    # ``id(entity)`` -> (the owner's ``id``, its header label), built on first use.
+    _row_owners: dict[int, tuple[int, str]] = field(default_factory=dict, init=False, repr=False)
 
     @classmethod
     def build(cls, sessions: Sequence[Session], group_names: Mapping[str, str] | None = None) -> Workspace:
@@ -247,6 +249,23 @@ class Workspace:
     def members_for(self, value: object) -> tuple[Sample, ...]:
         members = self._owners_by_object.get(id(value))
         return members if members is not None else self._owners_by_id.get(getattr(value, "id", ""), ())
+
+    def row_owner(self, value: object) -> tuple[int, str] | None:
+        """The sample that lists ``value``, as ``(identity, header label)``, for a list's group header.
+
+        A session-level list (single-collection or fallback layouts) is owned
+        by its session, and an entity both a session and its sample list belongs
+        to the sample. ``None`` for a value nothing in the workspace lists.
+        """
+
+        if not self._row_owners:
+            for session in self.sessions:
+                for entity in _children(session):
+                    self._row_owners[id(entity)] = (id(session), session.name)
+                for sample in session.samples:
+                    for entity in _children(sample):
+                        self._row_owners[id(entity)] = (id(sample), display_sample_name(sample.name))
+        return self._row_owners.get(id(value))
 
     def members_for_id(self, object_id: str) -> tuple[Sample, ...]:
         """ID-only ownership, retaining the Atlas collection controls' rule."""

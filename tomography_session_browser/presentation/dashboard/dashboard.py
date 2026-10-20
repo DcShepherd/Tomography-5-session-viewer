@@ -7,24 +7,38 @@ from time import perf_counter
 from typing import Any
 
 from tomography_session_browser.presentation.dashboard.analysis import ScopeAnalysis
+from tomography_session_browser.presentation.dashboard.filters import sample_card_routes, scoped_filter
+from tomography_session_browser.presentation.dashboard.finding_routes import finding_viewer_rows, session_atlas_record_keys
 from tomography_session_browser.presentation.dashboard.atlas_counts import compute_atlas_counts
+from tomography_session_browser.domain.identity import canonical_entity_key
+from tomography_session_browser.domain.models import Session
 from tomography_session_browser.presentation.dashboard.models import (
+    AttributedWarning,
+    LinkedAtlasDashboardScope,
     BatchPositionProgressModel,
     DashboardFilterModel,
     DashboardModel,
     DashboardScope,
+    INFERRED_BATCH_TILE_PREFIX,
     StatCardModel,
     StatusTileModel,
     TILE_STATUS_NEUTRAL,
     TiltSeriesOutcomeModel,
     WarningGroupModel,
-    WarningRowModel,
 )
-from tomography_session_browser.presentation.dashboard.scopes import scope_from, scope_per_sample_counts
-from tomography_session_browser.presentation.dashboard.sections.atlas import atlas_summary_from_scope
+from tomography_session_browser.presentation.dashboard.scopes import scope_from, scope_per_sample_counts, scope_samples
+from tomography_session_browser.presentation.dashboard.sections.attention import needs_attention, with_atlas_outcome
+from tomography_session_browser.presentation.dashboard.sections.samples import by_sample_rows
+from tomography_session_browser.presentation.dashboard.summary import build_summary
+from tomography_session_browser.presentation.dashboard.sections.atlas import (
+    AtlasSheetModel,
+    atlas_sheet,
+    atlas_summary_from_scope,
+    collection_sessions,
+)
 from tomography_session_browser.presentation.dashboard.sections.batches import batch_position_progress_rows
 from tomography_session_browser.presentation.dashboard.sections.metrics import defocus_plot_model, dose_information_plot_model
-from tomography_session_browser.presentation.dashboard.sections.search_maps import search_map_overview_rows, unresolved_inferred_failed_batch_groups
+from tomography_session_browser.presentation.dashboard.sections.search_maps import unresolved_inferred_failed_batch_groups
 from tomography_session_browser.presentation.dashboard.sections.status import (
     atlas_tile_status,
     outcomes_for,
@@ -41,17 +55,17 @@ from tomography_session_browser.presentation.dashboard.sections.timeline import 
     timeline_items_by_sample,
     timeline_items_for_scope,
 )
-from tomography_session_browser.presentation.warnings import dashboard_warning_groups, warning_severity
+from tomography_session_browser.presentation.warnings import dashboard_warning_groups
 from tomography_session_browser.presentation.workspace import EntityKind, Workspace
 from tomography_session_browser.services.item_status import (
     TAG_MISSING_MDOC,
+    build_item_status_context,
     TAG_ORPHANED_FAILED,
     filter_tag_query,
     tilt_series_lacks_mdoc,
     validation_status_tag,
 )
 from tomography_session_browser.services.tilt_series_validation import STATUS_FAILED, STATUS_INCOMPLETE, STATUS_UNKNOWN
-from tomography_session_browser.services.warning_classification import split_warning_scope
 from tomography_session_browser.presentation.tab_keys import TabKey
 
 LOGGER = logging.getLogger("tomography_session_browser.ui.session_presenter")
@@ -103,20 +117,7 @@ def analysed_dashboard_model(value: Any, *, workspace: Workspace | None = None) 
     dose_information = dose_information_plot_model(scope)
     dose_end = perf_counter()
 
-    # Each row reports *exposure-area* progress (planned vs. acquired
-    # exposures across the linked batch positions), a different quantity
-    # from the search map's mosaic tile count: a 60-tile mosaic may hold
-    # one batch with 6 planned exposures.
-    sm_overview = search_map_overview_rows(
-        scope.search_maps,
-        scope.batch_positions,
-        scope.tilt_series,
-        analysis.validations,
-        successful_tilt_ids=analysis.successful_tilt_ids,
-        owners=analysis.owners,
-        inferred_groups=analysis.inferred_batch_groups,
-    )
-    warning_rows, warning_groups = _warnings(scope, analysis)
+    warning_groups = _warning_groups(scope, analysis)
     timeline_items = (
         timeline_items_for_scope(
             scope.batch_positions,
@@ -127,14 +128,33 @@ def analysed_dashboard_model(value: Any, *, workspace: Workspace | None = None) 
         if scope.is_sample_scope
         else timeline_items_by_sample(scope.sample_groups, analysis.validation_by_id)
     )
-    completeness, completeness_label = _completeness(warning_groups)
     start, end, duration = scope_acquisition_window(scope)
     has_atlases = bool(scope.atlases)
+    has_collection_data = any(card.value > 0 for card in cards if card.kind is not EntityKind.ATLAS)
+    # The list rows' own verdicts (a search map's Incomplete), over exactly
+    # this scope's entities, so what the page counts is what its routes open.
+    status_context = build_item_status_context(
+        search_maps=scope.search_maps,
+        batch_positions=scope.batch_positions,
+        tilt_series=scope.tilt_series,
+        samples=scope_samples(scope),
+        validations=analysis.validation_by_id,
+    )
+    by_sample = tuple(by_sample_rows(scope, analysis, status_context))
     # The original ``value`` carries information the flattened scope
     # has thrown away (which sessions are atlas-screening, what the
     # cross-session linker decided), so the atlas counter takes the
     # original input rather than the scope.
     atlas_counts = compute_atlas_counts(value)
+    atlas_summary = atlas_summary_from_scope(scope, atlas_counts, workspace) if has_atlases else None
+    viewer_rows = finding_viewer_rows(value, workspace)
+    attention = needs_attention(scope, analysis, warning_groups, by_sample, status_context,
+                                viewer_rows, session_atlas_keys=session_atlas_record_keys(value))
+    card_routes, inferred_batch_route = sample_card_routes(scope, analysis, viewer_rows) if scope.is_sample_scope and has_collection_data else ((), None)
+    sheet = AtlasSheetModel()
+    if atlas_summary is not None and not has_collection_data:
+        sheet = atlas_sheet(scope, atlas_summary.rows, workspace)
+        attention = with_atlas_outcome(attention, sheet)
 
     model = DashboardModel(
         title=scope.title,
@@ -144,23 +164,31 @@ def analysed_dashboard_model(value: Any, *, workspace: Workspace | None = None) 
         acquisition_start=start,
         acquisition_end=end,
         acquisition_duration=duration,
-        completeness=completeness,
-        completeness_label=completeness_label,
         counts=cards,
         outcomes=outcomes,
         defocus_readout=defocus_readout,
         dose_information=dose_information,
-        search_map_overview=sm_overview,
-        filters=_filters(scope, outcomes, analysis),
-        warnings=warning_rows,
+        filters=[scoped_filter(route, scope) for route in _filters(scope, outcomes, analysis)],
         warning_groups=warning_groups,
         batch_positions=batch_position_rows,
         timeline_items=timeline_items,
         sample_count=len(scope.sample_groups),
         is_sample_scope=scope.is_sample_scope,
         has_atlases=has_atlases,
-        has_collection_data=any(card.value > 0 for card in cards if card.kind is not EntityKind.ATLAS),
-        atlas_summary=atlas_summary_from_scope(scope, atlas_counts) if has_atlases else None,
+        has_collection_data=has_collection_data,
+        atlas_summary=atlas_summary,
+        summary=build_summary(
+            has_atlases=has_atlases,
+            has_collection_data=has_collection_data,
+            is_sample_scope=scope.is_sample_scope,
+            by_sample=by_sample,
+            source_folders=_source_folder_count(value),
+            needs_attention=attention,
+            atlas_sheet=sheet,
+            collection_sessions=collection_sessions(scope, workspace) if sheet.tiles else (),
+            card_routes=card_routes,
+            inferred_batch_route=inferred_batch_route,
+        ),
     )
     if LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug(
@@ -178,6 +206,17 @@ def analysed_dashboard_model(value: Any, *, workspace: Workspace | None = None) 
             len(dose_information.points),
         )
     return model, analysis
+
+
+def _source_folder_count(value: Any) -> int:
+    """The session folders a dashboard scope draws on: each session of a list
+    (a project, a group, linked sessions), or the one session."""
+
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, LinkedAtlasDashboardScope):
+        return _source_folder_count(value.source)
+    return 1 if isinstance(value, Session) else 0
 
 
 # ---------------------------------------------------------------- count cards
@@ -245,16 +284,22 @@ def _batch_position_card(scope: DashboardScope, rows: list[BatchPositionProgress
         )
         for row in card_rows
     ]
-    return _card(scope, EntityKind.BATCH_POSITION, "Batch positions", TabKey.BATCH_POSITION, len(card_rows), tiles)
+    card = _card(scope, EntityKind.BATCH_POSITION, "Batch positions", TabKey.BATCH_POSITION, len(card_rows), tiles)
+    inferred = sum(1 for row in card_rows if row.id.startswith(INFERRED_BATCH_TILE_PREFIX))
+    if inferred:
+        card.detail = f"{len(card_rows) - inferred} recorded · {inferred} inferred failed"
+    return card
 
 
 def _tilt_series_card(scope: DashboardScope, analysis: ScopeAnalysis) -> StatCardModel:
     """Tilt-series tiles take the validator's verdict, and its tooltip."""
 
     label = "Tilt series"
+    batches = _batch_of_each_tilt_series(scope, analysis)
     tiles: list[StatusTileModel] = []
     for index, item in enumerate(scope.tilt_series):
         item_id = getattr(item, "id", None)
+        batch_label, inferred = batches.get(item_id, ("", False)) if item_id is not None else ("", False)
         validation = analysis.validation_by_id.get(item_id) if item_id is not None else None
         if validation is None:
             status = TILE_STATUS_NEUTRAL
@@ -269,28 +314,44 @@ def _tilt_series_card(scope: DashboardScope, analysis: ScopeAnalysis) -> StatCar
                 status=status,
                 tooltip=tooltip,
                 destination=TabKey.TILT_SERIES,
+                group=batch_label,
+                group_inferred=inferred,
             )
         )
     return _card(scope, EntityKind.TILT_SERIES, label, TabKey.TILT_SERIES, len(scope.tilt_series), tiles)
 
 
-# ---------------------------------------------------------------- warnings and header
+def _batch_of_each_tilt_series(scope: DashboardScope, analysis: ScopeAnalysis) -> dict[str, tuple[str, bool]]:
+    """``tilt id -> (batch label, inferred)``: the batch the series' list row names.
+
+    A recorded batch is the one that lists the series (or the series names);
+    a failed series with none takes the batch its name implies, marked
+    inferred. A series with neither has no group.
+    """
+
+    batches: dict[str, tuple[str, bool]] = {}
+    for batch in scope.batch_positions:
+        for tilt_id in batch.linked_tilt_series_ids:
+            batches.setdefault(tilt_id, (batch.name or batch.id, False))
+    recorded = {batch.id: batch for batch in scope.batch_positions}
+    for tilt in scope.tilt_series:
+        batch = recorded.get(tilt.linked_batch_position_id or "")
+        if batch is not None:
+            batches.setdefault(tilt.id, (batch.name or batch.id, False))
+    for group in analysis.inferred_batch_groups:
+        for tilt in group.tilt_series:
+            batches.setdefault(tilt.id, (group.label, True))
+    return batches
 
 
-def _warnings(scope: DashboardScope, analysis: ScopeAnalysis) -> tuple[list[WarningRowModel], list[WarningGroupModel]]:
-    """The warning rows, and their groups: the scope's own warnings plus one
-    for each inferred failed batch no search map could take."""
+# ---------------------------------------------------------------- warnings
 
-    rows: list[WarningRowModel] = []
-    for raw in scope.warnings:
-        prefix, message = split_warning_scope(raw)
-        sample_name = prefix.split("/")[0].strip() or None
-        # The shared classifier decides severity here too. A local substring
-        # rule used to, so one warning could be coloured "info" on this row and
-        # ordered as a "warning" in the group above it.
-        rows.append(WarningRowModel(severity=warning_severity(raw), sample=sample_name, message=message))
 
-    derived: list[str] = []
+def _warning_groups(scope: DashboardScope, analysis: ScopeAnalysis) -> list[WarningGroupModel]:
+    """The scope's warnings in their groups, with one more for each inferred
+    failed batch no search map could take."""
+
+    derived: list[AttributedWarning] = []
     for group in unresolved_inferred_failed_batch_groups(
         scope.search_maps,
         scope.batch_positions,
@@ -304,23 +365,12 @@ def _warnings(scope: DashboardScope, analysis: ScopeAnalysis) -> tuple[list[Warn
             f"Failed batch {group.label} could not be associated with a search map from "
             f"explicit links or image-stage metadata ({names})."
         )
-        rows.append(WarningRowModel(severity="warning", sample=None, message=message))
-        derived.append(message)
-    return rows, dashboard_warning_groups([*scope.warnings, *derived])
+        # Attributed to every series the warning covers.
+        derived.append(AttributedWarning(message, frozenset(canonical_entity_key(tilt) for tilt in group.tilt_series)))
+    return dashboard_warning_groups([*scope.warnings, *derived])
 
 
-def _completeness(warning_groups: list[WarningGroupModel]) -> tuple[str, str]:
-    """The header's state and label, from affected objects as the warning
-    groups and the PDF cover count them (raw strings said "2,805 warnings"
-    for 85 tilt series)."""
-
-    error_count = sum(group.count for group in warning_groups if group.severity == "error")
-    warn_count = sum(group.count for group in warning_groups if group.severity == "warning")
-    if error_count:
-        return "error", f"{error_count} error{'s' if error_count != 1 else ''}"
-    if warn_count:
-        return "warning", f"{warn_count} warning{'s' if warn_count != 1 else ''}"
-    return "complete", "Complete"
+# ---------------------------------------------------------------- filters
 
 
 def _filters(

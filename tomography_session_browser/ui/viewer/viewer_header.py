@@ -1,20 +1,30 @@
 """Viewer header for the image viewer."""
 from __future__ import annotations
+import re
 from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy, QWidget
-from tomography_session_browser.presentation.viewer_items import STATUS_ROW_TYPES, title_for_item as _title_for_item, chips_for_item as _chips_for_item
+from tomography_session_browser.presentation.viewer_items import STATUS_ROW_TYPES, chips_for_item as _chips_for_item
 from tomography_session_browser.services.item_status import display_status_label
 from tomography_session_browser.services.navigation import tab_label_for_object
 from tomography_session_browser.ui.icons import themed_icon
-from tomography_session_browser.presentation.design_tokens import SPACE_XS
-from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
-from tomography_session_browser.ui.viewer.constants import HEADER_TITLE_MIN_PX, IMAGE_HIERARCHY, JUMP_DESCRIPTIONS, JUMP_ICONS, JUMP_STEP_IN, JUMP_STEP_OUT, LINKED_HERE_TEXT, LIST_PRIMARY_ROLE, NAVIGATION_ACTION_NAMES, NAVIGATION_BUTTONS, NAVIGATION_TARGET_TABS, VIEWER_OBJECT_ROLE
+from tomography_session_browser.ui.motion.content_change import ContentTransition
+from tomography_session_browser.presentation.design_tokens import SPACE_XS, SPACE_S
+from tomography_session_browser.ui.fit_first import COMPACT_VIEWER_HEIGHT_PX
+from tomography_session_browser.ui.theme import TIER_SUPPORTING, apply_tier
+from tomography_session_browser.ui.widgets.elided_label import ElidedLabel, WrappedElidedLabel
+from tomography_session_browser.ui.viewer.exposure_chooser import ExposureChooser
+from tomography_session_browser.ui.viewer.constants import HEADER_TITLE_MIN_PX, IMAGE_HIERARCHY, JUMP_DESCRIPTIONS, JUMP_ICONS, JUMP_STEP_IN, JUMP_STEP_OUT, LINKED_HERE_TEXT, LIST_PRIMARY_ROLE, NAVIGATION_ACTION_NAMES, NAVIGATION_BUTTONS, NAVIGATION_TARGET_TABS
 from tomography_session_browser.ui.viewer.list_rows import is_status_chip, status_chip_tooltip, status_tone
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from tomography_session_browser.ui.viewer.viewer_tab import ViewerTab
+
+
+#: The reason line wraps onto this many lines before eliding.
+REASON_MAX_LINES = 1
+REASON_SEPARATOR = "  ·  "
 
 
 def jump_direction(value: Any, key: str) -> str | None:
@@ -52,6 +62,25 @@ class ViewerHeader:
         self.linked_here_index: int | None = None
         self.linked_separators: list[QLabel] = []
         self.linked_strip.setVisible(False)
+        # The areas of the batch position shown, as chips under the strip (B5.1):
+        # it only ever shows on the tab that has them.
+        self.exposure_chooser = ExposureChooser(self.view)
+        chooser_policy = self.exposure_chooser.sizePolicy()
+        chooser_policy.setRetainSizeWhenHidden(self.show_exposure_chooser)
+        self.exposure_chooser.setSizePolicy(chooser_policy)
+        self.exposure_chooser.area_chosen.connect(self.view.parts.tab_selection.choose_exposure_area)
+        self.exposure_chooser.choice_cleared.connect(self.view.parts.tab_selection.marker_selection_cleared)
+        # Why a jump is unavailable, in the resolver's words, readable without
+        # hovering. It sits under the strip, not in it, so it stays when the
+        # strip folds into "Go to".
+        self.linked_reason = WrappedElidedLabel("", max_lines=REASON_MAX_LINES, parent=self.view)
+        self.linked_reason.setObjectName("viewerLinkedReason")
+        apply_tier(self.linked_reason, TIER_SUPPORTING)
+        # QLabel's empty-text size differs from its text layout on native Qt.
+        # Keep the explanation's line box even when every jump is available.
+        self.linked_reason.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.linked_reason.setVisible(False)
+        self.reason_transition = ContentTransition(self.linked_reason)
 
         self.navigation_buttons: dict[str, QPushButton] = {}
         # Each button's arrow: a step out or in from the item shown.
@@ -69,7 +98,7 @@ class ViewerHeader:
         # F1.8: when the strip cannot hold every button, they collapse into
         # this single menu instead of the row clipping at both ends.
         self.navigation_available: dict[str, bool] = {}
-        self.navigation_menu_button = QPushButton("Go to", self.linked_strip)
+        self.navigation_menu_button = QPushButton("Go to", self.view)
         self.navigation_menu_button.setObjectName("viewerNavButton")
         self.navigation_menu_button.setIcon(themed_icon("arrow-right", size=14))
         self.navigation_menu_button.setAccessibleName("Go to a linked item")
@@ -86,6 +115,9 @@ class ViewerHeader:
         self.overflow_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.overflow_chip.setVisible(False)
         header.addWidget(self.overflow_chip)
+        # Folded, the jumps are this one button at the end of the title row, and the
+        # strip's row is gone (hidden otherwise).
+        header.addWidget(self.navigation_menu_button)
         self.header_layout = header
 
     def create_title(self) -> QHBoxLayout:
@@ -147,47 +179,43 @@ class ViewerHeader:
         return self.view.width() - horizontal
 
     def fit_header(self) -> None:
-        """Keep the viewer header on one row without clipping (plan F1.8).
+        """Keep the viewer header without clipping (plan F1.8).
 
         The title, its chips and up to four navigation buttons sat in one
         fixed row; in a narrow workspace the row overflowed and clipped at both
         ends while the title shrank to "…". Degrade in order until it fits:
 
-        The jumps now have a row of their own (the Linked strip, B1), so the
-        title row and the strip each fit their own width:
-
-        1. on the title row, trailing chips fold into a "+N" chip listing them
-           (the first chip, the status, always stays); the title keeps a
-           readable floor and is the last thing to give way;
-        2. on the strip, the navigation buttons collapse into one "Go to"
-           menu, whose items keep each action's enabled state and reason.
+        1. the jumps have a row of their own (the Linked strip, B1); when it cannot
+           hold the buttons they fold into one "Go to · n of m" menu, which moves
+           to the end of the title row and takes the strip's row with it (D24),
+           and the menu's items keep each action's enabled state and reason;
+        2. on the title row, trailing chips fold into a "+N" chip listing them
+           (the first chip, the status, always stays), making room for that
+           button first; the title keeps a readable floor and is the last thing
+           to give way.
         """
 
         if not hasattr(self, "navigation_menu_button"):
             return
+        compact = self.view.height() < COMPACT_VIEWER_HEIGHT_PX
+        layout = self.view.layout()
+        # Controls carry their own padding; short pages need no extra row gaps.
+        layout.setSpacing(0 if compact else SPACE_S)
+        inset = SPACE_XS if compact else SPACE_S
+        layout.setContentsMargins(inset, inset, inset, inset)
+        self.linked_reason.setFixedHeight(self.linked_reason.heightForWidth(self.linked_reason.width()))
+        self.exposure_chooser.set_compact(compact)
         available_keys = [key for key in self.navigation_buttons if self.navigation_available.get(key)]
+        labels = ", ".join(self.navigation_buttons[key].text() for key in available_keys)
+        # How many of the jumps the item has are open, from the same plan the buttons read.
+        usable = sum(1 for key in available_keys if self.navigation_buttons[key].isEnabled())
+        self.navigation_menu_button.setText(f"Go to \u00b7 {usable} of {len(available_keys)}")
+        self.navigation_menu_button.setToolTip(f"Go to a linked item: {labels}")
+        self.navigation_menu_button.setAccessibleDescription(f"{usable} of {len(available_keys)} available. Linked items: {labels}")
         collapse = False
         hidden = 0
         width = self.view._header_available_width()
         if width is not None:
-            spacing = max(0, self.header_layout.spacing())
-            title_text = self.view.header_title.text_full()
-            title_width = min(
-                self.view.header_title.fontMetrics().horizontalAdvance(title_text) + 8,
-                HEADER_TITLE_MIN_PX,
-            )
-            chip_widths = [chip.sizeHint().width() for chip in self.view.header_chips]
-            overflow_width = QFontMetrics(self.overflow_chip.font()).horizontalAdvance("+9") + 24
-
-            def needed(shown_chips: int) -> int:
-                chips = chip_widths[:shown_chips]
-                extra = overflow_width if shown_chips < len(chip_widths) else 0
-                items = 1 + len(chips) + (1 if extra else 0)
-                return title_width + sum(chips) + extra + spacing * max(0, items - 1)
-
-            while hidden < len(chip_widths) - 1 and needed(len(chip_widths) - hidden) > width:
-                hidden += 1
-
             button_widths = [self.navigation_buttons[key].sizeHint().width() for key in available_keys]
             if button_widths:
                 strip_spacing = max(0, self.linked_layout.spacing())
@@ -202,17 +230,31 @@ class ViewerHeader:
                     + separator_width * max(0, items - 1)
                     + strip_spacing * (2 * items)
                 )
-                collapse = strip_needed > width
+                collapse = compact or strip_needed > width
+            spacing = max(0, self.header_layout.spacing())
+            title_text = self.view.header_title.text_full()
+            title_width = min(
+                self.view.header_title.fontMetrics().horizontalAdvance(title_text) + 8,
+                HEADER_TITLE_MIN_PX,
+            )
+            chip_widths = [chip.sizeHint().width() for chip in self.view.header_chips]
+            overflow_width = QFontMetrics(self.overflow_chip.font()).horizontalAdvance("+9") + 24
+            menu_width = self.navigation_menu_button.sizeHint().width() if collapse else 0
+
+            def needed(shown_chips: int) -> int:
+                chips = chip_widths[:shown_chips]
+                extra = overflow_width if shown_chips < len(chip_widths) else 0
+                items = 1 + len(chips) + (1 if extra else 0) + (1 if menu_width else 0)
+                return title_width + sum(chips) + extra + menu_width + spacing * max(0, items - 1)
+
+            while hidden < len(chip_widths) - 1 and needed(len(chip_widths) - hidden) > width:
+                hidden += 1
 
         for key, button in self.navigation_buttons.items():
             button.setVisible(bool(self.navigation_available.get(key)) and not collapse)
         self.navigation_menu_button.setVisible(collapse)
-        self.linked_strip.setVisible(bool(available_keys))
+        self.linked_strip.setVisible(bool(available_keys) and not collapse)
         self.view._sync_linked_separators(collapse)
-        if collapse:
-            labels = ", ".join(self.navigation_buttons[key].text() for key in available_keys)
-            self.navigation_menu_button.setToolTip(f"Go to a linked item: {labels}")
-            self.navigation_menu_button.setAccessibleDescription(f"Linked items: {labels}")
         shown = len(self.view.header_chips) - hidden
         for index, chip in enumerate(self.view.header_chips):
             chip.setVisible(index < shown)
@@ -221,7 +263,7 @@ class ViewerHeader:
             self.overflow_chip.setText(f"+{len(folded)}")
             self.overflow_chip.setToolTip("\n".join(folded))
             self.overflow_chip.setAccessibleName(f"{len(folded)} more: {', '.join(folded)}")
-            # Keep "+N" directly after the last visible chip.
+            # Keep "+N" directly after the last visible chip, and Go to after that.
             self.header_layout.removeWidget(self.overflow_chip)
             self.header_layout.insertWidget(1 + len(self.view.header_chips), self.overflow_chip)
         self.overflow_chip.setVisible(bool(folded))
@@ -246,13 +288,16 @@ class ViewerHeader:
     def update_header(self, value: Any) -> None:
         self.view._set_header_title(self.view._header_title_for(value))
         chips = _chips_for_item(value)
-        # The row's own status word, for every type that has one. A batch
+        # The row's own status word and its summary, for every type that has
+        # them: the header says what the row says, in the same words. A batch
         # position's chip used to be its raw parser status ("Acquired") while
         # its row said "Failed".
         if isinstance(value, STATUS_ROW_TYPES) and self.view.parts.list_pane.item_status_for is not None:
-            status = self.view.parts.list_pane.item_status_for(value).status
-            if status:
-                chips.insert(0, display_status_label(status))
+            row = self.view.parts.list_pane.item_status_for(value)
+            if row.summary:
+                chips.insert(0, row.summary)
+            if row.status:
+                chips.insert(0, display_status_label(row.status))
         self.view._set_header_chips(chips)
         self.view._update_navigation_actions(value)
 
@@ -262,17 +307,13 @@ class ViewerHeader:
         ``Atlas`` carries no name of its own, so ``_title_for_item`` could
         only return the literal word "Atlas" while every other tab titled
         itself with the selected item. The owning tab already resolved a
-        real label (e.g. "Sample_A") to populate the list; reuse it.
+        real label (e.g. "Specimen_alpha") to populate the list; reuse it. An object
+        deliberately omitted from the list takes that same label provider.
         """
 
-        for index in range(self.view.list.topLevelItemCount()):
-            item = self.view.list.topLevelItem(index)
-            if item.data(0, VIEWER_OBJECT_ROLE) is value:
-                label = str(item.data(0, LIST_PRIMARY_ROLE) or "")
-                if label:
-                    return label
-                break
-        return _title_for_item(value)
+        row = self.view.parts.list_pane.rows.row_for_value(value)
+        label = str(row.data(0, LIST_PRIMARY_ROLE) or "") if row is not None else ""
+        return label or self.view.parts.tab_selection.label_for(value)
 
     def update_navigation_actions(self, value: Any | None) -> None:
         if not self.navigation_buttons:
@@ -283,6 +324,7 @@ class ViewerHeader:
             else []
         )
         by_key = {action.key: action for action in actions}
+        self.show_unavailable_reasons(actions)
         self.view._arrange_linked_strip(value)
         any_visible = False
         for key, button in self.navigation_buttons.items():
@@ -306,7 +348,7 @@ class ViewerHeader:
             button.setAccessibleName(NAVIGATION_ACTION_NAMES.get(action.key, action.label))
             description = (
                 action.tooltip
-                if action.enabled
+                if action.enabled or action.selection_required
                 else f"Unavailable. {action.tooltip}".strip()
             )
             step = JUMP_DESCRIPTIONS.get(direction)
@@ -319,6 +361,46 @@ class ViewerHeader:
         # Visibility is decided by the header fit: expanded buttons, or the
         # collapsed "Go to" menu when the row cannot hold them.
         self.view._fit_header()
+
+    def show_unavailable_reasons(self, actions: list[Any]) -> None:
+        """One line under the strip giving each distinct reason a jump is inert.
+
+        Several disabled jumps commonly share one cause, so each reason is
+        stated once. The buttons' own accessible descriptions carry the same
+        words; the tooltip repeats them as a list.
+        """
+
+        seen: set[str] = set()
+
+        def distinct_reasons(selection_required: bool) -> list[str]:
+            reasons = []
+            for action in actions:
+                if action.enabled or action.selection_required != selection_required:
+                    continue
+                fresh = []
+                for clause in re.split(r"(?<=[.!?])\s+", action.tooltip.strip()):
+                    if clause and clause not in seen:
+                        seen.add(clause)
+                        fresh.append(clause)
+                if fresh:
+                    reasons.append(" ".join(fresh))
+            return reasons
+
+        hints = distinct_reasons(True)
+        reasons = distinct_reasons(False)
+        parts = hints
+        if reasons:
+            parts.append(f"Unavailable: {REASON_SEPARATOR.join(reasons)}")
+        label = self.linked_reason
+        text = REASON_SEPARATOR.join(parts)
+        if label.text_full() != text:
+            self.reason_transition.replace(lambda: label.setText(text))
+        label.setToolTip("\n".join(dict.fromkeys(action.tooltip.strip() for action in actions
+                                             if not action.enabled and action.tooltip.strip())))
+        # A relationship-bearing item keeps one line even when every jump is
+        # available. The empty line paints nothing; selecting a neighbour or
+        # an exposure changes its words without moving the canvas.
+        label.setVisible(bool(actions))
 
     def arrange_linked_strip(self, value: Any | None) -> None:
         """Lay out the strip: the jumps in tab order, the item shown in its place.
@@ -355,7 +437,6 @@ class ViewerHeader:
             self.linked_layout.addWidget(separator)
             self.linked_layout.addWidget(widget)
             self.linked_order.append((separator, widget))
-        self.linked_layout.addWidget(self.navigation_menu_button)
         self.linked_layout.addStretch(1)
 
     def sync_linked_separators(self, collapsed: bool) -> None:

@@ -2,14 +2,15 @@
 from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
-from PySide6.QtCore import QPoint, QRect, QSize, Qt
-from PySide6.QtWidgets import QCheckBox, QFrame, QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtWidgets import QCheckBox, QFrame, QLabel, QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.ui.motion import SectionReveal, live_section_reveal, motion_enabled, settle_layouts
-from tomography_session_browser.ui.icons import themed_icon
-from tomography_session_browser.presentation.design_tokens import CANVAS_CHROME, RADIUS_CARD
-from tomography_session_browser.ui.viewer.constants import ATLAS_COLLECTION_LIST_MAX_PX, ATLAS_LOD_CONTROL_LABELS, MARKER_TYPES_WITH_CONTROLS, MARKER_TYPE_LABELS, OVERLAY_PANEL_MARGIN_PX
-from tomography_session_browser.ui.viewer.models import AtlasCollectionOverlayOption
+from tomography_session_browser.presentation.design_tokens import RADIUS_CARD, SPACE_XS
+from tomography_session_browser.ui.viewer.constants import ATLAS_COLLECTION_LIST_MAX_PX, ATLAS_LOD_DEFAULTS, MARKER_TYPE_LABELS, FLOATING_CONTROL_BOTTOM_INSET_PX, FLOATING_CONTROL_INSET_PX, OVERLAY_MARKER_TYPES, OVERLAY_SECTIONS
+from tomography_session_browser.ui.viewer.models import AtlasCollectionOverlayOption, OverlayControl
+from tomography_session_browser.ui.viewer.overlay_controls import OverlayBodyScroll, OverlayControlRow, control_shown
+from tomography_session_browser.ui.viewer.overlay_swatches import with_swatch
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from tomography_session_browser.ui.viewer.viewer_tab import ViewerTab
@@ -22,12 +23,11 @@ class OverlayPanel:
         self.view = view
 
     def create_widgets(self, show_marker_controls: bool, atlas_lod: bool) -> None:
-        self.marker_type_checks: dict[str, QCheckBox] = {}
-        self.user_marker_type_visible: dict[str, bool] = {
-            marker_type: True for marker_type in MARKER_TYPES_WITH_CONTROLS
-        }
+        self.rows: list[OverlayControlRow] = []
+        #: Every key the panel sets, to the box that sets it (a row's keys share one).
+        self.checks: dict[str, QCheckBox] = {}
+        self.user_marker_type_visible: dict[str, bool] = {key: True for key in OVERLAY_MARKER_TYPES}
         self.unavailable_marker_types: set[str] = set()
-        self.atlas_lod_checks: dict[str, QCheckBox] = {}
         self.view.marker_legend_checkbox: QCheckBox | None = None
         self.atlas_collection_overlay_options_for: (
             Callable[[Any], list[AtlasCollectionOverlayOption]] | None
@@ -50,88 +50,28 @@ class OverlayPanel:
         )
         self.view.remove_all_overlays_button.clicked.connect(self.view._remove_all_overlays)
         overlay_panel_layout.addWidget(self.view.remove_all_overlays_button)
-        if show_marker_controls:
-            for marker_type in MARKER_TYPES_WITH_CONTROLS:
-                checkbox = QCheckBox(MARKER_TYPE_LABELS.get(marker_type, marker_type), self.view.overlay_panel)
-                checkbox.setChecked(True)
-                checkbox.setToolTip(f"Show {MARKER_TYPE_LABELS.get(marker_type, marker_type).lower()} markers")
-                checkbox.stateChanged.connect(lambda _state, marker_type=marker_type: self.view._marker_type_toggled(marker_type))
-                self.marker_type_checks[marker_type] = checkbox
-                overlay_panel_layout.addWidget(checkbox)
+        # Everything under the button scrolls once the canvas cannot hold it.
+        body = QWidget(self.view.overlay_panel)
+        body.setObjectName("viewerOverlayBody")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(SPACE_XS)
+        self.body_scroll = OverlayBodyScroll(body, self.view.overlay_panel)
+        overlay_panel_layout.addWidget(self.body_scroll)
+        for title, controls in self.shown_sections(show_marker_controls, atlas_lod):
+            body_layout.addWidget(self.section_title(title, body))
+            for control in controls:
+                row = OverlayControlRow(control, body)
+                row.box.stateChanged.connect(lambda _state, row=row: self.control_toggled(row))
+                self.rows.append(row)
+                self.checks.update(dict.fromkeys(control.toggles, row.box))
+                body_layout.addWidget(row)
         if atlas_lod:
-            for key, label, icon_name, default in ATLAS_LOD_CONTROL_LABELS:
-                checkbox = QCheckBox(label, self.view.overlay_panel)
-                checkbox.setChecked(default)
-                checkbox.setToolTip(f"Show or hide {label.lower()}")
-                checkbox.setIcon(themed_icon(icon_name, color=CANVAS_CHROME.icon, size=16))
-                checkbox.setIconSize(QSize(16, 16))
-                checkbox.stateChanged.connect(
-                    lambda _state, option=key: self.view._atlas_lod_toggled(option)
-                )
-                self.atlas_lod_checks[key] = checkbox
-                overlay_panel_layout.addWidget(checkbox)
-            self.atlas_collection_section_button = QToolButton(
-                self.view.overlay_panel
-            )
-            self.atlas_collection_section_button.setObjectName(
-                "viewerOverlaySectionButton"
-            )
-            self.atlas_collection_section_button.setText(
-                "Data collections"
-            )
-            self.atlas_collection_section_button.setCheckable(True)
-            self.atlas_collection_section_button.setChecked(False)
-            self.atlas_collection_section_button.setArrowType(
-                Qt.ArrowType.RightArrow
-            )
-            self.atlas_collection_section_button.setToolButtonStyle(
-                Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-            )
-            self.atlas_collection_section_button.setToolTip(
-                "Show batch-position visibility controls by data collection"
-            )
-            self.atlas_collection_section_button.toggled.connect(
-                self.view._atlas_collection_section_toggled
-            )
-            self.atlas_collection_section_button.setVisible(False)
-            overlay_panel_layout.addWidget(
-                self.atlas_collection_section_button
-            )
-
-            self.atlas_collection_section = QWidget(self.view.overlay_panel)
-            self.atlas_collection_section.setObjectName(
-                "viewerAtlasCollectionSection"
-            )
-            self.atlas_collection_section_layout = QVBoxLayout(
-                self.atlas_collection_section
-            )
-            self.atlas_collection_section_layout.setContentsMargins(
-                18,
-                0,
-                0,
-                2,
-            )
-            self.atlas_collection_section_layout.setSpacing(4)
-            self.atlas_collection_section.setVisible(False)
-            # The per-collection list is dynamic — a linked root can carry many
-            # collections — so it scrolls inside a bounded area rather than
-            # growing the panel until it runs off the canvas.
-            self.atlas_collection_scroll = QScrollArea(self.view.overlay_panel)
-            self.atlas_collection_scroll.setObjectName("viewerAtlasCollectionScroll")
-            self.atlas_collection_scroll.setWidgetResizable(True)
-            self.atlas_collection_scroll.setFrameShape(QFrame.Shape.NoFrame)
-            self.atlas_collection_scroll.setHorizontalScrollBarPolicy(
-                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-            )
-            self.atlas_collection_scroll.setMaximumHeight(ATLAS_COLLECTION_LIST_MAX_PX)
-            self.atlas_collection_scroll.setWidget(self.atlas_collection_section)
-            self.atlas_collection_scroll.setVisible(False)
-            overlay_panel_layout.addWidget(self.atlas_collection_scroll)
-
-            self.view.marker_legend_checkbox = QCheckBox(
-                "Marker legend",
-                self.view.overlay_panel,
-            )
+            self.create_collection_controls(body, body_layout)
+        if self.rows:
+            body_layout.addWidget(self.section_title("Canvas aids", body))
+        if atlas_lod:
+            self.view.marker_legend_checkbox = with_swatch(QCheckBox("Marker legend", body), "legend")
             self.view.marker_legend_checkbox.setChecked(True)
             self.view.marker_legend_checkbox.setToolTip(
                 "Show or hide the Atlas marker legend"
@@ -139,14 +79,95 @@ class OverlayPanel:
             self.view.marker_legend_checkbox.stateChanged.connect(
                 self.view._marker_legend_toggled
             )
-            overlay_panel_layout.addWidget(self.view.marker_legend_checkbox)
-        self.view.scale_bar_checkbox = QCheckBox("Scale bar", self.view.overlay_panel)
+            body_layout.addWidget(self.view.marker_legend_checkbox)
+        self.view.scale_bar_checkbox = with_swatch(QCheckBox("Scale bar", body), "scale_bar")
         self.view.scale_bar_checkbox.setChecked(True)
         self.view.scale_bar_checkbox.setToolTip("Show or hide the scale bar")
         self.view.scale_bar_checkbox.stateChanged.connect(self.view._scale_bar_toggled)
-        overlay_panel_layout.addWidget(self.view.scale_bar_checkbox)
+        body_layout.addWidget(self.view.scale_bar_checkbox)
+        for row in self.rows:
+            self.sync_row(row)
         self.view.overlay_panel.setVisible(False)
         self.view.overlay_button.toggled.connect(self.view._overlay_panel_toggled)
+
+    @staticmethod
+    def shown_sections(show_marker_controls: bool, atlas_lod: bool) -> list[tuple[str, list[OverlayControl]]]:
+        """The table's rows this tab offers: the Atlas options only on the Atlas tab."""
+
+        sections = []
+        for section in OVERLAY_SECTIONS:
+            controls = [
+                control
+                for control in section.controls
+                if (atlas_lod if all(key in ATLAS_LOD_DEFAULTS for key in control.toggles) else show_marker_controls)
+            ]
+            if controls:
+                sections.append((section.title, controls))
+        return sections
+
+    def section_title(self, title: str, parent: QWidget) -> QLabel:
+        label = QLabel(title.upper(), parent)
+        label.setObjectName("viewerOverlaySectionTitle")
+        return label
+
+    def create_collection_controls(self, body: QWidget, body_layout: QVBoxLayout) -> None:
+        self.atlas_collection_section_button = QToolButton(
+            body
+        )
+        self.atlas_collection_section_button.setObjectName(
+            "viewerOverlaySectionButton"
+        )
+        self.atlas_collection_section_button.setText(
+            "Data collections"
+        )
+        self.atlas_collection_section_button.setCheckable(True)
+        self.atlas_collection_section_button.setChecked(False)
+        self.atlas_collection_section_button.setArrowType(
+            Qt.ArrowType.RightArrow
+        )
+        self.atlas_collection_section_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.atlas_collection_section_button.setToolTip(
+            "Show batch-position visibility controls by data collection"
+        )
+        self.atlas_collection_section_button.toggled.connect(
+            self.view._atlas_collection_section_toggled
+        )
+        self.atlas_collection_section_button.setVisible(False)
+        body_layout.addWidget(
+            self.atlas_collection_section_button
+        )
+
+        self.atlas_collection_section = QWidget(body)
+        self.atlas_collection_section.setObjectName(
+            "viewerAtlasCollectionSection"
+        )
+        self.atlas_collection_section_layout = QVBoxLayout(
+            self.atlas_collection_section
+        )
+        self.atlas_collection_section_layout.setContentsMargins(
+            18,
+            0,
+            0,
+            2,
+        )
+        self.atlas_collection_section_layout.setSpacing(4)
+        self.atlas_collection_section.setVisible(False)
+        # The per-collection list is dynamic — a linked root can carry many
+        # collections — so it scrolls inside a bounded area rather than
+        # growing the panel until it runs off the canvas.
+        self.atlas_collection_scroll = QScrollArea(body)
+        self.atlas_collection_scroll.setObjectName("viewerAtlasCollectionScroll")
+        self.atlas_collection_scroll.setWidgetResizable(True)
+        self.atlas_collection_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.atlas_collection_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.atlas_collection_scroll.setMaximumHeight(ATLAS_COLLECTION_LIST_MAX_PX)
+        self.atlas_collection_scroll.setWidget(self.atlas_collection_section)
+        self.atlas_collection_scroll.setVisible(False)
+        body_layout.addWidget(self.atlas_collection_scroll)
 
     def set_atlas_collection_overlay_provider(
         self,
@@ -226,6 +247,11 @@ class OverlayPanel:
             conceal=legend.set_concealed,
         )
 
+    def collections_top(self) -> int:
+        """Where the Data collections list starts, from the panel's top edge."""
+
+        return self.atlas_collection_scroll.mapTo(self.view.overlay_panel, QPoint(0, 0)).y()
+
     def reveal_overlay_panel(self, change: Callable[[], None], *, kind: str, opening: bool) -> None:
         """Apply ``change`` to the Overlays panel, then open or close it along its height.
 
@@ -260,7 +286,7 @@ class OverlayPanel:
             return
         before = self.view._rect_in_shell(panel)
         picture = None if opening else panel.grab()
-        list_top = self.atlas_collection_scroll.y() if kind == "collections" and not opening else 0
+        list_top = self.collections_top() if kind == "collections" and not opening else 0
         change()
         settle_layouts(panel, shell)
         after = self.view._rect_in_shell(panel)
@@ -274,7 +300,7 @@ class OverlayPanel:
         else:
             closed_rect = before if opening else after
             if opening:
-                list_top = self.atlas_collection_scroll.y()
+                list_top = self.collections_top()
             # The list opens below the controls above it; the ones below it
             # ride its edge.
             fixed = list_top
@@ -327,10 +353,7 @@ class OverlayPanel:
         )
         self.atlas_collection_section_button.setVisible(bool(options))
         for option in options:
-            checkbox = QCheckBox(
-                option.label,
-                self.atlas_collection_section,
-            )
+            checkbox = with_swatch(QCheckBox(option.label, self.atlas_collection_section), "collection")
             checkbox.setObjectName("viewerAtlasCollectionCheck")
             checkbox.setChecked(option.visible)
             checkbox.setToolTip(
@@ -367,15 +390,15 @@ class OverlayPanel:
 
     def remove_all_overlays(self) -> None:
         self.view.viewer.hide_all_markers()
-        for marker_type, checkbox in self.marker_type_checks.items():
+        for key in self.checks:
             # An unavailable layer is already unchecked, but its saved preference
             # must also be cleared so it stays off when another image provides it.
-            self.user_marker_type_visible[marker_type] = False
-            checkbox.blockSignals(True)
-            checkbox.setChecked(False)
-            checkbox.blockSignals(False)
-        for checkbox in self.atlas_lod_checks.values():
-            checkbox.setChecked(False)
+            if key in ATLAS_LOD_DEFAULTS:
+                self.view.viewer.set_atlas_lod_option(key, False)
+            else:
+                self.user_marker_type_visible[key] = False
+        for row in self.rows:
+            self.sync_row(row)
         collections_changed = False
         for key, checkbox in self.atlas_collection_checks.items():
             if not checkbox.isChecked():
@@ -394,14 +417,43 @@ class OverlayPanel:
             self.view.marker_legend_checkbox.setChecked(False)
         self.view.scale_bar_checkbox.setChecked(False)
 
-    def marker_type_toggled(self, marker_type: str) -> None:
-        checkbox = self.marker_type_checks[marker_type]
-        self.user_marker_type_visible[marker_type] = checkbox.isChecked()
-        self.view._apply_marker_type_visibility(marker_type)
+    def control_toggled(self, row: OverlayControlRow) -> None:
+        """A row was pressed: everything it sets goes to the new state, together."""
 
-    def atlas_lod_toggled(self, key: str) -> None:
-        checkbox = self.atlas_lod_checks[key]
-        self.view.viewer.set_atlas_lod_option(key, checkbox.isChecked())
+        checked = row.box.checkState() == Qt.CheckState.Checked
+        for key in row.control.toggles:
+            self.set_preference(key, checked)
+        self.sync_row(row)
+
+    def set_preference(self, key: str, visible: bool) -> None:
+        if key in ATLAS_LOD_DEFAULTS:
+            self.view.viewer.set_atlas_lod_option(key, visible)
+        else:
+            self.user_marker_type_visible[key] = visible
+            self.view.viewer.set_marker_type_visible(key, self.effective_marker_type_visible(key))
+
+    def preference(self, key: str) -> bool:
+        if key in ATLAS_LOD_DEFAULTS:
+            return self.view.viewer.atlas_lod_option(key)
+        return self.user_marker_type_visible.get(key, True)
+
+    def sync_row(self, row: OverlayControlRow) -> None:
+        """Show what the row's keys are now, and say inline what is not available."""
+
+        keys = row.control.toggles
+        missing = [key for key in keys if key in self.unavailable_marker_types]
+        state, enabled = control_shown(
+            [self.preference(key) for key in keys], [key not in self.unavailable_marker_types for key in keys]
+        )
+        if not enabled:
+            note = "; ".join(dict.fromkeys(self.marker_unavailable_reason(key) or "" for key in missing))
+        elif missing:
+            labels = " and ".join(MARKER_TYPE_LABELS.get(key, key) for key in missing)
+            note = f"{labels} unavailable for this item"
+        else:
+            note = row.control.hint
+        tooltip = note if (missing and not enabled) else f"Show or hide {row.control.label.lower()}"
+        row.show_state(state, enabled, note, tooltip)
 
     def marker_legend_toggled(self) -> None:
         if self.view.marker_legend_checkbox is not None:
@@ -437,18 +489,11 @@ class OverlayPanel:
         if not has_batch_labels:
             unavailable.add(MarkerType.BATCH_LABEL)
         self.unavailable_marker_types = unavailable
-        for marker_type, checkbox in self.marker_type_checks.items():
-            unavailable_reason = self.view._marker_unavailable_reason(marker_type)
-            effective_visible = self.view._effective_marker_type_visible(marker_type)
-            checkbox.blockSignals(True)
-            checkbox.setEnabled(unavailable_reason is None)
-            checkbox.setChecked(effective_visible)
-            checkbox.setToolTip(
-                unavailable_reason
-                or f"Show {MARKER_TYPE_LABELS.get(marker_type, marker_type).lower()} markers"
-            )
-            checkbox.blockSignals(False)
-            self.view.viewer.set_marker_type_visible(marker_type, effective_visible)
+        for row in self.rows:
+            self.sync_row(row)
+            for key in row.control.toggles:
+                if key not in ATLAS_LOD_DEFAULTS:
+                    self.view.viewer.set_marker_type_visible(key, self.effective_marker_type_visible(key))
 
     def marker_unavailable_reason(self, marker_type: str) -> str | None:
         if marker_type not in self.unavailable_marker_types:
@@ -465,15 +510,6 @@ class OverlayPanel:
             and marker_type not in self.unavailable_marker_types
         )
 
-    def apply_marker_type_visibility(self, marker_type: str) -> None:
-        effective_visible = self.view._effective_marker_type_visible(marker_type)
-        checkbox = self.marker_type_checks.get(marker_type)
-        if checkbox is not None:
-            checkbox.blockSignals(True)
-            checkbox.setChecked(effective_visible)
-            checkbox.blockSignals(False)
-        self.view.viewer.set_marker_type_visible(marker_type, effective_visible)
-
     def set_atlas_collection_list_visible(self, visible: bool) -> None:
         section = getattr(self, "atlas_collection_section", None)
         scroll = getattr(self, "atlas_collection_scroll", None)
@@ -481,30 +517,55 @@ class OverlayPanel:
             section.setVisible(visible)
         if scroll is not None:
             scroll.setVisible(visible)
+        self.view._constrain_overlay_panel()
+
+    def open_panel_rect(self) -> QRect | None:
+        """Where the open panel sits in the canvas, or None while it is closed.
+
+        From the panel's own hints rather than its geometry, which lags a layout
+        pass behind a change of rows.
+        """
+
+        panel = getattr(self.view, "overlay_panel", None)
+        if panel is None or not self.view.overlay_button.isChecked():
+            return None
+        shell = self.view.viewer_shell
+        button = self.view.overlay_button
+        top = button.mapTo(shell, QPoint(0, button.height())).y() + panel.parentWidget().layout().spacing()
+        room = max(shell.height() - FLOATING_CONTROL_BOTTOM_INSET_PX - top, 120)
+        size = panel.sizeHint()
+        return QRect(
+            shell.width() - FLOATING_CONTROL_INSET_PX - size.width(), top, size.width(), min(size.height(), room)
+        )
 
     def constrain_overlay_panel(self) -> None:
         """Keep the overlay panel inside the canvas it belongs to.
 
-        With many collections the panel would otherwise grow past the bottom of
-        the image and become partly unreachable. Bounding it to the viewport
-        means the list scrolls instead of the panel escaping.
+        The panel is as tall as its rows, up to the canvas; what does not fit
+        scrolls, and the Data collections list scrolls inside that. The zoom
+        stack steps aside for it (``CanvasControls.place_bottom_anchors``).
         """
 
-        panel = getattr(self.view, "overlay_panel", None)
         # Intent, not ``isVisible()``: an unshown parent reports every child as
         # invisible, which skipped the bound entirely during construction.
-        if panel is None or not self.view.overlay_button.isChecked():
+        self.body_scroll.updateGeometry()
+        rect = self.open_panel_rect()
+        if rect is None:
             return
-        available = max(self.view.viewer.viewport().height() - OVERLAY_PANEL_MARGIN_PX, 120)
-        panel.setMaximumHeight(available)
+        panel = self.view.overlay_panel
+        shell = self.view.viewer_shell
+        room = max(shell.height() - FLOATING_CONTROL_BOTTOM_INSET_PX - rect.top(), 120)
+        panel.setMaximumHeight(room)
         scroll = getattr(self, "atlas_collection_scroll", None)
         if scroll is not None and scroll.isVisible():
             # Give the dynamic list whatever the fixed controls do not need,
             # never more than its own cap.
             fixed = panel.sizeHint().height() - scroll.height()
             scroll.setMaximumHeight(
-                max(min(ATLAS_COLLECTION_LIST_MAX_PX, available - fixed), 60)
+                max(min(ATLAS_COLLECTION_LIST_MAX_PX, room - fixed), 60)
             )
+        self.body_scroll.reserve_scroll_bar(panel.sizeHint().height() > room)
+        self.view._place_bottom_anchors()
 
     def close_overlay_panel(self) -> bool:
         """Close the overlay panel and return focus to the control that opened it.
@@ -529,6 +590,8 @@ class OverlayPanel:
             self.view.overlay_panel.setVisible(checked)
             if checked:
                 self.view._constrain_overlay_panel()
+            else:
+                self.view._place_bottom_anchors()
 
         self.view._reveal_overlay_panel(change, kind="panel", opening=checked)
 

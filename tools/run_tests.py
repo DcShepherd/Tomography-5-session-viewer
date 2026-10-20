@@ -9,7 +9,7 @@ import pytest
 
 # Match on a prefix rather than an exact name. The documented environment is
 # `tomoapp_session`, but working checkouts also use suffixed variants such as
-# `tomoapp_claude`. An exact comparison against "tomoapp" matched neither and
+# `tomoapp_session`. An exact comparison against "tomoapp" matched neither and
 # refused every real environment.
 EXPECTED_ENV_PREFIX = "tomoapp"
 

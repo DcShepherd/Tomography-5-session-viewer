@@ -35,9 +35,10 @@ def marker_colors(marker: ImageMarker) -> tuple[QColor, QColor]:
         color.setAlpha(alpha)
         return color
 
-    if marker.selected and marker.marker_type == MarkerType.EXPOSURE_AREA:
-        return QColor(theme.marker_exposure), fill(theme.marker_exposure, 105)
-    if marker.selected:
+    # An exposure area keeps its status colour when selected: a failed one must not
+    # look fine because it is being looked at. What marks it as selected is the
+    # highlight ring and the heavier line (``marker_layer``), not a different colour.
+    if marker.selected and marker.marker_type != MarkerType.EXPOSURE_AREA:
         return QColor(theme.overlay_selected), fill(theme.overlay_selected, 90)
     style = marker_style(marker, queued_stroke=theme.atlas_marker_queued, fallback_stroke=theme.text)
     return QColor(style.stroke), fill(style.fill, style.fill_alpha)

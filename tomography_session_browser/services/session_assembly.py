@@ -62,7 +62,7 @@ def _link_batch_positions_to_tilt_series(sample: Sample) -> None:
         batch = batch_by_name.get(tilt.name)
         if batch is None:
             # Strict prefix-only match. We deliberately don't
-            # fuzzy-attach orphaned failed tilts (e.g. sang_1
+            # fuzzy-attach orphaned failed tilts (e.g. beta_1
             # whose batch was never recorded in
             # BatchPositionsList.xml) to a sibling batch — that
             # would tag the sibling's overlays as failed in the

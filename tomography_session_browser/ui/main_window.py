@@ -105,6 +105,7 @@ from tomography_session_browser.ui.window_parts.navigation import (
 )
 
 from tomography_session_browser.ui.shell.chrome import TAB_LABELS
+from tomography_session_browser.ui.viewer.preview_scheduler import shutdown_preview_scheduler
 from tomography_session_browser.ui.window_parts.support import LOADER_PREWARM_DELAY_MS, WINDOW_MIN_SIZE
 LOGGER = logging.getLogger(__name__)
 
@@ -134,6 +135,7 @@ class MainWindow(QMainWindow):
         self.parts.chrome = ShellChrome(
             self, project_dock=self.ui.project_dock, context_dock=self.ui.context_dock,
             drawer=self.ui.context_drawer, context_shell=self.ui.context_shell,
+            project_drawer=self.ui.project_drawer, project_shell=self.parts.project_panel.widget,
             toolbar=self.ui.main_toolbar, brand_label=self.ui.brand_label, toolbar_spacer=self.ui.toolbar_spacer,
             actions=ChromeActions(self.ui.open_action, self.ui.refresh_action, self.ui.report_action,
                 self.ui.back_action, self.ui.forward_action, self.ui.project_panel_action,
@@ -143,6 +145,7 @@ class MainWindow(QMainWindow):
             loading_active=lambda: self.parts.loading.loading_overlay_active(),
             ride_along=lambda: self.parts.shell.ride_along_with_panel(),
             counts_for_scope=lambda: self.parts.scopes.scope_tab_counts(),
+            list_column_rect=lambda: self.parts.viewers.list_column_rect(),
         )
         self.parts.dashboard_host = DashboardHost(
             self.ui.session_dashboard, workspace=lambda: self.state.review.workspace,
@@ -317,7 +320,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt signature
         self.parts.viewers.scope_preparation.invalidate()
         self.state.review.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode("ascii")
-        self.state.review.settings.project_panel_visible = self.ui.project_panel_action.isChecked()
+        if not self.parts.chrome.project_drawer_mode:
+            self.state.review.settings.project_panel_visible = self.ui.project_panel_action.isChecked()
         if not self.parts.chrome.drawer_mode:
             # In drawer mode the button says whether the drawer is open, which
             # is never saved; the docked preference already is.
@@ -328,4 +332,6 @@ class MainWindow(QMainWindow):
         # Write synchronously here so a debounced tab-change save cannot be
         # lost when the window closes before the timer fires.
         self.parts.shell.flush_settings_save()
+        # A thumbnail decode may be running; exit is where waiting for it is allowed.
+        shutdown_preview_scheduler()
         super().closeEvent(event)

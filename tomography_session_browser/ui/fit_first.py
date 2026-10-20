@@ -17,13 +17,24 @@ from __future__ import annotations
 from tomography_session_browser.presentation.tab_keys import TabKey
 from collections.abc import Sequence
 
-#: Tab presentations, richest first. The count is information, so it outlives
-#: the name: the last step keeps only the icon, with everything in the tooltip.
+#: Tab presentations, richest first. Keep every destination named before
+#: falling back to the active name and counts, then counts and finally icons.
 TAB_STEP_FULL = 0
 TAB_STEP_SHORT = 1
-TAB_STEP_COUNT = 2
-TAB_STEP_ICON = 3
-TAB_STEPS = (TAB_STEP_FULL, TAB_STEP_SHORT, TAB_STEP_COUNT, TAB_STEP_ICON)
+TAB_STEP_NAMES = 2
+TAB_STEP_ACTIVE = 3
+TAB_STEP_COUNT = 4
+TAB_STEP_ICON = 5
+TAB_STEPS = (TAB_STEP_FULL, TAB_STEP_SHORT, TAB_STEP_NAMES, TAB_STEP_ACTIVE, TAB_STEP_COUNT, TAB_STEP_ICON)
+
+PROJECT_DRAWER_WIDTH_PX = 1180
+PROJECT_DRAWER_HYSTERESIS_PX = 32
+COMPACT_VIEWER_HEIGHT_PX = 560
+
+
+def project_panel_as_drawer(window_width: int, *, currently_drawer: bool) -> bool:
+    """Give the page the Project panel's width on small windows, without chatter."""
+    return window_width < PROJECT_DRAWER_WIDTH_PX + (PROJECT_DRAWER_HYSTERESIS_PX if currently_drawer else 0)
 
 #: Shorter names for the long tab labels, used before names are dropped.
 TAB_SHORT_LABELS = {
@@ -74,16 +85,28 @@ def first_fitting_step(required_widths: Sequence[int], available: int) -> int:
     return max(len(required_widths) - 1, 0)
 
 
-def tab_text(label: str, display_label: str, count: int | None, step: int) -> str:
+def tab_text(label: str, display_label: str, count: int | None, step: int, *, active: bool = False) -> str:
     """The text a tab shows at ``step``; its tooltip always has the full text.
 
     ``count`` is None for a tab with nothing to count (Session) and for any
     tab before the first count is known; such a tab shows only its name.
+    ``active`` is whether this is the tab being looked at: at ``TAB_STEP_ACTIVE``
+    it keeps the short name the step before showed, the others show their count.
     """
 
-    name = TAB_SHORT_LABELS.get(label, display_label) if step == TAB_STEP_SHORT else display_label
+    if step == TAB_STEP_ACTIVE:
+        return tab_text(label, display_label, count, TAB_STEP_SHORT if active else TAB_STEP_COUNT)
+    name = TAB_SHORT_LABELS.get(label, display_label) if step in (TAB_STEP_SHORT, TAB_STEP_NAMES) else display_label
+    if step == TAB_STEP_NAMES:
+        return name
     if step in (TAB_STEP_FULL, TAB_STEP_SHORT):
         return name if count is None else f"{name}  {count}"
     if step == TAB_STEP_COUNT and count is not None:
         return str(count)
     return ""
+
+
+def tab_accessible_name(display_label: str, count: int | None) -> str:
+    """What a screen reader says for a tab, whatever it shows: "Atlas, 12"."""
+
+    return display_label if count is None else f"{display_label}, {count}"

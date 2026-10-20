@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from typing import Any
 from tomography_session_browser.domain.identity import canonical_entity_key, dedupe_entities
 from tomography_session_browser.domain.models import (
@@ -16,13 +17,19 @@ from tomography_session_browser.domain.models import (
 )
 from tomography_session_browser.domain.traversal import has_collection_data, is_single_atlas_placeholder
 from tomography_session_browser.presentation.dashboard.atlas_counts import compute_atlas_counts
-from tomography_session_browser.presentation.dashboard.models import DashboardEntityScope, DashboardScope, LinkedAtlasDashboardScope
+from tomography_session_browser.presentation.dashboard.models import (
+    AttributedWarning,
+    DashboardEntityScope,
+    DashboardScope,
+    LinkedAtlasDashboardScope,
+)
 from tomography_session_browser.presentation.scopes import LinkedSampleGroup
 from tomography_session_browser.presentation.warnings import (
+    attributed_linked_sample_group_warnings,
+    attributed_session_warnings,
+    attributed_warnings,
     entity_scope_warnings,
-    linked_sample_group_warnings,
-    prefix_warnings,
-    session_warnings,
+    unprefixed_warnings,
 )
 from tomography_session_browser.presentation.workspace import (
     EntityKind,
@@ -207,21 +214,7 @@ def scope_from(value: Any, workspace: Workspace | None = None) -> DashboardScope
 
 
 def _scope_from_linked_atlas_dashboard_scope(value: LinkedAtlasDashboardScope, workspace: Workspace | None = None) -> DashboardScope:
-    base = scope_from(value.source, workspace)
-    return DashboardScope(
-        title=base.title,
-        path=base.path,
-        kind=base.kind,
-        atlases=list(value.atlases),
-        overviews=base.overviews,
-        search_maps=base.search_maps,
-        batch_positions=base.batch_positions,
-        tilt_series=base.tilt_series,
-        samples=base.samples,
-        sample_groups=base.sample_groups,
-        warnings=base.warnings,
-        is_sample_scope=True,
-    )
+    return replace(scope_from(value.source, workspace), atlases=list(value.atlases))
 
 
 def _scope_from_dashboard_entity_scope(value: DashboardEntityScope) -> DashboardScope:
@@ -239,7 +232,7 @@ def _scope_from_dashboard_entity_scope(value: DashboardEntityScope) -> Dashboard
             getattr(source, "exposure_image_path", None),
         )
         path = str(next((candidate for candidate in path_candidates if candidate is not None), ""))
-    warnings = list(getattr(source, "warnings", []) or [])
+    warnings = unprefixed_warnings(getattr(source, "warnings", []) or [], source)
     return DashboardScope(
         title=title,
         path=path,
@@ -270,7 +263,7 @@ def _scope_from_session(session: Session, workspace: Workspace | None = None) ->
         tilt_series=workspace.entities(EntityKind.TILT_SERIES, session),
         samples=list(session.samples),
         sample_groups=_sample_groups_from_samples(session.samples),
-        warnings=session_warnings(session),
+        warnings=attributed_session_warnings(session),
     )
 
 
@@ -289,7 +282,7 @@ def _scope_from_sample(sample: Sample) -> DashboardScope:
         tilt_series=list(sample.tilt_series),
         samples=[sample],
         sample_groups=[(clean_sample_label(sample.name), [sample])],
-        warnings=[*prefix_warnings(sample.name, sample.warnings), *entity_scope_warnings(sample, sample.name, set())],
+        warnings=[*attributed_warnings(sample.name, sample.warnings, sample), *entity_scope_warnings(sample, sample.name, set())],
         is_sample_scope=True,
     )
 
@@ -309,7 +302,7 @@ def _scope_from_tilt_series(tilt: TiltSeries) -> DashboardScope:
         tilt_series=[tilt],
         samples=[],
         sample_groups=[],
-        warnings=list(tilt.warnings),
+        warnings=unprefixed_warnings(tilt.warnings, tilt),
         is_sample_scope=True,
     )
 
@@ -324,7 +317,7 @@ def _scope_from_linked_group(group: LinkedSampleGroup) -> DashboardScope:
     if not atlases and group.atlas is not None:
         atlases.append((group.label, group.atlas))
 
-    warnings = linked_sample_group_warnings(group)
+    warnings = attributed_linked_sample_group_warnings(group)
 
     primary_path = ""
     for member in group.samples:
@@ -374,14 +367,14 @@ def _scope_from_session_list(sessions: list[Session], workspace: Workspace | Non
     search_maps: list[SearchMap] = []
     batch_positions: list[BatchPosition] = []
     tilt_series: list[TiltSeries] = []
-    warnings: list[str] = []
+    warnings: list[AttributedWarning] = []
     for session in sessions:
         atlases.extend(summary_atlas_pairs(session))
         overviews.extend(workspace.entities(EntityKind.OVERVIEW, session))
         search_maps.extend(workspace.entities(EntityKind.SEARCH_MAP, session))
         batch_positions.extend(workspace.entities(EntityKind.BATCH_POSITION, session))
         tilt_series.extend(workspace.entities(EntityKind.TILT_SERIES, session))
-        warnings.extend(session_warnings(session))
+        warnings.extend(attributed_session_warnings(session))
     atlases = _dedupe_atlas_pairs(atlases)
     overviews = dedupe_entities(overviews)
     search_maps = dedupe_entities(search_maps)

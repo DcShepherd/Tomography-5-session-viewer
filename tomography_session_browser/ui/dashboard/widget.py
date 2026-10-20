@@ -1,46 +1,52 @@
 """Widget components for the dashboard."""
 from __future__ import annotations
-from tomography_session_browser.ui.dashboard.constants import LOGGER
-from PySide6.QtCore import QElapsedTimer, QModelIndex, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QElapsedTimer, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QFrame, QLabel, QLayout, QScrollArea, QSizePolicy, QTableView, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QLabel, QLayout, QScrollArea, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from collections.abc import Callable
+import shiboken6
 from tomography_session_browser.services.timeline_service import SessionTimeline
 from tomography_session_browser.ui.motion import SmoothScroller, veil
-from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.presentation.context_stack import ContextStack
-from tomography_session_browser.presentation.dashboard.models import AtlasRowModel, AtlasSummaryModel, BatchPositionProgressModel, DashboardModel, SearchMapOverviewModel, SearchMapOverviewRowModel, StatCardModel, WarningGroupModel, WarningRowModel
+from tomography_session_browser.presentation.dashboard.models import DashboardModel
 from tomography_session_browser.ui.widgets.defocus_plot import DefocusScatterPlot
 from tomography_session_browser.ui.widgets.dose_information_plot import DoseInformationScatterPlot
+from tomography_session_browser.presentation.dashboard.summary import (
+    AtlasSessionSummary,
+    CollectionSummary,
+    EmptySummary,
+    SampleSummary,
+)
 from tomography_session_browser.presentation.design_tokens import SPACE_L
-from tomography_session_browser.ui.widgets.stat_card import StatCard
+from tomography_session_browser.ui.widgets.status_tile_grid import StatusTileGrid
 from tomography_session_browser.ui.timeline.widget import TimelineStrip
-from tomography_session_browser.ui.dashboard.atlas import atlas_row_widget, build_atlas_summary_card, meta_pair_compact
-from tomography_session_browser.ui.dashboard.batch_positions import batch_position_row, build_batch_positions_card
-from tomography_session_browser.ui.dashboard.common import copy_text, more_button
-from tomography_session_browser.ui.dashboard.constants import DASHBOARD_REFILL_VEIL_MS, DASHBOARD_REFILL_VEIL_OPACITY, SIDE_BY_SIDE_CHARTS_MIN_PX
-from tomography_session_browser.ui.dashboard.counts import build_counts_row, build_stat_card, zero_counts_line
+from tomography_session_browser.ui.dashboard.atlas_session_summary import build_atlas_session_summary_page
+from tomography_session_browser.ui.dashboard.collection_summary import build_collection_summary_page
+from tomography_session_browser.ui.dashboard.constants import DASHBOARD_REFILL_VEIL_MS, DASHBOARD_REFILL_VEIL_OPACITY
 from tomography_session_browser.ui.dashboard.defocus import build_defocus_readout_card
 from tomography_session_browser.ui.dashboard.dose import build_dose_information_card
-from tomography_session_browser.ui.dashboard.header import build_header, context_eyebrow_text, meta_item, metadata_icon_label
-from tomography_session_browser.ui.dashboard.layout import DashboardPage, ResponsiveCardGrid, SideBySideRow
-from tomography_session_browser.ui.dashboard.search_maps import build_search_maps_overview_card, search_map_overview_row, search_map_table_activated
+from tomography_session_browser.ui.dashboard.empty_summary import build_empty_summary_page
+from tomography_session_browser.ui.dashboard.header import context_eyebrow_text
+from tomography_session_browser.ui.dashboard.layout import DashboardPage
+from tomography_session_browser.ui.dashboard.sample_summary import build_sample_summary_page
 from tomography_session_browser.ui.dashboard.timeline import build_timeline_card, set_timeline_mode, timeline_segment_clicked
-from tomography_session_browser.ui.dashboard.warnings import build_warnings_card, warning_group_row, warning_row
-from tomography_session_browser.presentation.tab_keys import TabKey
 
 
 class SessionDashboard(QWidget):
     """The widget that replaces the old ``QTreeWidget`` Session-tab summary."""
 
     navigate_requested = Signal(str)
-    search_map_clicked = Signal(str)
-    sample_clicked = Signal(str)
-    filter_requested = Signal(str, str, str)  # (destination tab, query, reason)
+    #: A summary's own link to another scope: the id of a sample or a session.
+    scope_requested = Signal(str)
+    #: A link that narrows the page's own sheet (the name of the filter).
+    page_filter_requested = Signal(str)
+    filter_requested = Signal(object)  # DashboardFilterModel, including counted row membership
     point_clicked = Signal(str, object)  # tilt_series_id, 1-based frame_index | None
     point_double_clicked = Signal(str, object)  # tilt_series_id, 1-based frame_index | None
     timeline_tilt_series_requested = Signal(str, object)  # tilt_series_id, 1-based frame_index | None
     highlight_clear_requested = Signal()
-    warning_details_requested = Signal(str, object)  # category, raw messages
+    #: The header's "N source folders" link: show them (Context lists them).
+    source_folders_requested = Signal()
     # Generic per-tile selection: emitted with the destination tab label and
     # the item id when the user clicks a status tile on any of the four
     # count cards. The main window resolves the id back to the underlying
@@ -80,6 +86,11 @@ class SessionDashboard(QWidget):
         self._content_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         self._content_layout.setContentsMargins(SPACE_L, SPACE_L, SPACE_L, SPACE_L)
         self._content_layout.setSpacing(SPACE_L)
+        self._scroll_restore = QTimer(self)
+        self._scroll_restore.setSingleShot(True)
+        self._scroll_restore.timeout.connect(self._finish_scroll_restore)
+        self._restore_position = 0
+        self._page_generation = 0
 
         self._placeholder = QLabel("Open a session folder to review acquisition health, warnings, and linked data.")
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -103,6 +114,29 @@ class SessionDashboard(QWidget):
 
     # ------------------------------------------------------------------ API
 
+    @property
+    def scroll_position(self) -> int:
+        return self._restore_position if self._scroll_restore.isActive() else self._scroll.verticalScrollBar().value()
+
+    def _finish_scroll_restore(self) -> None:
+        self._content_layout.activate()
+        self._scroll.verticalScrollBar().setValue(self._restore_position)
+
+    def reveal_section(self, heading: QWidget, *, focus: QWidget | None = None) -> None:
+        """Reveal the heading and focus its evidence after newly shown content lays out."""
+        self._scroll_restore.stop()
+        generation = self._page_generation
+
+        def reveal() -> None:
+            if generation != self._page_generation or not shiboken6.isValid(heading):
+                return
+            self._content_layout.activate()
+            (focus if focus is not None else heading).setFocus(Qt.FocusReason.OtherFocusReason)
+            self._scroll.verticalScrollBar().setValue(heading.mapTo(self._content, QPoint()).y() - SPACE_L)
+
+        reveal()
+        QTimer.singleShot(0, reveal)
+
     def set_model(
         self,
         model: DashboardModel | None,
@@ -111,10 +145,14 @@ class SessionDashboard(QWidget):
         animate: bool = False,
         defer_heavy_cards: bool = False,
         highlighted_tilt_series_id: str | None = None,
+        scroll_position: int | None = None,
     ) -> None:
         # Wipe the previous content and rebuild from scratch. The dashboard
         # is rebuilt only on session load / refresh, so the simpler clear &
         # rebuild flow is fine.
+        position = self.scroll_position if scroll_position is None else scroll_position
+        self._scroll_restore.stop()
+        self._page_generation += 1
         self._clear()
         if model is None:
             self._model = None
@@ -127,84 +165,63 @@ class SessionDashboard(QWidget):
         self._model = model
         self._highlighted_tilt_series_id = self._normalise_highlight_id(model, highlighted_tilt_series_id)
 
-        self._content_layout.addWidget(self._build_header(model))
-
-        # Section ordering depends on what the session actually contains. We
-        # keep collection scopes dense and time-oriented: metric cards first,
-        # then full-width acquisition timeline, then full-width applied
-        # defocus. Atlas-only sessions still use the richer atlas summary.
-        if not model.has_atlases and not model.has_collection_data:
-            empty = QLabel(
-                "Session loaded, but no atlases, overviews, search maps, batch positions, or "
-                "tilt series were detected. Warnings below may explain what metadata was available."
-            )
-            empty.setObjectName("metaPlain")
-            empty.setWordWrap(True)
-            empty.setStyleSheet("padding: 24px;")
-            self._content_layout.addWidget(empty)
-
-        if not model.has_collection_data and model.has_atlases and model.atlas_summary is not None:
-            self._content_layout.addWidget(self._build_atlas_summary_card(model.atlas_summary))
-
-        if model.has_collection_data:
-            self._content_layout.addWidget(self._build_counts_row(model))
-            timeline_card = self._build_timeline_card(model, timeline)
-            if not defer_heavy_cards and model.defocus_readout.points:
-                # Both are time-based charts; on a very wide page they share
-                # a row (plan D3), and stack as before otherwise.
-                self._content_layout.addWidget(
-                    SideBySideRow(
-                        [timeline_card, self._build_defocus_readout_card(model)],
-                        min_width=SIDE_BY_SIDE_CHARTS_MIN_PX,
-                    )
-                )
-            else:
-                self._content_layout.addWidget(timeline_card)
-            if not defer_heavy_cards:
-                if model.dose_information.has_points:
-                    self._content_layout.addWidget(self._build_dose_information_card(model))
-            else:
-                LOGGER.debug(
-                    "dashboard heavy cards deferred defocus_points=%d dose_points=%d",
-                    len(model.defocus_readout.points),
-                    len(model.dose_information.points),
-                )
-
-            lower_cards: list[QWidget] = []
-            if model.search_map_overview.total:
-                lower_cards.append(
-                    self._build_search_maps_overview_card(model.search_map_overview)
-                )
-            if model.batch_positions:
-                lower_cards.append(
-                    self._build_batch_positions_card(model)
-                )
-            lower_cards.append(self._build_warnings_card(model))
-            self._content_layout.addWidget(ResponsiveCardGrid(lower_cards))
-        if not model.has_collection_data:
-            self._content_layout.addWidget(self._build_warnings_card(model))
+        # Which page the scope gets was decided when the model was built; the
+        # widget only dispatches on it, and the page builds its own header.
+        self._page_builders()[type(model.summary)](model, timeline, defer_heavy_cards)
         self._content_layout.addStretch(1)
+        # Make replacement sections participate in layout before restoring the
+        # viewport. Qt otherwise queues their first show after our timer and
+        # briefly reports an empty page, clamping the saved position to zero.
+        for index in range(self._content_layout.count()):
+            section = self._content_layout.itemAt(index).widget()
+            if section is not None:
+                section.show()
+        self._restore_position = position
+        self._scroll.verticalScrollBar().setValue(position)
+        self._scroll_restore.start(0)
         if animate:
             QTimer.singleShot(0, self._animate_loaded_content)
+
+    def _page_builders(self) -> dict[type, Callable[[DashboardModel, SessionTimeline | None, bool], None]]:
+        return {
+            EmptySummary: self._build_empty_page,
+            AtlasSessionSummary: self._build_atlas_page,
+            CollectionSummary: self._build_collection_summary_page,
+            SampleSummary: self._build_sample_summary_page,
+        }
+
+    def _build_empty_page(self, model: DashboardModel, timeline: SessionTimeline | None, defer_heavy_cards: bool) -> None:
+        assert isinstance(model.summary, EmptySummary)
+        for section in build_empty_summary_page(self, model, model.summary):
+            self._content_layout.addWidget(section)
+
+    def _build_atlas_page(self, model: DashboardModel, timeline: SessionTimeline | None, defer_heavy_cards: bool) -> None:
+        assert isinstance(model.summary, AtlasSessionSummary)
+        for section in build_atlas_session_summary_page(self, model, model.summary):
+            self._content_layout.addWidget(section)
+
+    def _build_collection_summary_page(self, model: DashboardModel, timeline: SessionTimeline | None, defer_heavy_cards: bool) -> None:
+        assert isinstance(model.summary, CollectionSummary)
+        for section in build_collection_summary_page(self, model, model.summary, timeline, defer_heavy_cards):
+            self._content_layout.addWidget(section)
+
+    def _build_sample_summary_page(self, model: DashboardModel, timeline: SessionTimeline | None, defer_heavy_cards: bool) -> None:
+        assert isinstance(model.summary, SampleSummary)
+        for section in build_sample_summary_page(self, model, model.summary, timeline, defer_heavy_cards):
+            self._content_layout.addWidget(section)
 
     def refresh_theme(self) -> None:
         """Recolour the dashboard in place after a theme switch.
 
         The style sheet recolours what it styles, statuses included (they
         carry a ``tone``); painted parts read the palette when they paint.
-        What is left is drawn once at build time: icons, and the stat cards'
-        status dots and tile colours. A switch used to rebuild the whole
-        dashboard for these (~150 ms with its clean-up).
+        What is left is the status bands, which keep their colours between
+        paints. A switch used to rebuild the whole dashboard for these (~150 ms
+        with its clean-up).
         """
 
-        for icon in self.findChildren(QLabel, "metaIcon"):
-            name = icon.property("iconName")
-            if isinstance(name, str):
-                icon.setPixmap(themed_icon(name, size=14).pixmap(QSize(14, 14)))
-        for button in self.findChildren(QToolButton, "metaCopyButton"):
-            button.setIcon(themed_icon("copy", size=14))
-        for card in self.findChildren(StatCard):
-            card.refresh_theme()
+        for grid in self.findChildren(StatusTileGrid):
+            grid.refresh_theme()
         for widget in self.findChildren(QWidget):
             widget.update()
 
@@ -239,6 +256,7 @@ class SessionDashboard(QWidget):
                 continue
             widget = item.widget()
             if widget is not None and widget is not self._placeholder:
+                widget.hide()
                 widget.deleteLater()
 
     def set_context_stack(self, stack: ContextStack | None) -> None:
@@ -249,77 +267,17 @@ class SessionDashboard(QWidget):
     def _context_eyebrow_text(self, title: str = "") -> str:
         return context_eyebrow_text(self, title)
 
-    def _build_header(self, model: DashboardModel) -> QWidget:
-        return build_header(self, model)
-
-    def _meta_item(
-        self,
-        label: str,
-        value: str,
-        *,
-        icon_name: str,
-        icon_accessible_name: str | None = None,
-        value_object_name: str = "metaValue",
-        elide_mode: Qt.TextElideMode = Qt.TextElideMode.ElideRight,
-        trailing: QWidget | None = None,
-    ) -> QWidget:
-        return meta_item(self, label, value, icon_name=icon_name, icon_accessible_name=icon_accessible_name, value_object_name=value_object_name, elide_mode=elide_mode, trailing=trailing)
-
-    @staticmethod
-    def _metadata_icon_label(icon_name: str, accessible_name: str) -> QLabel:
-        return metadata_icon_label(icon_name, accessible_name)
-
-    def _build_counts_row(self, model: DashboardModel) -> QWidget:
-        # Palette slots, not colours, so a card can recolour in place.
-        return build_counts_row(self, model)
-
-    @staticmethod
-    def _zero_counts_line(empty: list[StatCardModel]) -> QLabel:
-        # U+00A0 inside each entry, so a wrap falls between entries only.
-        return zero_counts_line(empty)
-
-    def _build_stat_card(self, card_model: StatCardModel, accent_role: str) -> StatCard:
-        return build_stat_card(self, card_model, accent_role)
-
     def _on_stat_tile_clicked(self, item_id: str, destination: str) -> None:
         """Bubble tile clicks up so the main window can select the item."""
 
-        # Always emit the generic signal so the main window can resolve the
-        # id and select the underlying entity. We also keep the
-        # search-map-specific signal for backwards compatibility with the
-        # completion-bar card which only carries SearchMap rows.
+        # The main window resolves the id and selects the entity it names.
         self.tile_item_clicked.emit(destination, item_id)
-        if destination == TabKey.SEARCH_MAP:
-            self.search_map_clicked.emit(item_id)
 
     def _build_defocus_readout_card(self, model: DashboardModel) -> QWidget:
         return build_defocus_readout_card(self, model)
 
     def _build_dose_information_card(self, model: DashboardModel) -> QWidget:
         return build_dose_information_card(self, model)
-
-    def _build_search_maps_overview_card(self, overview: SearchMapOverviewModel) -> QWidget:
-        return build_search_maps_overview_card(self, overview)
-
-    def _search_map_overview_row(self, row: SearchMapOverviewRowModel) -> QWidget:
-        return search_map_overview_row(self, row)
-
-    def _search_map_table_activated(self, table: QTableView, index: QModelIndex) -> None:
-        return search_map_table_activated(self, table, index)
-
-    def _more_button(self, label: str, destination: str, tooltip: str) -> QToolButton:
-        return more_button(self, label, destination, tooltip)
-
-    def _build_batch_positions_card(self, model: DashboardModel) -> QWidget:
-        return build_batch_positions_card(self, model)
-
-    def _batch_position_row(
-        self,
-        row_model: BatchPositionProgressModel,
-        *,
-        compact: bool = False,
-    ) -> QWidget:
-        return batch_position_row(self, row_model, compact=compact)
 
     def _build_timeline_card(self, model: DashboardModel, timeline: SessionTimeline | None) -> QWidget:
         return build_timeline_card(self, model, timeline)
@@ -375,26 +333,5 @@ class SessionDashboard(QWidget):
             return tilt_series_id
         return None
 
-    def _build_atlas_summary_card(self, atlas_summary: AtlasSummaryModel) -> QWidget:
-        return build_atlas_summary_card(self, atlas_summary)
-
-    def _meta_pair_compact(self, label: str, value: str) -> QWidget:
-        return meta_pair_compact(label, value)
-
-    def _atlas_row_widget(self, row_model: AtlasRowModel) -> QWidget:
-        return atlas_row_widget(row_model)
-
-    def _build_warnings_card(self, model: DashboardModel) -> QWidget:
-        return build_warnings_card(self, model)
-
-    def _warning_row(self, row: WarningRowModel) -> QWidget:
-        return warning_row(row)
-
-    def _warning_group_row(self, group: WarningGroupModel) -> QWidget:
-        return warning_group_row(self, group)
-
     # ----- helpers
-
-    def _copy(self, text: str, *, source: QToolButton | None = None) -> None:
-        return copy_text(text, source=source)
 

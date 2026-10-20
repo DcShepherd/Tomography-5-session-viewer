@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QTreeWidget,
     QTreeWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -44,6 +45,7 @@ from tomography_session_browser.presentation.report_scope import (
 )
 from tomography_session_browser.presentation.scopes import LinkedSampleGroup
 from tomography_session_browser.presentation.design_tokens import SPACE_L, SPACE_M, SPACE_S
+from tomography_session_browser.ui.widgets.rounded_viewport import round_viewport
 
 
 REPORT_GROUP_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -120,7 +122,8 @@ class ReportScopeDialog(QDialog):
 
         self.setWindowTitle("Select report scope")
         self.setModal(True)
-        self.resize(560, 580)
+        available = self.screen().availableGeometry()
+        self.resize(min(720, available.width() - 48), min(800, available.height() - 80))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACE_L, SPACE_L, SPACE_L, SPACE_L)
@@ -131,7 +134,7 @@ class ReportScopeDialog(QDialog):
         layout.addWidget(heading)
 
         self.detail = QLabel(
-            "Select groups, sessions, or data collection samples. Each dataset includes its associated atlas when available. Use the option below to add full atlas-session overviews, or select an Atlas session alone for an atlas-only report.",
+            "Ticks choose report content. Group checkboxes and Select all include full atlas overviews. The current linked-scope preset selects collection datasets only.",
             self,
         )
         self.detail.setWordWrap(True)
@@ -140,6 +143,7 @@ class ReportScopeDialog(QDialog):
 
         self.tree = QTreeWidget(self)
         self.tree.setObjectName("projectTree")
+        round_viewport(self.tree)
         self.tree.setAccessibleName("Report scope")
         self.tree.setAccessibleDescription(
             "Choose linked groups, sessions, or samples to include in the report."
@@ -153,15 +157,20 @@ class ReportScopeDialog(QDialog):
         self.tree.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.tree, stretch=1)
 
-        controls = QHBoxLayout()
+        controls = QVBoxLayout()
         controls.setSpacing(SPACE_S)
+        current_controls = QHBoxLayout()
+        content_controls = QHBoxLayout()
+        content_controls.setSpacing(SPACE_S)
         # "view" described the widget; this is about the scientific scope being
         # reviewed, and now names it.
         scope_name = _describe_current_scope(current_scope)
+        linked_preset = isinstance(current_scope, ProjectTreeGroup) and current_scope.kind == "linked"
+        current_label = "Select current collections" if linked_preset else "Select current review scope"
         self.select_current_button = QPushButton(
-            f"Select current review scope: {scope_name}"
+            f"{current_label}: {scope_name}"
             if scope_name
-            else "Select current review scope",
+            else current_label,
             self,
         )
         self.select_current_button.setEnabled(current_scope is not None)
@@ -182,8 +191,13 @@ class ReportScopeDialog(QDialog):
             self.collapse_button,
         ):
             button.setObjectName("dashboardFilterButton")
-            controls.addWidget(button)
-        controls.addStretch(1)
+        current_controls.addWidget(self.select_current_button)
+        current_controls.addStretch(1)
+        for button in (self.select_all_button, self.clear_button, self.expand_button, self.collapse_button):
+            content_controls.addWidget(button)
+        content_controls.addStretch(1)
+        controls.addLayout(current_controls)
+        controls.addLayout(content_controls)
         layout.addLayout(controls)
 
         self.include_atlas_overview = QCheckBox("Also include supporting atlas-session overviews", self)
@@ -206,7 +220,20 @@ class ReportScopeDialog(QDialog):
         exposure_help = QLabel(exposure_help_text, self)
         exposure_help.setObjectName("mutedLabel")
         exposure_help.setWordWrap(True)
+        exposure_help.setVisible(False)
+        self.thumbnail_details = QToolButton(self)
+        self.thumbnail_details.setObjectName("inlineLink")
+        self.thumbnail_details.setText("Thumbnail details")
+        self.thumbnail_details.setCheckable(True)
+        self.thumbnail_details.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.thumbnail_details.setArrowType(Qt.ArrowType.RightArrow)
+        self.thumbnail_details.setAccessibleDescription(exposure_help_text)
+        def show_thumbnail_details(checked: bool) -> None:
+            exposure_help.setVisible(checked)
+            self.thumbnail_details.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
+        self.thumbnail_details.toggled.connect(show_thumbnail_details)
         layout.addWidget(self.include_exposure_thumbnails)
+        layout.addWidget(self.thumbnail_details)
         layout.addWidget(exposure_help)
         self.include_exposure_thumbnails.toggled.connect(self._update_generate_enabled)
 
@@ -278,6 +305,17 @@ class ReportScopeDialog(QDialog):
             group = item.data(0, REPORT_GROUP_ROLE)
             if not isinstance(group, ProjectTreeGroup):
                 continue
+            if group.kind == "linked":
+                selected_sessions: set[str] = set()
+                self._collect_descendant_selection(item, selected_sessions, sample_keys)
+                collection_keys = {session_key(session) for session in group.collection_sessions}
+                # Lossless content compression preserves the group label. AT
+                # remains explicit regardless of the aggregate parent's state.
+                if collection_keys and collection_keys <= selected_sessions:
+                    group_keys.add(group.key)
+                    selected_sessions.difference_update(collection_keys)
+                session_keys.update(selected_sessions)
+                continue
             if item.checkState(0) == Qt.CheckState.Checked:
                 group_keys.add(group.key)
                 continue
@@ -299,10 +337,23 @@ class ReportScopeDialog(QDialog):
         if not items:
             return
         self.clear_selection()
-        for item in items:
+        selected_items = items
+        if isinstance(value, ProjectTreeGroup) and value.kind == "linked":
+            selected_items = [self._session_items[session_key(session)] for session in value.collection_sessions]
+        for item in selected_items:
             self._set_checked(item, True)
-        self.tree.scrollToItem(items[0])
+            ancestor = item
+            while ancestor is not None:
+                ancestor.setExpanded(True)
+                ancestor = ancestor.parent()
+        self.tree.setCurrentItem(selected_items[0])
+        self.tree.scrollToItem(selected_items[0], QTreeWidget.ScrollHint.PositionAtTop)
         self._update_generate_enabled()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().showEvent(event)
+        if self.tree.currentItem() is not None:
+            self.tree.scrollToItem(self.tree.currentItem(), QTreeWidget.ScrollHint.PositionAtTop)
 
     def _items_for_scope(self, value: Any | None) -> list[QTreeWidgetItem]:
         """The rows that stand for ``value`` in this dialog; empty when none does."""

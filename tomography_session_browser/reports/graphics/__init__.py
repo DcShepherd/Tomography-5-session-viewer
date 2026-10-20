@@ -11,7 +11,7 @@ from tomography_session_browser.reports.graphics.status import CompletionBar
 from tomography_session_browser.reports.graphics.status import Dot
 from tomography_session_browser.reports.graphics.atlas_figure import FramedImage
 from tomography_session_browser.reports.graphics.overlays import LOGGER
-from tomography_session_browser.reports.graphics.status import NORMAL_STATUS_GLYPHS
+from tomography_session_browser.presentation.design_tokens import NORMAL_STATUS_GLYPHS
 from tomography_session_browser.reports.graphics.overlays import OverlayKey
 from tomography_session_browser.reports.graphics.overlays import OverlayKeyItem
 from tomography_session_browser.reports.graphics.overlays import OverlayedImage

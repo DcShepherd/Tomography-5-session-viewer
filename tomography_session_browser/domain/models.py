@@ -54,6 +54,8 @@ class MdocSection:
 class Atlas:
     id: str
     image_path: Path | None = None
+    #: The folder the atlas was read from: where an image that is missing was looked for.
+    folder: Path | None = None
     mrc_metadata: MrcMetadata | None = None
     metadata: Metadata = field(default_factory=dict)
     tile_paths: list[Path] = field(default_factory=list)

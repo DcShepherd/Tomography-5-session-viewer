@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from collections import OrderedDict
 import logging
 from typing import Any
 from PySide6.QtCore import QElapsedTimer, QTimer
 from tomography_session_browser.domain.models import Atlas, BatchPosition, Overview, Sample, SearchMap, SearchTile, Session, TiltSeries
+from tomography_session_browser.domain.identity import entity_key_text
 from tomography_session_browser.presentation.context_stack import ContextStack
 from tomography_session_browser.presentation.dashboard.models import DashboardEntityScope, DashboardModel, LinkedAtlasDashboardScope
 from tomography_session_browser.presentation.dashboard.dashboard import session_dashboard_model
@@ -27,7 +29,7 @@ def dashboard_cache_key(scope_value: DashboardScopeValue) -> str:
         if isinstance(value, Session):
             return f"session:{session_key(value)}"
         if isinstance(value, Sample | Atlas | Overview | SearchMap | SearchTile | BatchPosition | TiltSeries):
-            return f"{type(value).__name__}:{getattr(value, 'id', id(value))}"
+            return entity_key_text(value)
         if isinstance(value, LinkedSampleGroup):
             return "linked-sample:" + ",".join(key_for(sample) for sample in value.samples)
         if isinstance(value, ProjectTreeGroup):
@@ -96,10 +98,15 @@ class DashboardHost:
         self.pending: tuple[DashboardModel, SessionTimeline | None, bool] | None = None
         self.pending_refresh = False
         self.applied: tuple[object, ...] | None = None
+        # Identifiers and scalars only; removed workspaces retain no scroll memory.
+        self.scroll_positions: OrderedDict[str, int] = OrderedDict()
+        self.scroll_scope_key: str | None = None
 
     def invalidate(self) -> None:
         self.model_cache.clear()
         self.applied = None
+        self.scroll_positions.clear()
+        self.scroll_scope_key = None
 
     def reset_pending(self) -> None:
         self.pending = None
@@ -181,13 +188,21 @@ class DashboardHost:
                     and applied[2:] == signature[2:]):
                 self.widget.set_highlighted_tilt_series_id(self.highlighted_tilt_id())
                 return
+            if self.scroll_scope_key is not None:
+                self.scroll_positions[self.scroll_scope_key] = self.widget.scroll_position
+                self.scroll_positions.move_to_end(self.scroll_scope_key)
+            position = self.scroll_positions.get(cache_key, 0)
+            while len(self.scroll_positions) > 50:
+                self.scroll_positions.popitem(last=False)
             self.widget.set_model(
                 display_model,
                 timeline,
                 animate=animate and not defer_heavy_cards,
                 defer_heavy_cards=defer_heavy_cards,
                 highlighted_tilt_series_id=self.highlighted_tilt_id(),
+                scroll_position=position,
             )
+            self.scroll_scope_key = cache_key
             self.applied = signature
             render_ms = render_timer.elapsed()
             self.instrumentation.last_dashboard_build_ms = int(render_ms)

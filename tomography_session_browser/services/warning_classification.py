@@ -2,7 +2,7 @@
 
 The dashboard, the context panel and the PDF all classify through this
 module, so a warning has the same category, severity and count wherever it
-appears. Sessions can produce hundreds of low-level warnings
+appears (see AGENTS.md). Sessions can produce hundreds of low-level warnings
 (one per NaN field, one per missing per-tilt mdoc, etc.); the summary is one
 row per *category* with a count and how many distinct sources it touched.
 
@@ -42,6 +42,12 @@ class WarningSummary:
 
 
 # ----------------------------------------------------------------- categoriser
+
+
+#: Categories other layers read by name (the atlas page's "Missing" and
+#: "Re-acquired" marks), so they and the rules below cannot drift apart.
+CATEGORY_ATLAS_FILES_NOT_FOUND = "Atlas files not found"
+CATEGORY_ATLAS_REACQUIRED = "Atlas re-acquired"
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,7 +232,7 @@ _RULES: tuple[WarningRule, ...] = (
         patterns=(r"atlas markers unavailable",),
     ),
     WarningRule(
-        category="Atlas re-acquired",
+        category=CATEGORY_ATLAS_REACQUIRED,
         severity="info",
         explanation="The Atlas folder holds more than one acquisition of this grid's atlas. "
                     "Only the one Atlas.dm names (or the latest) is shown, because the "
@@ -234,7 +240,7 @@ _RULES: tuple[WarningRule, ...] = (
         patterns=(r"atlas was re-acquired",),
     ),
     WarningRule(
-        category="Atlas files not found",
+        category=CATEGORY_ATLAS_FILES_NOT_FOUND,
         severity="warning",
         explanation="The Atlas folder or Atlas.dm/atlas.xml file is missing.",
         patterns=(

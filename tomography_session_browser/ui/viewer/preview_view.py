@@ -15,7 +15,7 @@ from tomography_session_browser.services.marker_clustering import ZOOM_DEBOUNCE_
 import logging
 LOGGER = logging.getLogger("tomography_session_browser.ui.image_viewer")
 from tomography_session_browser.ui.viewer.atlas_lod_items import AtlasClusterPopup
-from tomography_session_browser.ui.viewer.constants import ATLAS_LOD_CLUSTER, ATLAS_LOD_EXPOSURES, ATLAS_LOD_LABELS, ATLAS_LOD_TILE_GRIDS, DEFAULT_VISIBLE_MARKER_TYPES, WHEEL_ZOOM_BASE, WHEEL_ZOOM_UNITS_PER_PIXEL
+from tomography_session_browser.ui.viewer.constants import ATLAS_LOD_DEFAULTS, DEFAULT_VISIBLE_MARKER_TYPES, WHEEL_ZOOM_BASE, WHEEL_ZOOM_UNITS_PER_PIXEL
 from tomography_session_browser.ui.viewer.marker_layer import MarkerLayer
 from tomography_session_browser.ui.viewer.preview_camera import PreviewCamera
 from tomography_session_browser.ui.viewer.preview_image import PreviewImage
@@ -77,12 +77,7 @@ class ImagePreviewView(QGraphicsView):
         # like a press on empty image; double-click still opens them.
         self.parts.preview_interaction.pan_through_marker_types: frozenset[str] = frozenset()
         self.parts.marker_layer.atlas_lod_enabled = False
-        self.parts.marker_layer.atlas_lod_options = {
-            ATLAS_LOD_CLUSTER: True,
-            ATLAS_LOD_LABELS: True,
-            ATLAS_LOD_TILE_GRIDS: True,
-            ATLAS_LOD_EXPOSURES: False,
-        }
+        self.parts.marker_layer.atlas_lod_options = dict(ATLAS_LOD_DEFAULTS)
         self.parts.marker_layer.cluster_cache: dict[tuple[object, ...], tuple[MarkerCluster, ...]] = {}
         self.parts.marker_layer.cluster_compute_count = 0
         self.parts.marker_layer.last_display_markers: list[ImageMarker] = []
@@ -158,6 +153,7 @@ class ImagePreviewView(QGraphicsView):
 
         self.destroyed.connect(_stop_springs)
         self.setScene(self.parts.preview_image.scene)
+        self.setObjectName("viewerCanvas")
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
@@ -225,6 +221,9 @@ class ImagePreviewView(QGraphicsView):
     def set_atlas_lod_option(self, key: str, enabled: bool) -> None:
         return self.parts.marker_layer.set_atlas_lod_option(key, enabled)
 
+    def atlas_lod_option(self, key: str) -> bool:
+        return self.parts.marker_layer.atlas_lod_options[key]
+
     def set_marker_type_visible(self, marker_type: str, visible: bool) -> None:
         return self.parts.marker_layer.set_marker_type_visible(marker_type, visible)
 
@@ -241,8 +240,12 @@ class ImagePreviewView(QGraphicsView):
         *,
         logical_image_key: Any | None = None,
         pyramid_level: int | None = None,
+        overlay_reference_size: tuple[int, int] | None = None,
     ) -> None:
-        return self.parts.preview_image.set_image(image, preserve_view, logical_image_key=logical_image_key, pyramid_level=pyramid_level)
+        return self.parts.preview_image.set_image(
+            image, preserve_view, logical_image_key=logical_image_key,
+            pyramid_level=pyramid_level, overlay_reference_size=overlay_reference_size,
+        )
 
     def zoom_in(self) -> None:
         return self.parts.preview_camera.zoom_in()
@@ -371,11 +374,15 @@ class ImagePreviewView(QGraphicsView):
         *,
         logical_image_key: Any | None = None,
         pyramid_level: int | None = None,
+        overlay_reference_size: tuple[int, int] | None = None,
     ) -> None:
         # A new level of the same image (a pyramid upgrade) moves the scene
         # coordinates under a flight to a jump's target; fly on from here once
         # the new level is in.
-        return self.parts.preview_image.set_pixmap(pixmap, preserve_view, logical_image_key=logical_image_key, pyramid_level=pyramid_level)
+        return self.parts.preview_image.set_pixmap(
+            pixmap, preserve_view, logical_image_key=logical_image_key,
+            pyramid_level=pyramid_level, overlay_reference_size=overlay_reference_size,
+        )
 
     def _zoom_toward(self, factor: float, anchor_view: QPointF) -> None:
         return self.parts.preview_camera.zoom_toward(factor, anchor_view)

@@ -1,17 +1,21 @@
 """Mrc loading for the image viewer."""
 from __future__ import annotations
 from pathlib import Path
+import math
 from dataclasses import dataclass
 from typing import Any, Literal
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage
+from tomography_session_browser.domain.identity import entity_key_text
 from tomography_session_browser.services.preview_sources import PreviewSources
 from tomography_session_browser.presentation.empty_states import missing_preview_state
+from tomography_session_browser.presentation.viewer_items import missing_image_state
 import logging
 LOGGER = logging.getLogger("tomography_session_browser.ui.image_viewer")
-from tomography_session_browser.ui.viewer.constants import FIRST_ZOOM_PREVIEW_DIMENSION, MAX_PREVIEW_DIMENSION, MRC_JPEG_FALLBACK_GRACE_MS, PYRAMID_LEVELS
+from tomography_session_browser.ui.viewer.constants import FIRST_ZOOM_PREVIEW_DIMENSION, MAX_PREVIEW_DIMENSION, PYRAMID_LEVELS
 from tomography_session_browser.ui.viewer.list_rows import warning_tooltip
 from tomography_session_browser.ui.viewer.preview_cache import CachedPreview
+from tomography_session_browser.ui.viewer.preview_image import source_image_size_for_item
 from tomography_session_browser.ui.viewer.preview_scheduler import cached_preview, preview_scheduler
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -48,6 +52,8 @@ class PreviewLoader:
         self.view = view
         self.native_size = 0
         self.outgoing_image_stale = False
+        self.loading_frame = False
+        self.requested_slice_index = 0
 
     def discard_outgoing_image(self) -> None:
         """Blank the canvas while a decode is awaited for another item.
@@ -64,8 +70,12 @@ class PreviewLoader:
         self.displayed_slice_index = None
         self.view._update_image_badge()
         self.view._update_scale_bar()
+        self.view._update_frame_label(self.view.slice_slider.maximum() + 1)
+        self.view._notify_frame_changed(self.view.slice_slider.maximum() + 1)
 
     def load_value(self, value: Any, slice_index: int, *, restore_frame: bool = False) -> None:
+        self.view.parts.frame_scrubber.cancel_pending()
+        self.loading_frame = False
         preview_scheduler().cancel(self.mrc_signals)
         preview_scheduler().cancel((self.mrc_signals, "raster"))
         self.request_id += 1
@@ -101,6 +111,7 @@ class PreviewLoader:
         markers = self.view.parts.tab_selection.markers_of(value)
         self.view._update_marker_type_availability(markers)
         self.view.viewer.set_markers(markers, selected_marker_id=self.view._active_selected_marker_id(value, markers))
+        self.view.parts.tab_selection.sync_exposure_chooser()
         if self.view.parts.overlay_panel.atlas_lod:
             self.view.atlas_marker_legend.set_markers(markers)
         if path is None:
@@ -109,11 +120,13 @@ class PreviewLoader:
             self.displayed_path = None
             self.displayed_slice_index = None
             self.view.viewer.clear("Preview unavailable")
-            self.view.export_image_button.setEnabled(False)
-            self.view._set_status_text("No preview image found for this item.", tone="warn")
+            self.view._update_image_badge()
+            # The page says it; the line under the canvas would only say it again.
+            self.view._set_status_text("")
             self.view._set_slice_state(1, 0, valid_stack=False)
             self.view.show_empty_state(
-                missing_preview_state(
+                missing_image_state(value)
+                or missing_preview_state(
                     name=str(getattr(value, "name", None) or getattr(value, "id", "this item")),
                     metadata_available=True,
                 )
@@ -127,12 +140,8 @@ class PreviewLoader:
         self.view._load_path(path, sources.fallback, slice_index)
 
     def source_for_value(self, value: Any) -> PreviewSources:
-        key = getattr(value, "id", None)
-        if key is not None:
-            prepared = self.prepared_sources.get(str(key))
-            if prepared is not None:
-                return prepared
-        return self.sources_for(value)
+        prepared = self.prepared_sources.get(entity_key_text(value))
+        return prepared if prepared is not None else self.sources_for(value)
 
     def load_path(self, path: Path, fallback: Path | None, slice_index: int) -> None:
         if path.suffix.lower() == ".mrc":
@@ -158,17 +167,24 @@ class PreviewLoader:
         path, mode = request.path, request.mode
         if request_id != self.request_id or primary != self.current_path:
             return
-        if mode == "delayed" and (self.displayed_path == primary or index != self.view.slice_slider.value()):
+        if mode != "image" and index != self.view.slice_slider.value():
+            return
+        if mode == "delayed" and self.displayed_path == primary:
             return
         warnings = list(request.warnings) + preview.warnings
         if not preview.image.isNull():
-            self.view.viewer.set_image(preview.image, logical_image_key=self.view._logical_image_key(primary or path, index))
+            self.view.viewer.set_image(preview.image, logical_image_key=self.view._logical_image_key(primary or path, index),
+                                       overlay_reference_size=self.overlay_reference_size())
         else:
             self.view.viewer.clear("Preview unavailable")
+            self.displayed_path = None
+            self.displayed_slice_index = None
         self.view._refresh_marker_selection()
         if not preview.image.isNull():
             self.displayed_path = path
-            self.displayed_slice_index = 0
+            # A fallback is one raster image, not raw stack frame zero. History
+            # must not turn its unknown frame identity into an explicit restore.
+            self.displayed_slice_index = 0 if mode == "image" else None
             self.view.parts.list_pane.empty_state_override = None
         elif not self.view.viewer.has_image():
             self.view.parts.list_pane.empty_state_override = missing_preview_state(
@@ -182,8 +198,12 @@ class PreviewLoader:
             )
         self.view._update_image_badge()
         self.view._update_scale_bar()
-        if mode != "delayed":
+        if mode == "image":
             self.view._set_slice_state(1, 0, valid_stack=False)
+        else:
+            self.loading_frame = mode == "delayed"
+            count = self.view._known_frame_count_for_path(primary) or 1
+            self.view._set_slice_state(count, index, valid_stack=mode == "delayed" and count > 1)
         caption = {"image": "Image", "delayed": "Loading MRC preview · JPEG fallback", "failed": "JPEG fallback · MRC unavailable"}[mode]
         tooltip = self.view._path_status_tooltip(caption, path, warnings=warnings)
         if mode != "image":
@@ -200,6 +220,8 @@ class PreviewLoader:
         self.pending_fallback_request = None
         frame_count = self.view._known_frame_count_for_path(path)
         clamped_index = max(0, min(slice_index, frame_count - 1)) if frame_count else max(0, slice_index)
+        self.loading_frame = True
+        self.requested_slice_index = clamped_index
         self.view._set_slice_state(frame_count or 1, clamped_index, valid_stack=(frame_count or 0) > 1)
         logical_key = self.view._logical_image_key(path, clamped_index)
         self.request_id += 1
@@ -216,20 +238,15 @@ class PreviewLoader:
         self.discard_outgoing_image()
         if fallback is not None:
             self.pending_fallback_request = (request_id, path, clamped_index, fallback, logical_key)
-            self.view._set_status_text(
-                f"Loading MRC preview: {path.name}",
-                tooltip=f"MRC: {path}\nJPEG fallback will display if the MRC preview is not ready within {MRC_JPEG_FALLBACK_GRACE_MS} ms.",
-            )
+            # Loading is the canvas's to say, not an exception worth a footer.
+            self.view._set_status_text("")
             self.fallback_debounce.start()
         elif self.view.viewer.has_image():
-            self.view._set_status_text(
-                f"Loading frame {clamped_index + 1} of {frame_count}: {path.name}",
-                tooltip=str(path),
-            )
+            self.view._set_status_text("")
         else:
             self.view.viewer.clear("Loading MRC preview...")
             self.view.export_image_button.setEnabled(False)
-            self.view._set_status_text(f"Loading MRC preview: {path.name}", tooltip=str(path))
+            self.view._set_status_text("")
         signals = self.mrc_signals
         def receive(result: CachedPreview) -> None:
             if result.image.isNull():
@@ -272,6 +289,17 @@ class PreviewLoader:
             return max(1, min(FIRST_ZOOM_PREVIEW_DIMENSION, source_max))
         return FIRST_ZOOM_PREVIEW_DIMENSION
 
+    def overlay_reference_size(self) -> tuple[int, int] | None:
+        """Style both fallback and upgrades in the initial MRC preview's units."""
+        path = self.current_path
+        if path is None or path.suffix.lower() != ".mrc":
+            return None
+        size = source_image_size_for_item(self.view.parts.tab_selection.current_value, path)
+        if size is None:
+            return None
+        shrink = max(1, math.ceil(max(size) / FIRST_ZOOM_PREVIEW_DIMENSION))
+        return max(1, size[0] // shrink), max(1, size[1] // shrink)
+
     def mrc_loaded(
         self,
         request_id: int,
@@ -286,6 +314,7 @@ class PreviewLoader:
         if request_id != self.request_id or path != self.current_path or slice_index != self.view.slice_slider.value():
             LOGGER.debug("Ignored stale MRC preview path=%s slice=%s request=%s", path, slice_index, request_id)
             return
+        self.loading_frame = False
         self.native_size = source_max
         self.fallback_debounce.stop()
         self.pending_fallback_request = None
@@ -293,6 +322,7 @@ class PreviewLoader:
             image,
             logical_image_key=self.view._logical_image_key(path, slice_index),
             pyramid_level=self.current_mrc_max_size,
+            overlay_reference_size=self.overlay_reference_size(),
         )
         self.view.clear_empty_state_override()
         self.view._refresh_marker_selection()
@@ -307,14 +337,17 @@ class PreviewLoader:
         LOGGER.debug("Displayed MRC preview path=%s slice=%s estimated_bytes=%s", path, slice_index, estimated_bytes)
 
     def mrc_failed(self, request_id: int, path: Path, slice_index: int, slice_count: int, warnings: list[str]) -> None:
-        if request_id != self.request_id or path != self.current_path:
+        if request_id != self.request_id or path != self.current_path or slice_index != self.view.slice_slider.value():
             return
+        self.loading_frame = False
         self.fallback_debounce.stop()
         self.pending_fallback_request = None
         if self.current_fallback is not None:
             self.request_raster(self.current_fallback, mode="failed", warnings=warnings)
             return
         self.view.viewer.clear("Preview unavailable")
+        self.displayed_path = None
+        self.displayed_slice_index = None
         self.view.export_image_button.setEnabled(False)
         self.view._set_image_badge_wanted(False)
         self.view.scale_bar.setVisible(False)

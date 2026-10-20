@@ -60,6 +60,12 @@ STATUS_UNKNOWN = "unknown"
 # a 5-image acquisition can be reported as incomplete rather than failed.
 HARD_FAILURE_THRESHOLD = 5
 
+# The reason given when the MDOC says a stack is complete but its image data is
+# not (a verdict the counts alone do not explain).
+UNREADABLE_STACK_REASON = (
+    "MRC image data is incomplete or unreadable; MDOC records cannot establish stack completeness."
+)
+
 # Evidence-source labels used in the validation result so the UI can show the
 # user *why* a verdict was reached.
 SOURCE_SESSION_METADATA = "session_metadata"
@@ -125,7 +131,7 @@ def validate_tilt_series(
     metadata = tilt_series.mrc_metadata
     if metadata is not None and metadata.data_complete is False and status == STATUS_COMPLETE:
         status = STATUS_INCOMPLETE if metadata.available_frames is not None else STATUS_UNKNOWN
-        reason = "MRC image data is incomplete or unreadable; MDOC records cannot establish stack completeness."
+        reason = UNREADABLE_STACK_REASON
 
     result = TiltSeriesValidation(
         tilt_series_id=tilt_series.id,
@@ -291,7 +297,7 @@ def _expected_from_session_metadata(
     The previous implementation also accepted ``tilt_series.tilt_count``
     as an "explicit expected count". The parser sets that field to
     ``len(sections)``, i.e. the *actual* image count — so for a failed
-    1-image acquisition like sang_1 the validator returned
+    1-image acquisition like beta_1 the validator returned
     ``expected = 1`` and never fell through to session-majority
     inference. We now require real planned-tilt metadata
     (range + increment), letting failed acquisitions drop into the

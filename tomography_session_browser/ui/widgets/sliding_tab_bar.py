@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import QRectF
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QStyle, QStyleOptionTab, QTabBar, QWidget
 
 from tomography_session_browser.ui.motion import MOTION_MICRO, MOTION_SMALL, Spring, SpringSpec, blend, motion_enabled
 from tomography_session_browser.ui.theme import current_palette
+from tomography_session_browser.presentation.design_tokens import RADIUS_CONTROL
 
 INDICATOR_HEIGHT_PX = 2
 # The style sheet's ``margin-right`` between tabs; fills and the underline
@@ -150,6 +151,8 @@ class SlidingTabBar(QTabBar):
         return spring.value if spring is not None else 0.0
 
     def _set_hover(self, index: int) -> None:
+        if index >= 0 and not self.isTabEnabled(index):
+            index = -1
         if index == self._hover_index:
             return
         previous, self._hover_index = self._hover_index, index
@@ -188,13 +191,20 @@ class SlidingTabBar(QTabBar):
             if not tab_rect.intersects(event.rect()):
                 continue
             selected = min(1.0, max(0.0, self._selected_progress(index)))
-            hovered = self.hover_progress(index) * (1.0 - selected)  # hover never lifts the current tab
+            hovered = self.hover_progress(index) * (1.0 - selected) if self.isTabEnabled(index) else 0.0
             painter.fillRect(rect, blend(blend(resting, hover_fill, hovered), lifted, selected))
             if index == self.currentIndex() and self.hasFocus():
                 painter.fillRect(rect, focus_fill)  # the keyboard-focus fill the sheet drew
+                painter.save()
+                painter.setPen(QPen(QColor(palette.link_text), 2.0))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRoundedRect(QRectF(rect).adjusted(2, 2, -2, -2), RADIUS_CONTROL, RADIUS_CONTROL)
+                painter.restore()
             option = QStyleOptionTab()
             self.initStyleOption(option, index)
+            painter.setOpacity(1.0 if self.isTabEnabled(index) else 0.45)
             style.drawControl(QStyle.ControlElement.CE_TabBarTabLabel, option, painter, self)
+            painter.setOpacity(1.0)
         if self.currentIndex() >= 0:
             left, right = self.indicator_span()
             current = self.tabRect(self.currentIndex())

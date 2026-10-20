@@ -16,6 +16,7 @@ from tomography_session_browser.domain.models import (
 from .exposures import (
     exposure_area_id,
     preferred_navigation_marker,
+    exact_exposure_marker,
     preferred_batch_marker,
     marker_exposure_match_key,
     exposure_index_for_marker,
@@ -47,6 +48,12 @@ def marker_id_for_tilt_navigation(
     markers: Iterable[ImageMarker],
 ) -> str | None:
     markers = list(markers)
+    if isinstance(target, BatchPosition):
+        exposure = exact_exposure_marker(markers, tilt, batch=target)
+        if exposure is not None:
+            return exposure.id
+        direct = next((marker for marker in markers if marker.linked_object_id == tilt.id), None)
+        return direct.id if direct is not None else None
     marker = preferred_navigation_marker(markers, tilt, batch=batch)
     return marker.id if marker is not None else None
 

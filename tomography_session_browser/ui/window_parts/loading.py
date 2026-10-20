@@ -85,9 +85,6 @@ from tomography_session_browser.ui.loading.tasks import (
     session_load_task,
     ui_prepare_task,
 )
-from tomography_session_browser.presentation.describe.entities import (
-    describe_object,
-)
 
 LOGGER = logging.getLogger("tomography_session_browser.ui.main_window")
 from tomography_session_browser.ui.window_parts.contracts import (
@@ -497,11 +494,17 @@ class SessionLoading(QObject):
         if active_group is not None:
             self.state.review.scope = active_group
             self.state.review.preserve_tree_root_context = True
-            self.ui.context_panel.set_title(active_group.display_name)
-            self.ui.context_panel.set_text(describe_project_group(active_group))
+            self.parts.context.show_scope_description(
+                f"{type(active_group).__name__}:{id(active_group)}",
+                active_group.display_name,
+                lambda: describe_project_group(active_group),
+            )
         else:
-            self.ui.context_panel.set_title("Session")
-            self.ui.context_panel.set_text(describe_object(session))
+            self.parts.context.show_scope_description(
+                f"{type(session).__name__}:{id(session)}",
+                "Session",
+                lambda: self.parts.context.context_description(session),
+            )
         self.parts.chrome.update_tab_counts()
         if not quiet:
             action = "Loaded" if replace else "Imported"
@@ -552,7 +555,7 @@ class SessionLoading(QObject):
         # aggregate-phase recordings (context panel, etc.) don't leak
         # into a stale profile.
         self.state.loading.instrumentation.unbind()
-        self.ui.loading_progress.setVisible(True)
+        self.ui.loading_progress.setVisible(False)
         self.ui.loading_overlay.show_loading(message)
         self.parts.loading.set_loading_status(message, force=True)
         self.ui.open_button.setEnabled(False)

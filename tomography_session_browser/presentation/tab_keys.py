@@ -9,6 +9,7 @@ a title or a header, stays a string.
 from __future__ import annotations
 
 from enum import StrEnum
+from collections.abc import Mapping
 
 
 class TabKey(StrEnum):
@@ -23,3 +24,11 @@ class TabKey(StrEnum):
 
 #: The image tabs, in hierarchy order: every tab but the Session dashboard.
 VIEWER_TAB_KEYS: tuple[TabKey, ...] = tuple(key for key in TabKey if key is not TabKey.SESSION)
+
+
+def available_tab_keys(counts: Mapping[str, int]) -> frozenset[TabKey]:
+    """Atlas-only scopes offer Summary and Atlas. Incomplete collections keep recovery views."""
+    acquisition_tabs = VIEWER_TAB_KEYS[1:]
+    if counts.get(TabKey.ATLAS, 0) > 0 and all(counts.get(key, 0) == 0 for key in acquisition_tabs):
+        return frozenset((TabKey.SESSION, TabKey.ATLAS))
+    return frozenset(TabKey)

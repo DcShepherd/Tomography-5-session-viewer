@@ -19,14 +19,19 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from tomography_session_browser.presentation.design_tokens import CANVAS_CHROME
 from tomography_session_browser.presentation.empty_states import (
+    COMMAND_COPY_DETAILS,
     KIND_LOAD_FAILED,
     EmptyState,
 )
+from tomography_session_browser.ui.icons import themed_icon
+from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 from tomography_session_browser.ui.theme import (
     TIER_LANDMARK,
     TIER_PRIMARY,
@@ -76,6 +81,30 @@ class EmptyStatePanel(QWidget):
         )
         outer.addWidget(self.evidence_label)
 
+        # Where it was looked for, as it is, and a button to copy it.
+        self.path_row = QWidget(self)
+        path_layout = QHBoxLayout(self.path_row)
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        path_layout.setSpacing(4)
+        path_layout.addStretch(1)
+        # A path is long and has no spaces to wrap at: it gives way in the middle, and
+        # the button copies the whole of it.
+        self.path_label = ElidedLabel("", mode=Qt.TextElideMode.ElideMiddle, parent=self.path_row, prefer_full_width=True)
+        self.path_label.setObjectName("emptyStatePath")
+        apply_tier(self.path_label, TIER_SUPPORTING)
+        path_layout.addWidget(self.path_label)
+        self.copy_button = QToolButton(self.path_row)
+        self.copy_button.setObjectName("emptyStateCopy")
+        self.copy_button.setIcon(themed_icon("copy", color=CANVAS_CHROME.icon, size=14))
+        self.copy_button.setToolTip("Copy the path")
+        self.copy_button.setAccessibleName("Copy the path")
+        self.copy_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.copy_button.clicked.connect(lambda: self._emit(COMMAND_COPY_DETAILS))
+        path_layout.addWidget(self.copy_button)
+        path_layout.addStretch(1)
+        self.path_row.setVisible(False)
+        outer.addWidget(self.path_row)
+
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
         button_row.addStretch(1)
@@ -107,6 +136,7 @@ class EmptyStatePanel(QWidget):
             self.title_label.setText("")
             self.detail_label.setText("")
             self.evidence_label.setText("")
+            self.path_row.setVisible(False)
             self.primary_button.setVisible(False)
             self.setAccessibleName("")
             return
@@ -116,6 +146,9 @@ class EmptyStatePanel(QWidget):
         self.detail_label.setVisible(bool(state.detail))
         self.evidence_label.setText("\n".join(state.evidence))
         self.evidence_label.setVisible(bool(state.evidence))
+        self.path_label.setText(state.path)
+        self.path_label.setToolTip(state.path)
+        self.path_row.setVisible(bool(state.path))
 
         if state.primary is not None:
             self.primary_button.setText(state.primary.label)

@@ -13,6 +13,8 @@ from tomography_session_browser.parsers.xml_parser import find_first, parse_xml_
 from tomography_session_browser.services.atlas_metadata import atlas_projection_mismatch, referenced_atlas_stem
 
 LOGGER = logging.getLogger(__name__)
+#: The warning an atlas carries when its metadata is there and no mosaic image is.
+ATLAS_IMAGE_NOT_FOUND_WARNING = "Atlas metadata exists but no Atlas_*.jpg or Atlas_*.mrc was found."
 _TILE_ATLAS_ID_RE = re.compile(r"^Tile_\d+_\d+_(\d+)$")
 
 
@@ -55,7 +57,7 @@ def parse_atlas_folder(path: Path) -> Atlas | None:
     if image_path is None and not dm_path.exists():
         return None
     if image_path is None:
-        warnings.append("Atlas metadata exists but no Atlas_*.jpg or Atlas_*.mrc was found.")
+        warnings.append(ATLAS_IMAGE_NOT_FOUND_WARNING)
 
     alignment_paths = sorted_paths(
         list(path.glob("Overview_Alignment_*.mrc"))
@@ -111,6 +113,7 @@ def parse_atlas_folder(path: Path) -> Atlas | None:
     atlas = Atlas(
         id=safe_id(path),
         image_path=image_path,
+        folder=path,
         mrc_metadata=read_mrc_metadata(image_path) if image_path is not None and image_path.suffix.lower() == ".mrc" else None,
         metadata=metadata,
         tile_paths=tile_paths,

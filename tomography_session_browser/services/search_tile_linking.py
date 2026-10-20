@@ -23,6 +23,10 @@ from tomography_session_browser.services.image_geometry import (
 from tomography_session_browser.services.markers.builders import search_map_markers
 from tomography_session_browser.services.timeline_service import datetime_sort_key
 
+#: How a tile is linked when the search map's own overlay projection finds it:
+#: the expected method. Every other method is a fallback worth naming.
+PROJECTION_LINK_METHOD = "search-map overlay projection"
+
 
 @dataclass(frozen=True, slots=True)
 class _TileCandidate:
@@ -275,9 +279,9 @@ def _match_tile_from_search_map_projection(
         if _search_map_marker_in_tile(search_frame, candidate, marker.x, marker.y)
     ]
     if len(hits) == 1:
-        return hits[0], "search-map overlay projection"
+        return hits[0], PROJECTION_LINK_METHOD
     if hits:
-        return _nearest_projected_tile(search_frame, hits, marker.x, marker.y), "search-map overlay projection + nearest tile"
+        return _nearest_projected_tile(search_frame, hits, marker.x, marker.y), f"{PROJECTION_LINK_METHOD} + nearest tile"
     return None, None
 
 

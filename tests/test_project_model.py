@@ -4,7 +4,6 @@ from tomography_session_browser.ui.window_parts import viewers
 from tomography_session_browser.presentation.workspace import EntityKind
 
 import os
-import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -599,11 +598,11 @@ def test_linked_root_tab_activation_keeps_aggregate_viewer_lists(monkeypatch, tm
     app.processEvents()
 
     assert window.state.review.scope is linked_group
-    assert window.ui.viewer_tabs["Atlas"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Search map"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Search"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Batch position"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Tilt series"].list.topLevelItemCount() == 2
+    assert window.ui.viewer_tabs["Atlas"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Search map"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Search"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Batch position"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Tilt series"].parts.list_pane.rows.counts()[1] == 2
 
     window.state.review.scope = linked_group
     window.state.review.preserve_tree_root_context = False
@@ -612,8 +611,8 @@ def test_linked_root_tab_activation_keeps_aggregate_viewer_lists(monkeypatch, tm
     app.processEvents()
 
     assert window.state.review.scope is linked_group
-    assert window.ui.viewer_tabs["Atlas"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Search map"].list.topLevelItemCount() == 2
+    assert window.ui.viewer_tabs["Atlas"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Search map"].parts.list_pane.rows.counts()[1] == 2
 
     window.ui.tabs.setCurrentIndex(TAB_LABELS.index("Atlas"))
     for _ in range(4):  # the panel follows once the page has painted
@@ -624,11 +623,11 @@ def test_linked_root_tab_activation_keeps_aggregate_viewer_lists(monkeypatch, tm
     displayed_atlas = window.ui.viewer_tabs['Atlas'].parts.tab_selection.current_value
     assert displayed_atlas is not None
     assert window.ui.context_panel._raw_text == window.parts.context.context_description(displayed_atlas)
-    assert window.ui.viewer_tabs["Atlas"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Search map"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Search"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Batch position"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Tilt series"].list.topLevelItemCount() == 2
+    assert window.ui.viewer_tabs["Atlas"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Search map"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Search"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Batch position"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Tilt series"].parts.list_pane.rows.counts()[1] == 2
 
     window.ui.tabs.setCurrentIndex(TAB_LABELS.index("Search map"))
     for _ in range(4):  # the panel follows once the page has painted
@@ -638,11 +637,11 @@ def test_linked_root_tab_activation_keeps_aggregate_viewer_lists(monkeypatch, tm
     displayed_map = window.ui.viewer_tabs['Search map'].parts.tab_selection.current_value
     assert displayed_map is not None
     assert window.ui.context_panel._raw_text == window.parts.context.context_description(displayed_map)
-    assert window.ui.viewer_tabs["Atlas"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Search map"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Search"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Batch position"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Tilt series"].list.topLevelItemCount() == 2
+    assert window.ui.viewer_tabs["Atlas"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Search map"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Search"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Batch position"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Tilt series"].parts.list_pane.rows.counts()[1] == 2
 
     selected_search_tile = collection_samples[1].search_tiles[0]
     window.parts.viewers.viewer_item_selected(selected_search_tile)
@@ -659,11 +658,11 @@ def test_linked_root_tab_activation_keeps_aggregate_viewer_lists(monkeypatch, tm
 
     assert "Atlas  2" == window.ui.tabs.tabText(TAB_LABELS.index("Atlas"))
     assert "Search maps  2" == window.ui.tabs.tabText(TAB_LABELS.index("Search map"))
-    assert window.ui.viewer_tabs["Atlas"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Search map"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Search"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Batch position"].list.topLevelItemCount() == 2
-    assert window.ui.viewer_tabs["Tilt series"].list.topLevelItemCount() == 2
+    assert window.ui.viewer_tabs["Atlas"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Search map"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Search"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Batch position"].parts.list_pane.rows.counts()[1] == 2
+    assert window.ui.viewer_tabs["Tilt series"].parts.list_pane.rows.counts()[1] == 2
 
 
 def test_project_tree_badges_distinguish_linked_atlas_and_collection_groups() -> None:
@@ -820,14 +819,12 @@ def test_collection_context_panel_reports_linked_atlas() -> None:
     app.processEvents()
     text = window.ui.context_panel.toPlainText()
 
-    assert "Atlas: Linked atlas from screening session" in text
-    assert "Sample: Specimen Alpha" in text
-    assert "Sample: Screening grid slot 1" not in text
-    assert "Path:" in text
-    assert "Atlas_Screening_Demo" in text
-    assert "Sample1" in text
-    assert "Atlas.mrc" in text
-    assert "No atlas associated" not in text
+    # The collection's summary says where its data is; which atlas it borrows is
+    # the Atlas card's and the header note's to say (design review B2.6, D33).
+    assert text.startswith("Source folders:")
+    assert "Data_Collection_Demo" in text and "Path:" in text
+    assert "Atlas linkage" not in text and "No atlas associated" not in text
+    assert len(window.state.review.workspace.entities(EntityKind.ATLAS, collection)) == 1, "still linked"
 
 
 def test_collection_session_atlas_scope_includes_only_per_sample_atlas_id_matches() -> None:
@@ -855,7 +852,7 @@ def test_collection_session_atlas_scope_includes_only_per_sample_atlas_id_matche
     app.processEvents()
 
     assert window.state.review.workspace.entities(EntityKind.ATLAS, collection) == [second_atlas]
-    assert "Sample: Specimen Beta" in window.parts.context.context_description(collection)
+    assert "Data_Collection_Demo" in window.parts.context.context_description(collection)
 
 
 def test_collection_context_panel_reports_missing_atlas_only_when_unresolved() -> None:
@@ -869,7 +866,9 @@ def test_collection_context_panel_reports_missing_atlas_only_when_unresolved() -
     window.parts.context.set_context(collection.name, collection)
     app.processEvents()
 
-    assert "Atlas: No atlas associated" in window.ui.context_panel.toPlainText()
+    text = window.ui.context_panel.toPlainText()
+    assert "Atlas" not in text, "a summary does not talk about atlas linkage, found or not"
+    assert "Source folders:" in text
 
 
 def test_multi_sample_linked_atlas_scope_does_not_build_atlas_sparkline() -> None:
@@ -991,7 +990,7 @@ def test_dashboard_scope_returns_to_parent_session_after_tilt_list_selection(tmp
 
     window.ui.tree.setCurrentItem(parent_item)
     window.parts.project.tree_selection_changed(parent_item, None)
-    app.processEvents()
+    wait_for_scope(window)
     assert window.parts.scopes.dashboard_scope_value() is collection
     assert _card_value(session_dashboard_model(window.parts.scopes.dashboard_scope_value()), "Tilt series") == 4
 
@@ -1007,7 +1006,7 @@ def test_dashboard_scope_returns_to_parent_session_after_tilt_list_selection(tmp
     assert window.parts.scopes.dashboard_scope_value() is collection
     assert _card_value(session_dashboard_model(window.parts.scopes.dashboard_scope_value()), "Tilt series") == 4
 
-    window.parts.dashboard.on_dashboard_sample_clicked(collection.samples[0].id)
+    window.parts.dashboard.on_dashboard_scope_requested(collection.samples[0].id)
     assert window.parts.scopes.dashboard_scope_value() is collection.samples[0]
     assert _card_value(session_dashboard_model(window.parts.scopes.dashboard_scope_value()), "Tilt series") == 3
 
@@ -1036,7 +1035,7 @@ def test_dashboard_scope_returns_to_parent_session_after_tilt_list_selection(tmp
     assert not bool(tilt_item.data(0, HIGHLIGHT_ROLE))
 
     viewer = window.ui.viewer_tabs["Tilt series"]
-    viewer.list_filter.setText("manual filter")
+    viewer.set_query("manual filter")
     window.parts.project.project_tree_item_pressed(tilt_item, 0)
     assert window.state.dashboard.dashboard_highlighted_tilt_series_id == tilts[1].id
     window.parts.project.project_tree_item_pressed(tilt_item, 0)
@@ -1048,8 +1047,8 @@ def test_dashboard_scope_returns_to_parent_session_after_tilt_list_selection(tmp
     assert window.ui.tabs.currentIndex() == TAB_LABELS.index("Tilt series")
     # S1 contract change: an incompatible filter is cleared on arrival rather
     # than leaving a single unhidden row behind a count of 0.
-    assert viewer.list_filter.text() == ""
-    assert viewer.list_count.text() == str(viewer.list.topLevelItemCount())
+    assert viewer.query() == ""
+    assert viewer.parts.list_pane.filter_bar.segment(None).text() == f"All {viewer.parts.list_pane.rows.counts()[1]:,}"
     assert window.state.dashboard.dashboard_highlighted_tilt_series_id == tilts[1].id
     assert bool(tilt_item.data(0, HIGHLIGHT_ROLE))
 
@@ -1061,17 +1060,24 @@ def test_dashboard_scope_returns_to_parent_session_after_tilt_list_selection(tmp
 
     window.ui.tree.setCurrentItem(parent_item)
     window.parts.project.tree_selection_changed(parent_item, tilt_item)
-    scope_owner = window.parts.viewers.scope_preparation
-    deadline = time.monotonic() + 30
-    while (scope_owner.running is not None or scope_owner.pending is not None) and time.monotonic() < deadline:
-        app.processEvents()
-        time.sleep(0.001)
-    assert scope_owner.running is None and scope_owner.pending is None, "scope preparation did not finish"
+    wait_for_scope(window)
     app.processEvents()
     assert window.parts.scopes.dashboard_scope_value() is collection
     assert window.state.dashboard.dashboard_highlighted_tilt_series_id is None
     assert not bool(other_tilt_item.data(0, HIGHLIGHT_ROLE))
     assert _card_value(session_dashboard_model(window.parts.scopes.dashboard_scope_value()), "Tilt series") == 4
+
+
+def wait_for_scope(window, timeout_ms: int = 30_000) -> None:
+    """Wait for committed scope publication without private developer tools."""
+    import time
+    deadline = time.monotonic() + timeout_ms / 1000
+    owner = window.parts.viewers.scope_preparation
+    while owner.running is not None or owner.pending is not None:
+        if time.monotonic() > deadline:
+            raise TimeoutError("Scope preparation did not finish")
+        QApplication.processEvents()
+        time.sleep(0.001)
 
 
 def _card_value(model, label: str):
@@ -1228,3 +1234,31 @@ def test_tree_and_report_dialog_word_every_badge_identically() -> None:
         dialog.deleteLater()
     finally:
         window.close()
+
+
+# --- B1.3: "Automatic name" only when a custom name replaced it ----------------
+
+
+def _group(display_name: str, automatic_name: str = "Grid_1"):
+    from tomography_session_browser.presentation.project_tree import ProjectTreeGroup
+
+    return ProjectTreeGroup(
+        key="group", kind="collection", automatic_name=automatic_name,
+        display_name=display_name, sessions=[],
+    )
+
+
+def test_an_unrenamed_group_states_its_name_once() -> None:
+    from tomography_session_browser.presentation.describe.context import describe_project_group
+
+    text = describe_project_group(_group("Grid_1"))
+    assert "Grid_1" not in text, "the page and the Context title name the group"
+    assert "Automatic name" not in text
+
+
+def test_a_renamed_group_also_states_its_automatic_name() -> None:
+    from tomography_session_browser.presentation.describe.context import describe_project_group
+
+    lines = describe_project_group(_group("My grid")).splitlines()
+    assert lines[0] == "Automatic name: Grid_1"
+    assert "My grid" not in "\n".join(lines)

@@ -84,6 +84,12 @@ class ProjectActions(QObject):
         )
 
 
+    def project_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        # A dataset choice is complete on one click. Object rows still need
+        # their second click (or Enter) to activate through the normal route.
+        if isinstance(item.data(0, OBJECT_ROLE), ProjectTreeGroup | Session | Sample | LinkedSampleGroup):
+            self.parts.chrome.close_project_drawer()
+
     def project_tree_item_pressed(self, item: QTreeWidgetItem, column: int) -> None:
         value = item.data(0, OBJECT_ROLE)
         self.state.dashboard.project_tree_tilt_click_timer.stop()
@@ -111,6 +117,7 @@ class ProjectActions(QObject):
         # (``expandsOnDoubleClick``). A scope row toggling here as well was
         # toggled straight back, so a double-click did nothing.
         self.parts.project.activate_project_tree_item(item, toggle_scope=False)
+        self.parts.chrome.close_project_drawer()
 
 
     def project_tree_item_activated(self, item: QTreeWidgetItem, column: int) -> None:
@@ -122,6 +129,7 @@ class ProjectActions(QObject):
         """
 
         self.parts.project.activate_project_tree_item(item)
+        self.parts.chrome.close_project_drawer()
 
 
     def activate_project_tree_item(self, item: QTreeWidgetItem | None, *, toggle_scope: bool = True) -> bool:
@@ -160,7 +168,7 @@ class ProjectActions(QObject):
             self.parts.dashboard.navigate_to_tilt_series(value.id, source="project panel")
             return True
         if isinstance(value, EntityGroup):
-            departure = self.parts.history.current_history_location()
+            departure = self.parts.history.begin_navigation()
             self.parts.viewers.switch_to_group_tab(value.label)
             first_value = next(iter(value.values), None)
             if first_value is not None:
@@ -171,7 +179,7 @@ class ProjectActions(QObject):
             # Atlas, Overview, Search map, Search tile and Batch position all
             # became keyboard-reachable here; previously only a Tilt series
             # responded, and only to a double-click.
-            departure = self.parts.history.current_history_location()
+            departure = self.parts.history.begin_navigation()
             self.parts.viewers.select_viewer_object(value)
             self.parts.history.record_history(departure)
             return True

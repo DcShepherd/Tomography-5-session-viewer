@@ -259,6 +259,7 @@ def test_the_dashboard_and_the_report_count_the_same_things() -> None:
     made the two surfaces look like they were describing different sessions.
     """
 
+    from tomography_session_browser.presentation.dashboard.models import AttributedWarning
     from tomography_session_browser.presentation.warnings import (
         dashboard_warning_groups as _dashboard_warning_groups,
     )
@@ -270,7 +271,7 @@ def test_the_dashboard_and_the_report_count_the_same_things() -> None:
         "alpha_2: NaN values found in frame-dose metadata.",
     ]
 
-    rows = _dashboard_warning_groups(warnings)
+    rows = _dashboard_warning_groups([AttributedWarning(warning) for warning in warnings])
     report_rows = {row.category: row for row in summarise_warnings(warnings)}
 
     assert rows

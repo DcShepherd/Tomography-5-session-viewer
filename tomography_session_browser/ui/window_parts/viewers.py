@@ -6,6 +6,8 @@ from typing import (
 )
 from PySide6.QtCore import (
     QObject,
+    QPoint,
+    QRect,
     QSignalBlocker,
 )
 from PySide6.QtWidgets import (
@@ -14,6 +16,7 @@ from PySide6.QtWidgets import (
 from tomography_session_browser.ui.shell.chrome import (
     TAB_LABELS,
 )
+from tomography_session_browser.domain.identity import entity_key_text
 from tomography_session_browser.domain.markers import (
     ImageMarker,
     SelectionState,
@@ -32,14 +35,6 @@ from tomography_session_browser.presentation.viewer_tabs import (
     VIEWER_TAB_SOURCES,
     prepare_viewer_tabs,
 )
-from tomography_session_browser.services.preview_sources import (
-    atlas_preview_path,
-    batch_position_preview_path,
-    overview_preview_path,
-    search_map_preview_path,
-    search_tile_preview_path,
-    tilt_series_preview_path,
-)
 from tomography_session_browser.services.markers.builders import atlas_lod_markers, markers_for_object
 from tomography_session_browser.services.item_status import (
     ItemListStatus,
@@ -57,12 +52,14 @@ from tomography_session_browser.presentation.context_stack import (
     entity_display_label,
     tab_key_for_display_label,
 )
+from tomography_session_browser.presentation.navigation_history import HistoryLocation
 from tomography_session_browser.presentation.project_tree import (
     ProjectTreeGroup,
     group_contains_value,
     session_key,
 )
 from tomography_session_browser.presentation.describe.context import (
+    describe_loaded_sessions,
     describe_project_group,
 )
 from tomography_session_browser.presentation.prepared_session import (
@@ -73,6 +70,7 @@ from tomography_session_browser.presentation.scopes import (
     LinkedSampleGroup,
 )
 
+from tomography_session_browser.ui.project_tree.widgets import OBJECT_ROLE
 from tomography_session_browser.ui.window_parts.contracts import (
     WindowParts,
     WindowUi,
@@ -93,6 +91,10 @@ class ViewerCoordinator(QObject):
         self.last_prepared: tuple[object, object, PreparedViewerTabs] | None = None
         self.applying_payload: PreparedSessionUi | None = None
         self.applied_tabs: dict[str, tuple[object, object, PreparedViewerTab]] = {}
+        #: The scope whose rows the viewer tabs list right now. Remembered tab
+        #: state is saved under this, never under a scope already installed
+        #: ahead of the rebuild.
+        self.rendered_scope_key: str | None = None
         self.scope_preparation = ScopePreparation(
             publish=self.publish_scope, report_error=self.scope_failed)
 
@@ -117,7 +119,27 @@ class ViewerCoordinator(QObject):
             self.scope_preparation.invalidate()
             self.select_from_left_tree(value, label)
             return
+        # A project-panel selection keeps the tab the reviewer is on: the
+        # selected dataset's data is shown there (U1). Taken once, now.
+        self.request_scope(value, label, destination_tab=TAB_LABELS[self.ui.tabs.currentIndex()])
+
+    def request_scope(self, value: Any, label: str, *, destination_tab: TabKey,
+                      departure: HistoryLocation | None = None) -> None:
+        """Prepare a broad scope, to be published with ``destination_tab`` shown.
+
+        The one path both ordinary tree selection and an explicit route
+        (``open_scope``) take. A request for the scope and tab already being
+        prepared is kept as it is, with its original departure.
+        """
+
         scope = None if isinstance(value, list) else value
+        owner = self.scope_preparation
+        current = owner.pending or owner.running
+        if (current is not None and current.generation == owner.generation
+                and current.workspace is self.state.review.workspace
+                and current.destination_tab == destination_tab
+                and self.scope_key_for(current.scope) == self.scope_key_for(scope)):
+            return
         has_tree_scope, viewer_scope = self.parts.scopes.tree_item_scope_context(self.ui.tree.currentItem())
         self.window.statusBar().showMessage(f"Preparing {label}...")
         viewer_scope = viewer_scope if has_tree_scope else scope
@@ -125,9 +147,53 @@ class ViewerCoordinator(QObject):
         cached = self.last_prepared
         cached_viewer = (cached[2] if cached is not None and cached[0] is self.state.review.workspace
                          and cached[1] is viewer_scope else None)
-        self.scope_preparation.request(self.state.review.workspace, scope, viewer_scope, value, label,
+        owner.request(self.state.review.workspace, scope, viewer_scope, value, label, destination_tab,
+            departure=departure,
             cached_dashboard=self.parts.dashboard_host.model_cache.get(dashboard_cache_key(scope_value)),
             cached_viewer_tabs=cached_viewer)
+
+    def open_scope(self, target: Any, *, destination_tab: TabKey, departure: HistoryLocation | None = None) -> None:
+        """Go to a broad scope on purpose: a summary's own link, not a tree click.
+
+        A tree selection signal carries no history intent and does not fire for
+        the row that is already current, so an explicit route starts here: it
+        selects the target's row without a second request, then prepares the
+        scope, and the history entry is recorded when that request publishes.
+        The scope already committed needs no rebuild: another destination is
+        only a tab change, and the same destination is nothing to do.
+        """
+
+        scope = None if isinstance(target, list) else target
+        if (self.state.review.preserve_tree_root_context
+                and self.scope_key_for(self.state.review.scope) == self.scope_key_for(scope)):
+            if TAB_LABELS[self.ui.tabs.currentIndex()] != destination_tab:
+                self.ui.tabs.setCurrentIndex(TAB_LABELS.index(destination_tab))
+                if departure is not None:
+                    self.parts.history.record_history(departure)
+            return
+        with QSignalBlocker(self.ui.tree):
+            item = self.tree_item_for_scope(target)
+            self.ui.tree.setCurrentItem(item)
+        self.request_scope(target, self.scope_label_for(target), destination_tab=destination_tab, departure=departure)
+
+    def tree_item_for_scope(self, target: Any) -> Any:
+        """The project-tree row showing ``target``, or None when it has none."""
+
+        pending = [self.ui.tree.topLevelItem(index) for index in range(self.ui.tree.topLevelItemCount())]
+        while pending:
+            item = pending.pop(0)
+            value = item.data(0, OBJECT_ROLE)
+            if value is target or (value is not None and not isinstance(value, list)
+                                   and self.parts.scopes.same_context(value, target)):
+                return item
+            pending.extend(item.child(index) for index in range(item.childCount()))
+        return None
+
+    def scope_label_for(self, target: Any) -> str:
+        item = self.tree_item_for_scope(target)
+        if item is not None:
+            return item.text(0)
+        return getattr(target, "label", None) or getattr(target, "name", None) or "dataset"
 
     def publish_scope(self, request: ScopeRequest, payload: PreparedSessionUi) -> None:
         if request.workspace is not self.state.review.workspace:
@@ -139,11 +205,20 @@ class ViewerCoordinator(QObject):
         previous = self.state.review.suppress_viewer_context
         self.state.review.suppress_viewer_context = True
         try:
+            # The destination is applied here, once, before anything renders: a
+            # viewer tab that is already showing stays, and a Session
+            # destination is shown before the viewers rebuild, so the hidden
+            # ones stay lazy. ``applying_payload`` is set, so the change does
+            # not cancel the preparation it belongs to.
+            self.parts.chrome.apply_tab_availability(
+                {key: len(tab.items) for key, tab in payload.viewer_tabs.items()}, request.destination_tab)
             self.select_from_left_tree(request.value, request.label)
             self.window.statusBar().clearMessage()
         finally:
             self.state.review.suppress_viewer_context = previous
             self.applying_payload = None
+        if request.departure is not None:
+            self.parts.history.record_history(request.departure)
 
     def viewer_state_scope_key(self) -> str:
         """A stable identity for the current review scope.
@@ -153,8 +228,16 @@ class ViewerCoordinator(QObject):
         call, so identity would treat one logical scope as many.
         """
 
-        context = self.parts.scopes.viewer_tab_context()
-        if context is None:
+        return self.scope_key_for(self.parts.scopes.viewer_tab_context())
+
+    def scope_key_for(self, context: Any) -> str:
+        """The stable identity of a scope: content, not object identity.
+
+        The loaded-project root (``None``, or the list of sessions) is one
+        scope, "none"; a Python list's identity is never a key.
+        """
+
+        if context is None or isinstance(context, list):
             return "none"
         if isinstance(context, LinkedSampleGroup):
             paths = sorted(self.parts.viewers.history_path_key(sample) for sample in context.samples)
@@ -180,7 +263,9 @@ class ViewerCoordinator(QObject):
     def capture_viewer_states(self) -> None:
         """Remember each tab's selection before a rebuild discards it."""
 
-        scope_key = self.parts.viewers.viewer_state_scope_key()
+        scope_key = self.rendered_scope_key
+        if scope_key is None:
+            return
         for label, tab in self.ui.viewer_tabs.items():
             state = tab.capture_view_state()
             if state.is_empty:
@@ -207,6 +292,7 @@ class ViewerCoordinator(QObject):
         self.scope_preparation.invalidate()
         self.applied_tabs.clear()
         self.last_prepared = None
+        self.rendered_scope_key = None
         self.state.viewer.viewer_states.clear()
         for tab in self.ui.viewer_tabs.values():
             tab.viewer.forget_remembered_views()
@@ -246,8 +332,8 @@ class ViewerCoordinator(QObject):
 
         # The "fallback" context contains every overlayable item across every
         # loaded session. ``Workspace.marker_context`` narrows this to the active
-        # value's parent sample so e.g. Sample A's Search Maps don't bleed onto
-        # Sample B's Atlas. Items with no known parent sample (top-level
+        # value's parent sample so e.g. Alpha Search Maps don't bleed onto
+        # the Beta Atlas. Items with no known parent sample (top-level
         # session atlases) keep the fallback so we don't silently hide them.
         # The workspace keeps it, so the navigation planner shares this one.
         fallback_context = self.state.review.workspace.project_marker_context(failed_tilt_ids)
@@ -297,7 +383,7 @@ class ViewerCoordinator(QObject):
 
         def status_from_payload(payload: PreparedViewerTab) -> Callable[[Any], ItemListStatus]:
             def list_status(value: Any) -> ItemListStatus:
-                return payload.statuses.get(getattr(value, "id", ""), ItemListStatus(status="unknown", summary=""))
+                return payload.statuses.get(entity_key_text(value), ItemListStatus(status="unknown", summary=""))
 
             return list_status
 
@@ -313,6 +399,7 @@ class ViewerCoordinator(QObject):
 
         try:
             labels_to_render = labels or [TabKey.ATLAS, TabKey.OVERVIEW, TabKey.SEARCH_MAP, TabKey.SEARCH, TabKey.BATCH_POSITION, TabKey.TILT_SERIES]
+            self.parts.chrome.apply_tab_availability({key: len(tab.items) for key, tab in tab_payloads.items()})
             current_tab_label = TAB_LABELS[self.ui.tabs.currentIndex()]
             for label in labels_to_render:
                 payload = tab_payloads[label]
@@ -326,13 +413,20 @@ class ViewerCoordinator(QObject):
                 )
                 if (last is not None and last[0] is self.state.review.workspace
                         and last[1] is scope_context and tab.has_same_items(payload.items)
-                        and last[2].statuses == payload.statuses and last[2].sources == payload.sources):
+                        and last[2].statuses == payload.statuses and last[2].sources == payload.sources
+                        and last[2].entries == payload.entries):
                     continue
                 self.applied_tabs[label] = (self.state.review.workspace, scope_context, payload)
-                if payload.items and tab.has_same_items(payload.items):
+                current = tab.parts.tab_selection.current_value
+                page_is_listed = current is None or tab.parts.list_pane.rows.row_for_value(current) is not None
+                remembered = self.parts.viewers.remembered_viewer_state(label)
+                if (payload.items and page_is_listed and tab.has_same_items(payload.items)
+                        and (remembered is None or tab.capture_view_state() == remembered)):
                     # Same rows as before: refresh the marker/status providers
                     # only. Rebuilding the list here would discard selection,
-                    # filter, frame and scroll for no visible gain.
+                    # filter, frame and scroll for no visible gain. An unlisted
+                    # page cannot stand in for a row when the scope changes,
+                    # nor can this scope's selection replace another's memory.
                     if label == TabKey.ATLAS:
                         tab.set_atlas_collection_overlay_provider(
                             atlas_collection_options,
@@ -355,68 +449,14 @@ class ViewerCoordinator(QObject):
                         atlas_collection_options,
                         atlas_collection_visibility_changed,
                     )
-                    self.ui.viewer_tabs[label].set_items(
-                        payload.items,
-                        atlas_preview_path,
-                        self.parts.scopes.label_for,
-                        markers_for=atlas_scoped,
-                        prepared_sources=payload.sources,
-                        auto_load_preview=auto_load_preview,
-                        restore_state=self.parts.viewers.remembered_viewer_state(label),
-                    )
-                elif label == TabKey.OVERVIEW:
-                    self.ui.viewer_tabs[label].set_items(
-                        payload.items,
-                        overview_preview_path,
-                        self.parts.scopes.label_for,
-                        markers_for=scoped,
-                        prepared_sources=payload.sources,
-                        auto_load_preview=auto_load_preview,
-                        restore_state=self.parts.viewers.remembered_viewer_state(label),
-                    )
-                elif label == TabKey.SEARCH_MAP:
-                    self.ui.viewer_tabs[label].set_items(
-                        payload.items,
-                        search_map_preview_path,
-                        self.parts.scopes.label_for,
-                        markers_for=scoped,
-                        item_status_for=status_from_payload(payload),
-                        prepared_sources=payload.sources,
-                        auto_load_preview=auto_load_preview,
-                        restore_state=self.parts.viewers.remembered_viewer_state(label),
-                    )
-                elif label == TabKey.SEARCH:
-                    self.ui.viewer_tabs[label].set_items(
-                        payload.items,
-                        search_tile_preview_path,
-                        self.parts.scopes.label_for,
-                        markers_for=scoped,
-                        item_status_for=status_from_payload(payload),
-                        prepared_sources=payload.sources,
-                        auto_load_preview=auto_load_preview,
-                        restore_state=self.parts.viewers.remembered_viewer_state(label),
-                    )
-                elif label == TabKey.BATCH_POSITION:
-                    self.ui.viewer_tabs[label].set_items(
-                        payload.items,
-                        batch_position_preview_path,
-                        self.parts.scopes.label_for,
-                        markers_for=scoped,
-                        item_status_for=status_from_payload(payload),
-                        prepared_sources=payload.sources,
-                        auto_load_preview=auto_load_preview,
-                        restore_state=self.parts.viewers.remembered_viewer_state(label),
-                    )
-                elif label == TabKey.TILT_SERIES:
-                    self.ui.viewer_tabs[label].set_items(
-                        payload.items,
-                        tilt_series_preview_path,
-                        self.parts.scopes.label_for,
-                        item_status_for=status_from_payload(payload),
-                        prepared_sources=payload.sources,
-                        auto_load_preview=auto_load_preview,
-                        restore_state=self.parts.viewers.remembered_viewer_state(label),
-                    )
+                tab.set_items(
+                    payload.items, VIEWER_TAB_SOURCES[label], self.parts.scopes.label_for,
+                    markers_for=markers_by_label[label], item_status_for=status_from_payload(payload),
+                    prepared_sources=payload.sources, entries=payload.entries,
+                    auto_load_preview=auto_load_preview,
+                    restore_state=self.parts.viewers.remembered_viewer_state(label),
+                )
+            self.rendered_scope_key = self.viewer_state_scope_key()
         finally:
             self.state.review.suppress_viewer_context = previous
         self.parts.context.refresh_context_header()
@@ -454,17 +494,17 @@ class ViewerCoordinator(QObject):
             self.parts.dashboard.set_dashboard_highlighted_tilt_series_id(None)
             self.state.review.scope = value
             self.state.review.preserve_tree_root_context = True
-            # Activate the destination before rebuilding the viewer tabs.
-            # Otherwise the previously visible Overview/Tilt series tab
-            # auto-loads the first item in the new scope, including its
-            # synchronous marker/navigation derivation, even though the user
-            # is being sent to Session.
-            self.ui.tabs.setCurrentIndex(TAB_LABELS.index(TabKey.SESSION))
+            # The publication owner has already shown the destination tab.
             self.parts.viewers.render_viewer_tabs()
             self.parts.dashboard.render_dashboard_for_scope()
             self.parts.chrome.update_tab_counts()
-            self.ui.context_panel.set_title(value.display_name)
-            self.ui.context_panel.set_text(describe_project_group(value))
+
+            def describe_scope() -> None:
+                self.parts.context.show_scope_description(
+                    f"{type(value).__name__}:{id(value)}", value.display_name, lambda: describe_project_group(value)
+                )
+
+            self.show_installed_scope(describe_scope)
             return
         if isinstance(value, list):
             # The "Linked sessions" project-tree root carries the full session
@@ -475,29 +515,30 @@ class ViewerCoordinator(QObject):
             self.parts.dashboard.set_dashboard_highlighted_tilt_series_id(None)
             self.state.review.scope = None  # signals "use the project root scope"
             self.state.review.preserve_tree_root_context = True
-            self.ui.tabs.setCurrentIndex(TAB_LABELS.index(TabKey.SESSION))
             self.parts.viewers.render_viewer_tabs()
             self.parts.dashboard.render_dashboard_for_scope()
             self.parts.chrome.update_tab_counts()
-            # Show a short context-panel summary listing the loaded sessions.
-            summary = "\n".join(
-                [f"Linked sessions ({len(value)}):"] + [f"  - {s.name}" for s in value]
-            )
-            self.ui.context_panel.set_title(label)
-            self.ui.context_panel.set_text(summary)
+
+            def describe_scope() -> None:
+                # The sessions the project holds: their folders and shared settings.
+                self.parts.context.show_scope_description(
+                    f"sessions:{id(value)}", label, lambda: describe_loaded_sessions(value)
+                )
+
+            self.show_installed_scope(describe_scope)
             return
         if isinstance(value, Session | Sample | LinkedSampleGroup):
             self.state.dashboard.dashboard_focus_value = None
             self.parts.dashboard.set_dashboard_highlighted_tilt_series_id(None)
             self.state.review.scope = value
             self.state.review.preserve_tree_root_context = True
-            self.ui.tabs.setCurrentIndex(TAB_LABELS.index(TabKey.SESSION))
             self.parts.viewers.render_viewer_tabs()
-            # Rebuild the Session-tab dashboard for the new scope. The tab is
-            # already active so hidden viewer previews remain lazy.
+            # Rebuild the Session-tab dashboard for the new scope. The
+            # destination tab is already active, so hidden viewer previews
+            # remain lazy.
             self.parts.dashboard.render_dashboard_for_scope()
             self.parts.chrome.update_tab_counts()
-            self.parts.context.set_context(label, value)
+            self.show_installed_scope(lambda: self.parts.context.set_context(label, value))
             return
         if isinstance(value, EntityGroup):
             self.state.dashboard.dashboard_focus_value = None
@@ -535,6 +576,40 @@ class ViewerCoordinator(QObject):
         if isinstance(value, SearchMap | BatchPosition | TiltSeries):
             self.parts.dashboard.render_dashboard_for_scope()
 
+
+    def show_installed_scope(self, describe_scope: Callable[[], None]) -> None:
+        """Point Context at what the active tab shows once a broad scope is installed.
+
+        The Session tab shows the scope's summary. A viewer tab describes the
+        item it displays, or, with nothing to show, the scope: the summary
+        must never sit beside a viewer image.
+        """
+
+        tab = self.ui.viewer_tabs.get(TAB_LABELS[self.ui.tabs.currentIndex()])
+        if tab is None:
+            describe_scope()
+            return
+        value = tab.parts.tab_selection.current_value
+        if value is None:
+            self.parts.context.sync_context_panel_to_active_scope()
+        else:
+            self.parts.context.set_context(self.parts.scopes.label_for(value), value)
+
+
+    def list_column_rect(self) -> QRect | None:
+        """The shown viewer tab's list column in window coordinates, or None.
+
+        None on a page with no such column (the Session summary), and while the
+        list is out of sight (collapsed to the selector, B5.2): the Context
+        drawer then takes its own width.
+        """
+
+        index = self.ui.tabs.currentIndex()
+        tab = self.ui.viewer_tabs.get(TAB_LABELS[index]) if 0 <= index < len(TAB_LABELS) else None
+        panel = None if tab is None else tab.parts.list_pane.list_panel
+        if panel is None or not panel.isVisibleTo(tab) or panel.width() <= 0:
+            return None
+        return QRect(panel.mapTo(self.window, QPoint(0, 0)), panel.size())
 
     def viewer_item_selected(self, value: Any) -> None:
         if self.state.review.suppress_viewer_context:

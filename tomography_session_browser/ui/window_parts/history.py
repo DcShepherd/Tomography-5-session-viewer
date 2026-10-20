@@ -5,6 +5,7 @@ from typing import (
 )
 from PySide6.QtCore import (
     QObject,
+    QSignalBlocker,
     QTimer,
 )
 from PySide6.QtWidgets import (
@@ -13,7 +14,6 @@ from PySide6.QtWidgets import (
 from tomography_session_browser.ui.shell.chrome import (
     TAB_LABELS,
 )
-from tomography_session_browser.ui.viewer.viewer_tab import ViewerTab
 from tomography_session_browser.presentation.navigation_history import (
     HistoryLocation,
 )
@@ -48,12 +48,43 @@ class HistoryController(QObject):
             scope_key=self.parts.viewers.viewer_state_scope_key(),
             tab=tab,
             object_type=type(current).__name__ if current is not None else "",
-            object_id=(state.object_id if state is not None else "") or "",
+            object_key=(state.object_key if state is not None else "") or "",
             marker_id=(state.marker_id if state is not None else "") or "",
             frame_index=state.frame_index if state is not None else None,
             filter_text=state.filter_text if state is not None else "",
+            filter_keys=state.filter_keys if state is not None else None,
+            filter_scope_label=state.filter_scope_label if state is not None else "",
             label=self.parts.scopes.label_for(current) if current is not None else "",
+            list_anchor_key=(state.list_anchor_key if state is not None else "") or "",
+            list_anchor_offset=state.list_anchor_offset if state is not None else 0,
         )
+
+
+    def clear_navigation_message(self) -> None:
+        """End the last route's arrival or refusal message, if it is still showing.
+
+        That message says where the last jump went or why it refused, so it
+        ends when the next navigation begins. Only that message is cleared: a
+        status shown for other work (a report being generated) stays.
+        """
+
+        posted = self.state.history.navigation_message
+        self.state.history.navigation_message = ""
+        status_bar = self.window.statusBar()
+        if posted and status_bar.currentMessage() == posted:
+            status_bar.clearMessage()
+
+
+    def begin_navigation(self) -> HistoryLocation | None:
+        """Start a route that records history: end the previous route's
+        message, and snapshot where the reviewer is going from.
+
+        Every such route calls this first, before it posts its own message, so
+        a message never outlives the navigation that follows it.
+        """
+
+        self.parts.history.clear_navigation_message()
+        return self.parts.history.current_history_location()
 
 
     def record_history(self, departure: HistoryLocation | None = None) -> None:
@@ -100,21 +131,33 @@ class HistoryController(QObject):
     ) -> bool:
         if location is None:
             return False
+        self.parts.history.clear_navigation_message()
         previous = self.state.history.suppress_history_record
         self.state.history.suppress_history_record = True
         try:
             scope = self.parts.history.scope_for_history_key(location.scope_key)
             if scope is not None and scope is not self.state.review.scope:
+                # The tabs list what the project tree shows, so its row follows
+                # the scope (without announcing a selection), then the views.
+                with QSignalBlocker(self.ui.tree):
+                    self.ui.tree.setCurrentItem(self.parts.viewers.tree_item_for_scope(scope))
                 self.state.review.scope = scope
                 self.parts.viewers.render_viewer_tabs()
+                self.parts.dashboard.render_dashboard_for_scope()
+                self.parts.chrome.update_tab_counts()
             if location.tab in TAB_LABELS:
                 self.ui.tabs.setCurrentIndex(TAB_LABELS.index(location.tab))
             viewer_tab = self.ui.viewer_tabs.get(location.tab)
             if viewer_tab is not None:
-                viewer_tab.list_filter.setText(location.filter_text)
-                value = self.parts.history.object_for_history(viewer_tab, location.object_id)
+                viewer_tab.set_query(location.filter_text, row_keys=location.filter_keys,
+                                     scope_label=location.filter_scope_label)
+                value = viewer_tab.parts.list_pane.rows.value_for_key(location.object_key)
                 if value is not None:
                     self.parts.viewers.select_viewer_object(value)
+                    if location.list_anchor_key:
+                        viewer_tab.parts.tab_selection.restore_list_anchor(
+                            location.list_anchor_key, location.list_anchor_offset
+                        )
                     if location.marker_id:
                         viewer_tab.select_marker(location.marker_id, arrive=True)
                     if location.frame_index is not None:
@@ -136,16 +179,6 @@ class HistoryController(QObject):
         return True
 
 
-    @staticmethod
-    def object_for_history(viewer_tab: ViewerTab, object_id: str) -> Any | None:
-        if not object_id:
-            return None
-        for item in viewer_tab.parts.tab_selection.items:
-            if str(getattr(item, "id", "")) == object_id:
-                return item
-        return None
-
-
     def scope_for_history_key(self, scope_key: str) -> Scope:
         """Resolve a stored scope key back to a live scope object.
 
@@ -156,15 +189,10 @@ class HistoryController(QObject):
 
         if not scope_key or scope_key == "none":
             return None
-        previous = self.state.review.scope
-        matches: list[Scope] = []
-        try:
-            for candidate in self.parts.history.candidate_history_scopes():
-                self.state.review.scope = candidate
-                if self.parts.viewers.viewer_state_scope_key() == scope_key:
-                    matches.append(candidate)
-        finally:
-            self.state.review.scope = previous
+        matches = [
+            candidate for candidate in self.parts.history.candidate_history_scopes()
+            if self.parts.viewers.scope_key_for(candidate) == scope_key
+        ]
         return matches[0] if len(matches) == 1 else None
 
 

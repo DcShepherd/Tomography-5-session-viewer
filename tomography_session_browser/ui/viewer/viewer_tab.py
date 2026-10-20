@@ -1,6 +1,6 @@
 """Viewer tab for the image viewer."""
 from __future__ import annotations
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 from PySide6.QtCore import QEvent, QObject, QRect, Qt, QThreadPool, QTimer, Signal
@@ -9,6 +9,8 @@ from PySide6.QtWidgets import QTreeWidgetItem, QVBoxLayout, QWidget
 from tomography_session_browser.services.preview_sources import PreviewSources
 from tomography_session_browser.domain.markers import ImageMarker
 from tomography_session_browser.presentation.empty_states import EmptyState
+from tomography_session_browser.presentation.viewer_entries import Entry
+from tomography_session_browser.presentation.design_tokens import SPACE_S
 from tomography_session_browser.ui.widgets.empty_state_panel import EmptyStatePanel
 from tomography_session_browser.services.item_status import ItemListStatus
 from tomography_session_browser.ui.viewer.constants import MAX_PREVIEW_DIMENSION, MRC_JPEG_FALLBACK_GRACE_MS
@@ -30,6 +32,9 @@ class ViewerTab(QWidget):
 
     empty_state_action_requested = Signal(str)
 
+    #: The list's filter changed: the whole query, status tag included.
+    query_changed = Signal(str)
+
     header_title_changed = Signal(str)
 
     def __init__(
@@ -40,7 +45,7 @@ class ViewerTab(QWidget):
         show_list: bool = True,
         show_tilt_controls: bool = False,
         on_item_selected: Callable[[Any], None] | None = None,
-        on_frame_changed: Callable[[Any, int, int], None] | None = None,
+        on_frame_changed: Callable[[Any, int | None, int], None] | None = None,
         tilt_angle_for: Callable[[Any, int], str | None] | None = None,
         markers_for: Callable[[Any], list[ImageMarker]] | None = None,
         on_marker_selected: Callable[[ImageMarker], None] | None = None,
@@ -53,6 +58,8 @@ class ViewerTab(QWidget):
         frames_share_zoom: bool = False,
         navigation_actions_for: Callable[[Any], list[ViewerNavigationAction]] | None = None,
         on_navigation_requested: Callable[[Any, str], None] | None = None,
+        status_segments: tuple[str, ...] = ("failed", "complete"),
+        show_exposure_chooser: bool = False,
     ) -> None:
 
         self._constructed = False
@@ -83,6 +90,7 @@ class ViewerTab(QWidget):
         self.parts.overlay_panel.show_marker_controls = show_marker_controls
         self.parts.overlay_panel.atlas_lod = atlas_lod
         self.parts.viewer_header.navigation_actions_for = navigation_actions_for
+        self.parts.viewer_header.show_exposure_chooser = show_exposure_chooser
         self.parts.viewer_header.on_navigation_requested = on_navigation_requested
         self.parts.list_pane.item_status_for: Callable[[Any], ItemListStatus] | None = None
         self.parts.tab_selection.selected_marker_id_override: str | None = None
@@ -108,7 +116,6 @@ class ViewerTab(QWidget):
         self.parts.mrc_loading.current_mrc_max_size = MAX_PREVIEW_DIMENSION
         self.parts.mrc_loading.request_id = 0
         self.parts.mrc_loading.pending_fallback_request: tuple[int, Path, int, Path, tuple[str, int, int | None]] | None = None
-        self.parts.frame_scrubber.pending_slice_index = 0
         self.parts.mrc_loading.mrc_signals = MrcLoadSignals()
         self.parts.mrc_loading.mrc_signals.loaded.connect(self._mrc_loaded)
         self.parts.mrc_loading.mrc_signals.failed.connect(self._mrc_failed)
@@ -124,7 +131,7 @@ class ViewerTab(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setSpacing(SPACE_S)
         self.viewer = ImagePreviewView(self)
         self.viewer.set_atlas_lod_enabled(atlas_lod)
         self.viewer.set_pan_through_marker_types(pan_through_marker_types)
@@ -147,14 +154,28 @@ class ViewerTab(QWidget):
         self.parts.overlay_panel.create_widgets(show_marker_controls, atlas_lod)
         self.parts.viewer_header.create_linked_strip(header)
         self.parts.canvas_controls.connect_controls()
-        self.parts.list_pane.create_widgets(show_list)
+        self.parts.list_pane.create_widgets(show_list, status_segments)
+        status_policy = self.status.sizePolicy()
+        status_policy.setRetainSizeWhenHidden(show_tilt_controls)
+        self.status.setSizePolicy(status_policy)
         viewer_panel = self.parts.canvas_controls.create_canvas(zoom_label_width, atlas_lod, show_tilt_controls)
         splitter = self.parts.list_pane.create_splitter(viewer_panel, show_list)
         header.addLayout(controls)
         layout.addLayout(header)
         layout.addWidget(self.parts.viewer_header.linked_strip)
+        layout.addWidget(self.parts.viewer_header.exposure_chooser)
+        layout.addWidget(self.parts.viewer_header.linked_reason)
+        layout.addWidget(self.parts.list_pane.compact_row)
         layout.addWidget(splitter, stretch=1)
         layout.addWidget(self.status)
+        focus_order = [
+            self.list, *self.parts.viewer_header.navigation_buttons.values(),
+            self.parts.viewer_header.navigation_menu_button, self.viewer,
+            self.overlay_button, self.export_image_button, self.zoom_in_button,
+            self.zoom_out_button, self.fit_button,
+        ]
+        for before, after in zip(focus_order, focus_order[1:]):
+            QWidget.setTabOrder(before, after)
         self._constructed = True
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt signature
@@ -255,8 +276,23 @@ class ViewerTab(QWidget):
     def held_markers(self, value: Any) -> list[ImageMarker] | None:
         return self.parts.tab_selection.held_markers(value)
 
-    def _filter_list(self, text: str) -> None:
+    def _filter_list(self, text: str | None = None) -> None:
         return self.parts.list_pane.filter_list(text)
+
+    def query(self) -> str:
+        """The list's filter, whole (``is:failed alpha``)."""
+
+        return self.parts.list_pane.query()
+
+    def set_query(self, text: str, *, notify: bool = True,
+                  row_keys: frozenset[str] | None = None, scope_label: str = "") -> None:
+        """Make ``text`` the list's filter; ``set_query("")`` clears all of it."""
+
+        self.parts.list_pane.set_query(text, notify=notify, row_keys=row_keys, scope_label=scope_label)
+
+    def filter_description(self) -> str:
+        """The visible status/text query and any summary scope restriction."""
+        return self.parts.list_pane.filter_bar.description()
 
     def _install_frame_shortcuts(self) -> None:
         return self.parts.frame_scrubber.install_frame_shortcuts()
@@ -316,9 +352,6 @@ class ViewerTab(QWidget):
     def capture_view_state(self) -> ViewerViewState:
         return self.parts.tab_selection.capture_view_state()
 
-    def _index_of_object_id(self, object_id: str | None) -> int | None:
-        return self.parts.tab_selection.index_of_object_id(object_id)
-
     def _apply_restored_state(
         self,
         state: ViewerViewState,
@@ -338,8 +371,9 @@ class ViewerTab(QWidget):
         prepared_sources: dict[str, PreviewSources] | None = None,
         auto_load_preview: bool = True,
         restore_state: ViewerViewState | None = None,
+        entries: Sequence[Entry] | None = None,
     ) -> None:
-        return self.parts.tab_selection.set_items(items, sources_for, label_for, markers_for=markers_for, item_status_for=item_status_for, prepared_sources=prepared_sources, auto_load_preview=auto_load_preview, restore_state=restore_state)
+        return self.parts.tab_selection.set_items(items, sources_for, label_for, markers_for=markers_for, item_status_for=item_status_for, prepared_sources=prepared_sources, auto_load_preview=auto_load_preview, restore_state=restore_state, entries=entries)
 
     def _veil_refilled_list(self) -> None:
         return self.parts.tab_selection.veil_refilled_list()
@@ -471,32 +505,20 @@ class ViewerTab(QWidget):
     def _remove_all_overlays(self) -> None:
         return self.parts.overlay_panel.remove_all_overlays()
 
-    def _marker_type_toggled(self, marker_type: str) -> None:
-        return self.parts.overlay_panel.marker_type_toggled(marker_type)
-
-    def _atlas_lod_toggled(self, key: str) -> None:
-        return self.parts.overlay_panel.atlas_lod_toggled(key)
-
     def _marker_legend_toggled(self) -> None:
         return self.parts.overlay_panel.marker_legend_toggled()
 
     def _update_marker_type_availability(self, markers: list[ImageMarker]) -> None:
         return self.parts.overlay_panel.update_marker_type_availability(markers)
 
-    def _marker_unavailable_reason(self, marker_type: str) -> str | None:
-        return self.parts.overlay_panel.marker_unavailable_reason(marker_type)
-
-    def _effective_marker_type_visible(self, marker_type: str) -> bool:
-        return self.parts.overlay_panel.effective_marker_type_visible(marker_type)
-
-    def _apply_marker_type_visibility(self, marker_type: str) -> None:
-        return self.parts.overlay_panel.apply_marker_type_visibility(marker_type)
-
     def _set_atlas_collection_list_visible(self, visible: bool) -> None:
         return self.parts.overlay_panel.set_atlas_collection_list_visible(visible)
 
     def _constrain_overlay_panel(self) -> None:
         return self.parts.overlay_panel.constrain_overlay_panel()
+
+    def _open_panel_rect(self) -> QRect | None:
+        return self.parts.overlay_panel.open_panel_rect()
 
     def close_overlay_panel(self) -> bool:
         return self.parts.overlay_panel.close_overlay_panel()

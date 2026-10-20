@@ -21,6 +21,7 @@ KIND_NO_SESSION = "no_session"
 KIND_NO_ENTITIES = "no_entities"
 KIND_FILTER_NO_RESULTS = "filter_no_results"
 KIND_MISSING_PREVIEW = "missing_preview"
+KIND_IMAGE_MISSING = "image_missing"
 KIND_LOAD_FAILED = "load_failed"
 KIND_UNRESOLVED_RELATIONSHIP = "unresolved_relationship"
 
@@ -55,6 +56,8 @@ class EmptyState:
     # is still readable. The reviewer should never be told only what is absent.
     evidence: tuple[str, ...] = ()
     copyable_details: str = ""
+    #: A file or folder to show as it is, with a button that copies it.
+    path: str = ""
 
     @property
     def has_primary(self) -> bool:
@@ -92,17 +95,14 @@ def no_entities_state(*, scope_name: str, entity_label: str) -> EmptyState:
 def filter_no_results_state(
     *,
     filter_text: str,
-    total: int,
     entity_label: str = "items",
 ) -> EmptyState:
-    """A filter that matched nothing. The count must stay honest: ``0 of N``."""
+    """No matching rows; the list owns the count and the Clear action."""
 
     return EmptyState(
         kind=KIND_FILTER_NO_RESULTS,
-        title=f"0 of {total} {entity_label.lower()}",
-        detail=f"No {entity_label.lower()} match “{filter_text}”.",
-        primary=EmptyStateAction("Clear filter", COMMAND_CLEAR_FILTER),
-        evidence=(f"{total} {entity_label.lower()} are present in this scope.",),
+        title=f"No matching {entity_label.lower()}",
+        detail=f"No {entity_label.lower()} match “{filter_text}”. Change or clear the filter in the list.",
     )
 
 
@@ -141,6 +141,24 @@ def missing_preview_state(
         ),
         evidence=tuple(evidence),
         copyable_details=expected_path,
+    )
+
+
+def image_missing_state(*, explanation: str, path: str = "") -> EmptyState:
+    """An object whose image file is not there, though its record is.
+
+    The sentence says what was looked for and not found; the path is where it
+    was looked for, to read and to copy. The record is still inspectable, so the
+    one primary action opens it.
+    """
+
+    return EmptyState(
+        kind=KIND_IMAGE_MISSING,
+        title="No image to show",
+        detail=explanation,
+        primary=EmptyStateAction("Show metadata", COMMAND_SHOW_METADATA),
+        copyable_details=path,
+        path=path,
     )
 
 
@@ -198,7 +216,6 @@ def viewer_empty_state(
     if total_items and filter_text:
         return filter_no_results_state(
             filter_text=filter_text,
-            total=total_items,
             entity_label=entity_label,
         )
     return no_entities_state(scope_name=scope_name, entity_label=entity_label)

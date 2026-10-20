@@ -24,10 +24,23 @@ from tomography_session_browser.services.item_status import (
     STATUS_DONE as RECORDED_DONE,
     STATUS_FAILED_LABEL as RECORDED_FAILED,
     STATUS_PARTIAL as RECORDED_PARTIAL,
+    ItemStatusContext,
+    display_status_label,
+    item_list_status,
     normalise_recorded_batch_status,
     search_map_tile_counts,
 )
 from tomography_session_browser.services.tilt_series_validation import SOURCE_MRC_EXTENDED, SOURCE_SESSION_METADATA
+
+
+def search_map_is_incomplete(search_map: SearchMap, context: ItemStatusContext) -> bool:
+    """Whether the Search map tab's row for ``search_map`` reads Incomplete.
+
+    The dashboard counts a search map as incomplete by the list's own verdict,
+    so the count and the rows a drill-down opens cannot disagree.
+    """
+
+    return display_status_label(item_list_status(search_map, context).status) == "Incomplete"
 
 
 def _tile_status_counts(

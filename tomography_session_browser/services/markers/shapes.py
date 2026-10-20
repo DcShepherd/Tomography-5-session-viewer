@@ -34,7 +34,8 @@ def bbox_intersects(image_size: tuple[int, int], bbox: tuple[float, float, float
     return x + width >= 0 and y + height >= 0 and x <= image_width and y <= image_height
 
 
-def _marker_intersects_image(image_size: tuple[int, int], marker: ImageMarker) -> bool:
+def marker_intersects_image(image_size: tuple[int, int], marker: ImageMarker) -> bool:
+    """Whether any of the marker's bounds lie on the image, in its pixel space."""
     if marker.bbox is not None:
         return bbox_intersects(image_size, marker.bbox)
     if marker.polygon:
@@ -64,7 +65,7 @@ def filter_off_image_template_markers(
 ) -> None:
     kept: list[ImageMarker] = []
     for marker in markers:
-        if _marker_intersects_image(image_size, marker):
+        if marker_intersects_image(image_size, marker):
             kept.append(marker)
             continue
         LOGGER.debug(
@@ -85,7 +86,7 @@ def filter_off_image_markers(
 ) -> None:
     kept: list[ImageMarker] = []
     for marker in markers:
-        if _marker_intersects_image(image_size, marker):
+        if marker_intersects_image(image_size, marker):
             kept.append(marker)
             continue
         LOGGER.debug(

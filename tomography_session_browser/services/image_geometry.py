@@ -6,7 +6,7 @@ precedence), the Atlas node-table affine, stage-to-pixel projection, and the
 two Tomography 5 point corrections. ``services/markers`` builds markers on it;
 the search-tile linking service uses it to place tiles on a search map. Moved here from
 the marker service unchanged: a change to any of it moves every overlay, so it
-needs regression tests and a visual check.
+needs regression tests and a visual check (AGENTS.md).
 """
 
 from __future__ import annotations

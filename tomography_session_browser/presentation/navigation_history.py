@@ -28,25 +28,34 @@ class HistoryLocation:
     """One place the reviewer explicitly navigated to.
 
     ``viewport`` is deliberately absent: S2 already remembers the crop per
-    logical image, so restoring ``object_id`` restores the zoom and pan with
+    logical image, so restoring ``object_key`` restores the zoom and pan with
     it. Storing a second copy here would give two sources of truth for the
     same thing and let them disagree.
+
+    ``object_key`` is ``domain.identity.entity_key_text`` of the object, so two
+    objects sharing an ``id`` stay two places. The list anchor (the object row
+    at the top of the list and its offset) puts the list back where it was; it
+    is not part of what makes a place the same place.
     """
 
     scope_key: str
     tab: str
     object_type: str = ""
-    object_id: str = ""
+    object_key: str = ""
     marker_id: str = ""
     frame_index: int | None = None
     filter_text: str = ""
+    filter_keys: frozenset[str] | None = None
+    filter_scope_label: str = ""
     label: str = ""
+    list_anchor_key: str = ""
+    list_anchor_offset: int = 0
 
     def same_place_as(self, other: "HistoryLocation | None") -> bool:
         """Whether two entries denote the same destination.
 
-        Filter text and frame are excluded: arriving at the same row with a
-        different filter is not a new place to go back to.
+        Filter text, frame and list anchor are excluded: arriving at the same
+        row with a different filter or scroll is not a new place to go back to.
         """
 
         if other is None:
@@ -54,7 +63,7 @@ class HistoryLocation:
         return (
             self.scope_key == other.scope_key
             and self.tab == other.tab
-            and self.object_id == other.object_id
+            and self.object_key == other.object_key
             and self.marker_id == other.marker_id
         )
 

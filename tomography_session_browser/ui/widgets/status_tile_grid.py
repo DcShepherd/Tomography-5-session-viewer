@@ -6,21 +6,29 @@ segment per item, colour-coded by status, stretched to fill the card;
 otherwise it is one proportional bar with the same breakdown. Hover shows an
 item's tooltip; clicking a segment emits ``tile_clicked(item_id, destination)``.
 
+Items carry an optional ``group`` (a tilt series' batch position). The band
+keeps each group's items together with a wider gap between groups, and can
+name each group under its segments; a band whose items have no group is the
+one-group case and looks as it always did. Gaps of both widths count against
+the minimum segment width, so a band that cannot afford its groups collapses
+to the proportional bar like any other that is too dense.
+
 It used to draw squares of at most 18 px, so 12 atlases filled a third of
 the card at 4K, and a card that fell back to a thinner bar sat beside one
 showing squares in the same row.
 
-Used by :class:`tomography_session_browser.ui.widgets.stat_card.StatCard`.
+Used by the sample summary's cards (``ui/dashboard/sample_cards.py``).
 The PDF report draws its own tile grid (``reports.graphics``), unchanged.
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QHelpEvent, QKeyEvent, QMouseEvent, QPainter, QPen
+from PySide6.QtGui import QColor, QHelpEvent, QKeyEvent, QMouseEvent, QPainter, QPen, QResizeEvent
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 from tomography_session_browser.presentation.dashboard.models import TILE_STATUS_COMPLETE, TILE_STATUS_FAILED, TILE_STATUS_MISSING, TILE_STATUS_NEUTRAL, TILE_STATUS_WARNING, StatusTileModel
+from tomography_session_browser.presentation.design_tokens import SPACE_S, SPACE_XS
 from tomography_session_browser.ui.theme import current_palette
 
 
@@ -31,8 +39,24 @@ BAND_HEIGHT_PX = 12
 # proportional bar, so the user sees a breakdown instead of specks.
 MIN_SEGMENT_PX = 6
 
-# Spacing between segments in pixels.
+# Spacing between segments of one group, in pixels.
 TILE_GAP = 3
+
+# Spacing between groups.
+GROUP_GAP = SPACE_S
+
+# Fewest characters (the ellipsis included) worth drawing of a group's name.
+MIN_LABEL_CHARS = 4
+
+
+def grouped(items: list[StatusTileModel]) -> list[tuple[str, list[StatusTileModel]]]:
+    """``items`` gathered by group, groups in order of first appearance and
+    each group's items in the order given."""
+
+    groups: dict[str, list[StatusTileModel]] = {}
+    for item in items:
+        groups.setdefault(item.group, []).append(item)
+    return list(groups.items())
 
 
 class StatusTileGrid(QWidget):
@@ -49,11 +73,18 @@ class StatusTileGrid(QWidget):
         items: list[StatusTileModel],
         *,
         accent: QColor | str | None = None,
+        band_height: int = BAND_HEIGHT_PX,
+        group_labels: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._items = list(items)
+        self._groups = grouped(items)
+        # What is shown, in the order it is shown: the groups, one after another.
+        self._items = [item for _group, members in self._groups for item in members]
+        self._band_height = band_height
+        self._group_labels = group_labels and any(group for group, _members in self._groups)
         self._tile_rects: list[tuple[QRect, StatusTileModel]] = []
+        self._label_rects: list[tuple[QRect, str]] = []
         self._tile_size = 0
         self._has_visible_grid = bool(self._items)
         self._columns = 1
@@ -65,7 +96,8 @@ class StatusTileGrid(QWidget):
         # The band is fixed-height and top-aligned; the parent card decides
         # how much vertical space it gets. Width expands to fill the card.
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setMinimumHeight(BAND_HEIGHT_PX + 2)
+        self.setMinimumHeight(self._band_height + 2)
+        self._sync_height()
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setObjectName("statusTileGrid")
@@ -86,6 +118,7 @@ class StatusTileGrid(QWidget):
         # The card's legend dot for a neutral item, and the PDF's tile.
         self._color_unknown = QColor(theme.unknown)
         self._color_neutral = QColor(theme.chart_grey)
+        self._color_label = QColor(theme.text_muted)
 
     def refresh_theme(self, *, accent: QColor | str | None = None) -> None:
         """Recolour for the current theme; ``accent`` replaces a fixed accent."""
@@ -98,7 +131,12 @@ class StatusTileGrid(QWidget):
     # -------------------------------------------------------------------- API
 
     def items(self) -> list[StatusTileModel]:
+        """The items in the order the band shows them (grouped)."""
+
         return list(self._items)
+
+    def groups(self) -> list[tuple[str, list[StatusTileModel]]]:
+        return [(group, list(members)) for group, members in self._groups]
 
     def has_visible_grid(self) -> bool:
         """Whether the grid currently has room to render individual tiles.
@@ -120,7 +158,27 @@ class StatusTileGrid(QWidget):
 
         return list(self._tile_rects)
 
+    def tooltip_for(self, tile: StatusTileModel) -> str:
+        """The item's tooltip, and its batch position when the band names them:
+        the name under a one-series group may have had to be shortened."""
+
+        if not (self._group_labels and tile.group):
+            return tile.tooltip
+        origin = "inferred from the series name" if tile.group_inferred else "recorded"
+        return f"{tile.tooltip}\nBatch position {tile.group} ({origin})"
+
+    def label_rects(self) -> list[tuple[QRect, str]]:
+        """The group names drawn at the last paint, each with the room it was given."""
+
+        return list(self._label_rects)
+
     # ----------------------------------------------------------------- layout
+
+    def _gaps_width(self) -> int:
+        """Space the gaps take: ``TILE_GAP`` inside a group, ``GROUP_GAP`` between."""
+
+        boundaries = max(0, len(self._groups) - 1)
+        return TILE_GAP * max(0, len(self._items) - 1 - boundaries) + GROUP_GAP * boundaries
 
     def segment_width(self, width: int) -> float:
         """Width each item's segment gets across ``width``, gaps included."""
@@ -128,29 +186,88 @@ class StatusTileGrid(QWidget):
         count = len(self._items)
         if count == 0 or width <= 0:
             return 0.0
-        return (width - TILE_GAP * (count - 1)) / count
+        return (width - self._gaps_width()) / count
 
     def segment_rects(self, width: int) -> list[QRect]:
         """One rectangle per item, together spanning exactly ``width``."""
 
         segment = self.segment_width(width)
-        step = segment + TILE_GAP
         rects = []
-        for index in range(len(self._items)):
-            left = round(index * step)
-            right = round(index * step + segment)
-            rects.append(QRect(left, 0, max(1, right - left), BAND_HEIGHT_PX))
+        index = 0
+        for boundary, (_group, members) in enumerate(self._groups):
+            for _member in members:
+                # Items before this one, and the gaps before it: one per
+                # neighbouring pair, wider where the pair straddles a group.
+                left_edge = index * segment + (index - boundary) * TILE_GAP + boundary * GROUP_GAP
+                left = round(left_edge)
+                right = round(left_edge + segment)
+                rects.append(QRect(left, 0, max(1, right - left), self._band_height))
+                index += 1
         return rects
+
+    def group_spans(self, rects: list[QRect]) -> list[tuple[str, int, int]]:
+        """``(group, left, right)`` for each group, from its segments' rectangles."""
+
+        spans = []
+        first = 0
+        for group, members in self._groups:
+            last = first + len(members) - 1
+            spans.append((group, rects[first].left(), rects[last].right()))
+            first += len(members)
+        return spans
+
+    def _segmented(self) -> bool:
+        return self.segment_width(self.width()) >= MIN_SEGMENT_PX
+
+    def _label_row_height(self) -> int:
+        return SPACE_XS + self.fontMetrics().height()
+
+    def _wanted_height(self) -> int:
+        """Tall enough for the band, and for the group names while they are drawn."""
+
+        if self._group_labels and (self._segmented() or self.width() <= 0):
+            return self._band_height + self._label_row_height() + 2
+        return self._band_height + 2
+
+    def _sync_height(self) -> None:
+        # A band without names keeps the height its card gave it; one with
+        # names gives the row back when it collapses to the proportional bar.
+        if not self._group_labels:
+            return
+        height = self._wanted_height()
+        if self.minimumHeight() != height or self.maximumHeight() != height:
+            self.setFixedHeight(height)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 — Qt signature
+        super().resizeEvent(event)
+        self._sync_height()
+
+    def event(self, event: QEvent) -> bool:  # noqa: N802 — Qt signature
+        # Qt sends a ToolTip event once the pointer rests. The band has no
+        # tooltip of its own, so the event used to travel on to the parent
+        # card, whose help text replaced the item's tooltip that
+        # mouseMoveEvent had just shown. Answering it here keeps the item's.
+        # Off the band it still travels on, so the card's help shows there.
+        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
+            hit = self._hit_at(event.pos())
+            if hit is not None:
+                zone, tile = hit
+                QToolTip.showText(event.globalPos(), self.tooltip_for(tile), self, zone)
+                return True
+        if event.type() == QEvent.Type.FontChange:
+            self._sync_height()
+        return super().event(event)
 
     # ------------------------------------------------------------------ paint
 
     def paintEvent(self, event) -> None:  # noqa: N802 — Qt signature
         self._tile_rects.clear()
+        self._label_rects.clear()
         if not self._items:
             self._has_visible_grid = False
             return
 
-        if self.segment_width(self.width()) < MIN_SEGMENT_PX:
+        if not self._segmented():
             # Too many items for a segment each. Previously the widget simply
             # drew nothing, so a card with (say) 85 tilt series showed a
             # conspicuous blank where its neighbours showed a tile grid.
@@ -164,13 +281,14 @@ class StatusTileGrid(QWidget):
         self._tile_size = int(self.segment_width(self.width()))
         # Arrow keys move along the one row.
         self._columns = len(self._items)
-        radius = min(3, BAND_HEIGHT_PX // 4)
+        radius = min(3, self._band_height // 4)
+        rects = self.segment_rects(self.width())
 
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setPen(Qt.PenStyle.NoPen)
-            for index, (rect, tile) in enumerate(zip(self.segment_rects(self.width()), self._items)):
+            for index, (rect, tile) in enumerate(zip(rects, self._items)):
                 self._tile_rects.append((rect, tile))
                 painter.setBrush(self._color_for(tile.status))
                 painter.drawRoundedRect(rect, radius, radius)
@@ -179,8 +297,33 @@ class StatusTileGrid(QWidget):
                     painter.setPen(QPen(QColor(current_palette().text_strong), 2))
                     painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), radius, radius)
                     painter.setPen(Qt.PenStyle.NoPen)
+            if self._group_labels:
+                self._paint_group_labels(painter, rects)
         finally:
             painter.end()
+
+    def _paint_group_labels(self, painter: QPainter, rects: list[QRect]) -> None:
+        """Each group's name under its segments, in the room the group has.
+
+        A name that does not fit is shortened with an ellipsis; one that would
+        be left with fewer than ``MIN_LABEL_CHARS`` characters is not drawn,
+        since a stub names nothing. The segments' tooltips and the tab list
+        still carry what the band cannot.
+        """
+
+        metrics = painter.fontMetrics()
+        top = self._band_height + SPACE_XS
+        painter.setPen(self._color_label)
+        for group, left, right in self.group_spans(rects):
+            if not group:
+                continue
+            room = right - left + 1
+            text = metrics.elidedText(group, Qt.TextElideMode.ElideRight, room)
+            if len(text) < min(len(group), MIN_LABEL_CHARS):
+                continue
+            area = QRect(left, top, room, metrics.height())
+            painter.drawText(area, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+            self._label_rects.append((area, text))
 
     def _paint_proportion_bar(self) -> None:
         """Draw one stacked bar summarising the same statuses as the tiles.
@@ -194,7 +337,7 @@ class StatusTileGrid(QWidget):
             return
         # The same height and position as a segmented band, so the two read
         # as one kind of mark when cards in a row fall on either side.
-        height = BAND_HEIGHT_PX
+        height = self._band_height
         top = 0
         full_width = self.width()
         if full_width <= 0:
@@ -257,25 +400,11 @@ class StatusTileGrid(QWidget):
 
     # ------------------------------------------------------------- mouse / hover
 
-    def event(self, event: QEvent) -> bool:  # noqa: N802 — Qt signature
-        # Qt sends a ToolTip event once the pointer rests. The band has no
-        # tooltip of its own, so the event used to travel on to the parent
-        # StatCard, whose help text replaced the item's tooltip that
-        # mouseMoveEvent had just shown. Answering it here keeps the item's.
-        # Off the band it still travels on, so the card's help shows there.
-        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
-            hit = self._hit_at(event.pos())
-            if hit is not None:
-                zone, tile = hit
-                QToolTip.showText(event.globalPos(), tile.tooltip, self, zone)
-                return True
-        return super().event(event)
-
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802 — Qt signature
         hit = self._hit_at(event.position().toPoint())
         if hit is not None:
             zone, tile = hit
-            QToolTip.showText(event.globalPosition().toPoint(), tile.tooltip, self, zone)
+            QToolTip.showText(event.globalPosition().toPoint(), self.tooltip_for(tile), self, zone)
         else:
             QToolTip.hideText()
         super().mouseMoveEvent(event)
@@ -307,7 +436,7 @@ class StatusTileGrid(QWidget):
             )
             tile = self._items[self._keyboard_index]
             self.setAccessibleDescription(
-                f"{tile.tooltip}. Press Enter to open this item."
+                f"{self.tooltip_for(tile)}. Press Enter to open this item."
             )
             self.update()
             event.accept()
@@ -345,7 +474,7 @@ class StatusTileGrid(QWidget):
                 right = (rect.right() + self._tile_rects[index + 1][0].left()) // 2
             else:
                 right = max(rect.right(), self.width() - 1)
-            zones.append((QRect(QPoint(left, 0), QPoint(right, BAND_HEIGHT_PX - 1)), tile))
+            zones.append((QRect(QPoint(left, 0), QPoint(right, self._band_height - 1)), tile))
             left = right + 1
         return zones
 
@@ -354,4 +483,4 @@ class StatusTileGrid(QWidget):
     def sizeHint(self) -> QSize:  # noqa: N802 — Qt signature
         # A reasonable default; the parent layout always overrides this with
         # its own width via the setMinimumHeight + Expanding × Fixed policy.
-        return QSize(120, BAND_HEIGHT_PX + 2)
+        return QSize(120, self._wanted_height())

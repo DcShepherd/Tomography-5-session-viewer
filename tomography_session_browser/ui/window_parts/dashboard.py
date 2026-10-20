@@ -13,13 +13,13 @@ from PySide6.QtCore import (
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
-    QMessageBox,
 )
 from tomography_session_browser.ui.shell.chrome import (
     TAB_LABELS,
 )
 from tomography_session_browser.domain.models import (
     Sample,
+    Session,
     TiltSeries,
 )
 from tomography_session_browser.services.item_status import (
@@ -41,6 +41,7 @@ from tomography_session_browser.presentation.dashboard.scope_value import (
 from tomography_session_browser.presentation.dashboard.models import (
     INFERRED_BATCH_TILE_PREFIX,
     DashboardModel,
+    DashboardFilterModel,
 )
 from tomography_session_browser.presentation.scopes import (
     LinkedSampleGroup,
@@ -58,6 +59,7 @@ from tomography_session_browser.ui.window_parts.support import (
     LOGGER,
 )
 from tomography_session_browser.presentation.tab_keys import TabKey
+from tomography_session_browser.presentation.context_stack import entity_display_label_singular
 
 class DashboardInteraction(QObject):
     def __init__(self, window: QMainWindow, state: WindowState, ui: WindowUi, parts: WindowParts) -> None:
@@ -71,7 +73,6 @@ class DashboardInteraction(QObject):
         prepared: PreparedSessionUi | None = None,
     ) -> None:
         """Render the visible Session dashboard and update its tab counts."""
-        self.ui.tabs.setTabText(0, "Session")
         self.parts.chrome.update_tab_counts()
         if not self.state.review.workspace.sessions:
             self.ui.session_dashboard.set_context_stack(self.parts.context.current_context_stack())
@@ -109,13 +110,9 @@ class DashboardInteraction(QObject):
 
     def navigate_to_tab(self, target: str) -> None:
         if target in TAB_LABELS:
-            departure = self.parts.history.current_history_location()
+            departure = self.parts.history.begin_navigation()
             self.ui.tabs.setCurrentIndex(TAB_LABELS.index(target))
             self.parts.history.record_history(departure)
-
-
-    def on_dashboard_search_map_clicked(self, search_map_id: str) -> None:
-        self.parts.dashboard.on_dashboard_tile_clicked(TabKey.SEARCH_MAP, search_map_id)
 
 
     def on_dashboard_tile_clicked(self, destination: str, item_id: str) -> None:
@@ -151,7 +148,7 @@ class DashboardInteraction(QObject):
         target = self.state.review.workspace.find(item_id)
         if target is None:
             self.parts.dashboard.navigate_to_tab(destination)
-            self.window.statusBar().showMessage(
+            self.parts.context.post_navigation_message(
                 f"That {destination.lower()} is no longer in the loaded sessions, so it cannot be selected."
             )
             return
@@ -159,7 +156,7 @@ class DashboardInteraction(QObject):
             self.parts.dashboard.navigate_to_tilt_series(target.id, source="dashboard tile")
             return
 
-        departure = self.parts.history.current_history_location()
+        departure = self.parts.history.begin_navigation()
         # Make sure the destination tab's list actually contains this entity
         # — switch active context to the right scope first if needed. The
         # existing helper handles all four entity types.
@@ -170,6 +167,9 @@ class DashboardInteraction(QObject):
         # ``_select_viewer_object`` already switches to the right tab AND
         # selects the matching list row when present.
         self.parts.viewers.select_viewer_object(target)
+        self.parts.context.show_arrival_message(
+            f"Opened {entity_display_label_singular(destination)} {self.parts.scopes.label_for(target)} in the {destination} tab."
+        )
         self.parts.history.record_history(departure)
 
 
@@ -262,7 +262,7 @@ class DashboardInteraction(QObject):
         if not isinstance(target, TiltSeries):
             self.window.statusBar().showMessage("No linked tilt series", 2000)
             return
-        departure = self.parts.history.current_history_location()
+        departure = self.parts.history.begin_navigation()
         context = self.parts.scopes.context_for_object(target)
         self.state.dashboard.dashboard_focus_value = None
         self.state.dashboard.dashboard_scope_prefers_tree = False
@@ -283,7 +283,7 @@ class DashboardInteraction(QObject):
         frame = self.parts.dashboard.zero_based_frame_index(frame_index)
         if frame is not None:
             QTimer.singleShot(0, lambda frame=frame: self.parts.dashboard.select_tilt_series_frame(frame))
-        self.parts.context.show_arrival_message(f"Opened {self.parts.scopes.label_for(target)} from {source}.", 2500)
+        self.parts.context.show_arrival_message(f"Opened tilt series {self.parts.scopes.label_for(target)} from {source}.", 2500)
         self.parts.history.record_history(departure)
 
 
@@ -304,74 +304,58 @@ class DashboardInteraction(QObject):
         return max(0, value - 1)
 
 
-    def on_dashboard_sample_clicked(self, sample_id: str) -> None:
-        target = self.state.review.workspace.find(sample_id)
+    def on_dashboard_scope_requested(self, object_id: str) -> None:
+        """A summary's link to a sample or a session: that scope, on the Session tab."""
+
+        target = self.state.review.workspace.find(object_id)
         if target is None:
             return
-        departure = self.parts.history.current_history_location()
+        departure = self.parts.history.begin_navigation()
         context = self.parts.scopes.context_for_object(target)
-        if isinstance(context, LinkedSampleGroup):
-            self.state.dashboard.dashboard_focus_value = None
-            self.parts.dashboard.set_dashboard_highlighted_tilt_series_id(None)
-            self.state.dashboard.dashboard_scope_prefers_tree = False
-            self.state.review.scope = context
-            self.state.review.preserve_tree_root_context = True
-            self.parts.viewers.render_viewer_tabs()
-            self.parts.dashboard.render_dashboard_for_scope()
-            self.parts.chrome.update_tab_counts()
+        scope = context if isinstance(context, LinkedSampleGroup) else target if isinstance(target, (Sample, Session)) else None
+        if scope is None:
             self.ui.tabs.setCurrentIndex(TAB_LABELS.index(TabKey.SESSION))
-            self.parts.context.set_context(context.label, context)
             self.parts.history.record_history(departure)
             return
-        if isinstance(target, Sample):
-            self.state.dashboard.dashboard_focus_value = None
-            self.parts.dashboard.set_dashboard_highlighted_tilt_series_id(None)
-            self.state.dashboard.dashboard_scope_prefers_tree = False
-            self.state.review.scope = target
-            self.state.review.preserve_tree_root_context = True
-            self.parts.viewers.render_viewer_tabs()
-            self.parts.dashboard.render_dashboard_for_scope()
-            self.parts.chrome.update_tab_counts()
-            self.ui.tabs.setCurrentIndex(TAB_LABELS.index(TabKey.SESSION))
-            self.parts.context.set_context(target.name, target)
-            self.parts.history.record_history(departure)
-            return
-        self.ui.tabs.setCurrentIndex(TAB_LABELS.index(TabKey.SESSION))
-        self.parts.history.record_history(departure)
+        # A summary's own link: the sample's scope on the Session tab, with the
+        # history entry recorded when that scope publishes.
+        self.parts.viewers.open_scope(scope, destination_tab=TabKey.SESSION, departure=departure)
 
+
+    @Slot(object)
+    def on_dashboard_route_requested(self, route: DashboardFilterModel) -> None:
+        self.on_dashboard_filter_requested(route.tab, route.query, route.tooltip,
+                                          row_keys=route.row_keys, scope_label=route.scope_label)
 
     def on_dashboard_filter_requested(
         self,
         destination: str,
         query: str,
         reason: str = "",
+        *,
+        row_keys: frozenset[str] | None = None,
+        scope_label: str = "",
     ) -> None:
         if destination not in TAB_LABELS:
             return
-        departure = self.parts.history.current_history_location()
+        departure = self.parts.history.begin_navigation()
         self.ui.tabs.setCurrentIndex(TAB_LABELS.index(destination))
         viewer_tab = self.ui.viewer_tabs.get(destination)
         if viewer_tab is not None:
-            viewer_tab.list_filter.setText(query)
-            if query:
+            viewer_tab.set_query(query, row_keys=row_keys, scope_label=scope_label)
+            if row_keys is not None:
+                current = viewer_tab.list.currentItem()
+                visible = viewer_tab.parts.list_pane.rows.visible_rows()
+                if visible and (current is None or current.isHidden()):
+                    viewer_tab.list.setCurrentItem(visible[0])
+            if row_keys is not None:
+                self.parts.context.show_toast(f"Showing {destination.lower()} entries from {scope_label or 'summary'}")
+            elif query:
                 self.parts.context.show_toast(f"Filtered {destination.lower()} list: {query}")
             else:
                 self.parts.context.show_toast(f"Showing all {destination.lower()} entries")
         # State *why* at the destination. A filtered list with no explanation
         # is indistinguishable from a scope that simply has little in it.
-        self.state.dashboard.dashboard_filter_reason = reason if query else ""
+        self.state.dashboard.dashboard_filter_reason = reason if query or row_keys is not None else ""
         self.parts.history.record_history(departure)
         self.parts.context.refresh_context_header()
-
-
-    @Slot(str, object)
-    def show_warning_details(self, category: str, items_value: object) -> None:
-        items = [str(item) for item in items_value] if isinstance(items_value, list | tuple) else []
-        box = QMessageBox(self.window)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle(category)
-        box.setText(f"{len(items):,} warning message{'s' if len(items) != 1 else ''}")
-        box.setInformativeText("Open details to inspect the parser evidence.")
-        box.setDetailedText("\n\n".join(items) if items else "No warning details are available.")
-        box.setStandardButtons(QMessageBox.StandardButton.Close)
-        box.exec()

@@ -1,7 +1,7 @@
 @echo off
 REM Launch the Tomography Session Browser using the *working tree* in this
-REM repository (Claude_tomoapp optimisation), not the editable-installed
-REM copy at Tomography_app_codex. Run this from anywhere — the script
+REM repository (the working checkout), not the editable-installed
+REM copy at another checkout. Run this from anywhere — the script
 REM resolves paths relative to its own location.
 REM
 REM Usage:
@@ -19,7 +19,7 @@ REM The working-tree root is one level above this script.
 set "REPO_ROOT=%~dp0.."
 
 REM Prepend repo root to PYTHONPATH so its package wins over the editable
-REM install. Path quoting handles the space in "Claude_tomoapp optimisation".
+REM install. Path quoting handles the space in "the working checkout".
 set "PYTHONPATH=%REPO_ROOT%;%PYTHONPATH%"
 
 REM Enable the perf-report-on-stderr if the first arg is --perf.
@@ -28,13 +28,13 @@ if /I "%~1"=="--perf" (
     shift
 )
 
-REM Resolve python from the tomoapp_claude conda env so the user does not
+REM Resolve python from the tomoapp_session conda env so the user does not
 REM need to "conda activate" first.
-set "CONDA_PY=%USERPROFILE%\miniconda3\envs\tomoapp_claude\python.exe"
+set "CONDA_PY=%USERPROFILE%\miniconda3\envs\tomoapp_session\python.exe"
 if not exist "%CONDA_PY%" (
-    echo ERROR: Could not find tomoapp_claude python at %CONDA_PY%
+    echo ERROR: Could not find tomoapp_session python at %CONDA_PY%
     echo Edit launch_app.bat and set CONDA_PY to the right path, or
-    echo "conda activate tomoapp_claude" first and re-run.
+    echo "conda activate tomoapp_session" first and re-run.
     exit /b 1
 )
 

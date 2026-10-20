@@ -9,6 +9,8 @@ from tomography_session_browser.presentation.design_tokens import SPACE_M, SPACE
 from tomography_session_browser.ui.widgets.time_chart import TIME_CHART_DEFOCUS_MIN_HEIGHT
 from tomography_session_browser.ui.dashboard.common import CardBox, card_header, card_layout, dose_metric_widget, format_dose, status_tone
 from tomography_session_browser.ui.dashboard.dose_table import DoseInformationTableModel
+from tomography_session_browser.ui.theme import TIER_SUPPORTING, apply_tier
+from tomography_session_browser.ui.widgets.rounded_viewport import round_viewport
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from tomography_session_browser.ui.dashboard.widget import SessionDashboard
@@ -106,6 +108,27 @@ class DoseSummaryPanel(QWidget):
         layout.addStretch(1)
 
 
+def build_dose_empty_card(model: DashboardModel) -> QWidget:
+    """The camera-dose card for a scope with no frame-dose records: drawn all
+    the same, with the reason inline, so its absence is never a question."""
+
+    dose_model = model.dose_information
+    card = CardBox()
+    layout = card_layout(card)
+    header, _badge = card_header(
+        "CAMERA DOSE",
+        f"{dose_model.dose_tilt_series:,} / {dose_model.total_tilt_series:,} tilt series",
+        "Tilt series with dose metadata / tilt series in this selection.",
+    )
+    layout.addLayout(header)
+    note = QLabel(dose_model.note or "No frame-dose records were found in the MRC headers of this scope.")
+    note.setObjectName("timelineEmptyNote")
+    apply_tier(note, TIER_SUPPORTING)
+    note.setWordWrap(True)
+    layout.addWidget(note)
+    return card
+
+
 def build_dose_information_card(dashboard: SessionDashboard, model: DashboardModel) -> QWidget:
     timer = QElapsedTimer()
     timer.start()
@@ -176,6 +199,7 @@ def build_dose_information_card(dashboard: SessionDashboard, model: DashboardMod
             table_timer.start()
             table = QTableView(detail_container)
             table.setObjectName("dashboardSearchMapTable")
+            round_viewport(table)
             table.setModel(DoseInformationTableModel(dose_model.points, table))
             table.setAlternatingRowColors(True)
             table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)

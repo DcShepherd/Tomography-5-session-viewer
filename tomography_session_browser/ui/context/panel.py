@@ -8,6 +8,7 @@ description it already shows.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -38,6 +39,15 @@ class ContextPanel:
     ) -> None:
         #: The scope the panel last described, so describing it again is skipped.
         self._scope_key: str | None = None
+        #: The item ``show_item`` last described, with the title and text it
+        #: wrote: the heading names the item only while the panel still shows
+        #: exactly that (anything written since has replaced it).
+        self._item: Any = None
+        self._item_shown: tuple[str, str] | None = None
+        #: The title and text of a scope's description, while it is still what
+        #: the panel shows: on the Session tab the page titles the scope, so
+        #: the panel's own title line would only repeat it.
+        self._scope_shown: tuple[str, str] | None = None
 
         self.widget = panel = QWidget(parent)
         panel.setObjectName("contextShell")
@@ -61,9 +71,27 @@ class ContextPanel:
         body_layout.addWidget(self.metadata, stretch=1)
         layout.addWidget(body, stretch=1)
 
-    def show_item(self, title: str, text: str) -> None:
+    def show_item(self, title: str, text: str, *, item: Any, scope: bool = False) -> None:
+        """Describe ``item``; ``item`` is what ``sync_heading`` matches to the page.
+
+        ``scope`` says the description is a scope's summary (a session, sample or
+        group), which the Session tab's own page titles.
+        """
+
         self.metadata.set_title(title)
         self.metadata.set_text(text)
+        self._item = item
+        self._item_shown = (self.metadata.text(), self.metadata.toPlainText())
+        self._scope_shown = self._item_shown if scope else None
+
+    def describes(self, item: Any) -> bool:
+        """Whether the panel is still showing the description of ``item``."""
+
+        return (
+            item is not None
+            and item is self._item
+            and self._item_shown == (self.metadata.text(), self.metadata.toPlainText())
+        )
 
     def show_scope(self, scope_key: str, title: str, describe: Callable[[], str]) -> None:
         """Describe a scope, unless the panel already shows it.
@@ -73,30 +101,35 @@ class ContextPanel:
         the titles differ and the description is rebuilt.
         """
 
-        if self._scope_key == scope_key and self.metadata.text() == title:
+        if self._scope_key == scope_key and self.shows_scope() and self.metadata.text() == title:
             return
         self.metadata.set_title(title)
         self.metadata.set_text(describe())
         self._scope_key = scope_key
+        self._scope_shown = (self.metadata.text(), self.metadata.toPlainText())
 
-    def sync_heading(self, tab_label: str, page_title: str | None) -> None:
+    def shows_scope(self) -> bool:
+        """Whether the panel still shows a scope's description, as it wrote it."""
+
+        return self._scope_shown == (self.metadata.text(), self.metadata.toPlainText())
+
+    def sync_heading(self, tab_label: str, page_item: Any) -> None:
         """Name the item once (harmonisation A1).
 
         When the panel describes the item the tab's page already titles
-        (``page_title``), the heading says what kind of item it is ("TILT
+        (``page_item``), the heading says what kind of item it is ("TILT
         SERIES") and the panel's own copy of the name hides. Otherwise the
         heading is "CONTEXT" over the name. Display only: the title's text,
-        and ``metadata.text()``, are unchanged.
+        and ``metadata.text()``, are unchanged. The rule is the item's
+        identity, not a comparison of two strings that happen to match.
         """
 
         title = self.metadata.text()
-        echoes = (
-            page_title is not None
-            and tab_label in CONTEXT_HEADING_KINDS
-            and bool(title)
-            and page_title == title
-        )
+        echoes = tab_label in CONTEXT_HEADING_KINDS and bool(title) and self.describes(page_item)
+        # A summary: the Session tab titles the scope it describes, so the
+        # heading stays "CONTEXT" and its own title line steps aside.
+        titled_by_summary = tab_label == TabKey.SESSION and self.shows_scope()
         kind = CONTEXT_HEADING_KINDS[tab_label] if echoes else ""
         self.heading.setText(kind.upper() if kind else CONTEXT_HEADING)
         self.heading.setAccessibleName(f"{kind}: {title}" if kind else "Context")
-        self.metadata.set_title_shown(not echoes)
+        self.metadata.set_title_shown(not (echoes or titled_by_summary))

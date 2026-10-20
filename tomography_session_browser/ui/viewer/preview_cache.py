@@ -63,11 +63,17 @@ class PreviewLruCache:
 
 MRC_PREVIEW_CACHE = PreviewLruCache()
 
+#: Thumbnails have a cache of their own. A contact sheet holds dozens, and in
+#: the viewer's 32-item cache they would evict the images the reviewer is
+#: stepping through; at a few tens of kilobytes each they are cheap to keep.
+THUMBNAIL_CACHE = PreviewLruCache(max_items=256, max_bytes=64 * 1024 * 1024)
+
 
 def clear_preview_cache() -> None:
     from tomography_session_browser.ui.viewer.preview_scheduler import preview_scheduler
     preview_scheduler().reset()
     MRC_PREVIEW_CACHE.clear()
+    THUMBNAIL_CACHE.clear()
 
 
 def preview_cache_key(path: Path, slice_index: int, max_size: int) -> PreviewCacheKey:

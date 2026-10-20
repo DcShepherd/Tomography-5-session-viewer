@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QPen, QPolygonF
-from PySide6.QtWidgets import QGraphicsItem
+from PySide6.QtWidgets import QAbstractGraphicsShapeItem, QGraphicsItem, QGraphicsLineItem
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.services.atlas_lod import atlas_batch_view, atlas_cluster_inputs
 from tomography_session_browser.services.batch_label_service import LABEL_STROKE_WIDTH_PX, AtlasLabelPlacement, batch_label_screen_font_size_px
@@ -126,6 +126,7 @@ class MarkerLayer:
             elif item.scene() is self.view.parts.preview_image.scene:
                 self.view.parts.preview_image.scene.removeItem(item)
         self.marker_items = retained
+        first_new_item = len(retained)
         if self.view.parts.preview_image.pixmap_item is None:
             return
         if changed_ids is None:
@@ -165,9 +166,14 @@ class MarkerLayer:
             if marker.marker_type == MarkerType.BATCH_LABEL:
                 self.view._add_batch_label(marker)
                 continue
-            radius = marker.radius or 8.0
+            radius = marker.radius or 8.0 * self.style_scene_units()
             pen_color, fill_color = marker_colors(marker)
             pen = QPen(pen_color, 2.0 if marker.selected else 1.4)
+            if marker.selected and marker.marker_type == MarkerType.EXPOSURE_AREA:
+                # Over the highlight ring (4 px on screen) in its status colour: at a scene
+                # width of 2 the line was a fraction of a pixel with a whole tile in view,
+                # and the ring hid it.
+                pen.setCosmetic(True)
             outline = marker_outline(marker)
             if outline.line == "dash":
                 pen.setStyle(Qt.PenStyle.DashLine)
@@ -248,15 +254,37 @@ class MarkerLayer:
             if marker.label:
                 theme = current_palette()
                 label = self.view.parts.preview_image.scene.addText(marker.label, QFont(SANS_FONT_NAME, 9))
+                units = self.style_scene_units()
+                label.setScale(units)
                 label.setDefaultTextColor(QColor(theme.text_strong))
                 anchor = marker_label_anchor(marker)
-                label.setPos(anchor.x() + radius + 4, anchor.y() - radius - 2)
+                label.setPos(anchor.x() + radius + 4 * units, anchor.y() - radius - 2 * units)
                 label.setZValue(21 if marker.selected else 16)
                 label.setData(0, marker)
                 label.setData(1, "label")
                 label.setToolTip(marker.tooltip or marker.label)
                 self.marker_items.append(label)
+        # A change in preview resolution moves scene units under the same
+        # viewport. Keep visual weights in the reference image's units;
+        # scientific marker positions and screen-sized selection rings stay.
+        units = self.style_scene_units()
+        for item in self.marker_items[first_new_item:]:
+            if not isinstance(item, QAbstractGraphicsShapeItem | QGraphicsLineItem):
+                continue
+            if item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations:
+                continue
+            pen = item.pen()
+            if not pen.isCosmetic():
+                pen.setWidthF(pen.widthF() * units)
+                item.setPen(pen)
         self.view._update_marker_detail()
+
+    def style_scene_units(self) -> float:
+        """Displayed scene units per reference pixel, independent of zoom."""
+        image = self.view.parts.preview_image
+        if image.current_image_shape is None or image.overlay_reference_size is None:
+            return 1.0
+        return image.current_image_shape[1] / max(1, image.overlay_reference_size[0])
 
     def add_batch_label(self, marker: ImageMarker) -> None:
         if not marker.label or marker.x is None or marker.y is None or self.view.parts.preview_image.current_image_shape is None:
@@ -265,7 +293,7 @@ class MarkerLayer:
         scale = self.view._zoom_scale()
         displayed_height, displayed_width = self.view.parts.preview_image.current_image_shape
         font = QFont(SANS_FONT_NAME)
-        font.setPixelSize(round(batch_label_screen_font_size_px(scale)))
+        font.setPixelSize(round(batch_label_screen_font_size_px(scale * self.style_scene_units())))
         font.setWeight(QFont.Weight.Black)
 
         path = batch_label_text_path(marker.label, font)
@@ -332,15 +360,15 @@ class MarkerLayer:
         else:
             assert marker.x is not None and marker.y is not None
             edge = self.view.parts.preview_image.scene.addEllipse(marker.x - radius, marker.y - radius, radius * 2, radius * 2, pen, brush)
-        # Draw just below the normal green exposure marker so the blue reads as
-        # a highlight edge while the exposure's own green fill/stroke remains.
+        # Draw just below the exposure marker so the blue reads as a highlight edge
+        # while the exposure's own status-coloured line and tint remain.
         edge.setZValue(19)
         edge.setData(0, marker)
         edge.setToolTip(marker.tooltip or marker.label or marker.marker_type)
         self.marker_items.append(edge)
 
     def update_marker_detail(self) -> None:
-        scale = self.view._zoom_scale()
+        scale = self.view._zoom_scale() * self.style_scene_units()
         for item in self.marker_items:
             marker = item.data(0)
             if isinstance(marker, ImageMarker) and item.data(1) == "batch_label":

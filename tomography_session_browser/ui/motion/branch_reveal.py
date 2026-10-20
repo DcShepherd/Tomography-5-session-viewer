@@ -1,7 +1,7 @@
 """Branch reveal components for the motion."""
 from __future__ import annotations
 import math
-from PySide6.QtCore import QRect, QRectF, Qt
+from PySide6.QtCore import QPoint, QRect, QRectF, Qt
 from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtWidgets import QWidget
 from tomography_session_browser.ui.motion.spring import Spring
@@ -68,6 +68,13 @@ class BranchReveal(QWidget):
     def dismiss(self) -> None:
         self._offset.reset(self._offset.value)
         self._finish()
+
+    def source_at(self, position: QPoint) -> tuple[bool, QPoint]:
+        """Which picture and source coordinate paints this viewport position."""
+        ratio = self._opened.devicePixelRatio() or 1.0
+        offset = round(self._offset.value * ratio) / ratio
+        opened = position.y() < self._top + offset
+        return opened, QPoint(position.x(), position.y() if opened else round(position.y() - offset))
 
     def _moved(self, value: float) -> None:
         low = min(self._shown, value)

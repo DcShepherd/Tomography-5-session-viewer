@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 from tomography_session_browser.domain.display_names import count_phrase
+from tomography_session_browser.parsers.atlas_parser import ATLAS_IMAGE_NOT_FOUND_WARNING
 from tomography_session_browser.domain.models import (
     Atlas,
     BatchPosition,
@@ -15,20 +16,18 @@ from tomography_session_browser.domain.models import (
     Session,
     TiltSeries,
 )
-from tomography_session_browser.presentation.dashboard.scopes import session_counts
 from tomography_session_browser.presentation.describe.metadata import (
     acquisition_setting_detail,
     acquisition_setting_lines,
-    acquisition_setting_lines_for_scope,
     combined_tilt_range_text,
     common_binning,
-    common_metadata_value,
+    common_magnification_value,
     common_section_value,
     common_tilt_increment,
     common_tilt_pixel_size,
     common_xml_pixel_size,
     first_metadata,
-    metadata_value,
+    magnification_value,
     microscope_state_lines,
     mrc_metadata_lines,
     section_value_text,
@@ -40,6 +39,12 @@ from tomography_session_browser.presentation.describe.metadata import (
     tilt_series_validation_lines,
     xml_pixel_size,
 )
+from tomography_session_browser.presentation.describe.sections import emit_section
+from tomography_session_browser.presentation.describe.summary import (
+    sample_folder,
+    sessions_summary_lines,
+    summary_lines,
+)
 from tomography_session_browser.presentation.formatting import (
     angle_range_text,
     binning_text,
@@ -50,14 +55,9 @@ from tomography_session_browser.presentation.formatting import (
     series_duration_seconds,
 )
 from tomography_session_browser.presentation.scopes import EntityGroup, LinkedSampleGroup
-from tomography_session_browser.presentation.warnings import (
-    linked_sample_group_warnings,
-    session_warnings,
-    summarize_warnings,
-    warning_presentations,
-)
-from tomography_session_browser.presentation.workspace import EntityKind, session_entities
+from tomography_session_browser.presentation.warnings import summarize_warnings
 from tomography_session_browser.services.acquisition_metadata import ACQUISITION_SPOT_LABEL, SEARCH_SPOT_LABEL
+from tomography_session_browser.services.search_tile_linking import PROJECTION_LINK_METHOD
 from tomography_session_browser.services.item_status import (
     ItemListStatus,
     atlas_tile_count,
@@ -77,34 +77,7 @@ from tomography_session_browser.services.timeline_service import parse_datetime
 
 
 def session_summary_lines(session: Session) -> list[str]:
-    blocks: list[str] = [
-        f"Name: {session.name}",
-        f"Kind: {session.kind.value}",
-        f"Path: {session.path}",
-    ]
-    _emit_section(
-        blocks,
-        "Summary",
-        [f"{label}: {value}" for label, value in session_counts(session).items()],
-    )
-    settings = acquisition_setting_lines_for_scope(
-        [tilt.metadata for tilt in session_entities(session, EntityKind.TILT_SERIES)],
-        [batch.metadata for batch in session_entities(session, EntityKind.BATCH_POSITION)],
-    )
-    _emit_section(blocks, "Acquisition", settings)
-    warnings = session_warnings(session)
-    if blocks and blocks[-1] != "":
-        blocks.append("")
-    blocks.append("Warnings:")
-    if warnings:
-        # Affected objects, matching the dashboard and the report cover.
-        blocks.extend(
-            f"  {presentation.condition} ({presentation.affected_count})"
-            for presentation in warning_presentations(warnings)
-        )
-    else:
-        blocks.append("  None")
-    return blocks
+    return sessions_summary_lines([session])
 
 
 def describe_object(
@@ -112,7 +85,15 @@ def describe_object(
     *,
     tilt_validation: TiltSeriesValidation | None = None,
     list_status: ItemListStatus | None = None,
+    describes_page_item: bool = False,
 ) -> str:
+    """Describe ``value`` for the context panel.
+
+    ``describes_page_item`` is true when the page beside the panel already
+    titles this item and carries its status pill, so the description leaves
+    out the ``Status`` row (design review B2.2). Everything else is the same.
+    """
+
     if isinstance(value, EntityGroup):
         return _entity_group_description(value)
     if isinstance(value, LinkedSampleGroup):
@@ -128,104 +109,67 @@ def describe_object(
     if isinstance(value, SearchTile):
         return _search_tile_description(value)
     if isinstance(value, BatchPosition):
-        return _batch_position_description(value, list_status=list_status)
+        return _batch_position_description(value, list_status=None if describes_page_item else list_status)
     if isinstance(value, TiltSeries):
-        return _tilt_series_description(value, validation=tilt_validation)
+        return _tilt_series_description(value, validation=tilt_validation, with_status=not describes_page_item)
     if isinstance(value, Overview):
         return _overview_description(value)
     return str(value)
 
 
-def _emit_section(blocks: list[str], title: str, rows: list[str]) -> None:
-    """Append a labelled section to ``blocks`` for the context panel.
-
-    The :class:`MetadataPanel` parser treats a line of the form ``Title:``
-    (no value after the colon) as a section header and renders subsequent
-    indented lines as the section body. Empty section bodies are skipped so
-    the panel does not render orphan headers.
-    """
-
-    if not rows:
-        return
-    if blocks and blocks[-1] != "":
-        blocks.append("")
-    blocks.append(f"{title}:")
-    blocks.extend(f"  {row}" for row in rows)
-
-
 def _emit_warnings_section(blocks: list[str], warnings: Iterable[str]) -> None:
-    """Always emit a ``Warnings:`` section (with ``None`` when empty).
+    """Emit a ``Warnings:`` section, and nothing when there are no warnings.
 
-    Consistent section presence beats a one-line ``Warnings: none`` row;
-    the brief calls for a stable section list so users can scan to where
-    the warnings *would* live.
+    An absent section is the quiet answer; the header's status pill and the
+    dashboard carry the cases that need attention (design review F6).
     """
 
-    if blocks and blocks[-1] != "":
-        blocks.append("")
-    blocks.append("Warnings:")
     summarized = summarize_warnings(list(warnings))
-    if not summarized:
-        blocks.append("  None")
-        return
-    blocks.extend(f"  - {warning}" for warning in summarized[:100])
+    emit_section(blocks, "Warnings", [f"- {warning}" for warning in summarized[:100]])
 
 
 def _sample_description(sample: Sample) -> str:
-    blocks: list[str] = []
-    # Free-standing top kv rows preserve the legacy contract used by
-    # :meth:`MainWindow._context_description` (which strips/replaces the
-    # ``Atlas: yes/no`` and appends its own ``Atlas linkage:`` section)
-    # and by existing tests that grep for ``Sample:`` and ``Path:`` in
-    # the rendered context.
-    blocks.append(f"Sample: {sample.name}")
-    blocks.append(f"Path: {sample.path}")
-    blocks.append(f"Atlas: {'yes' if sample.atlas else 'no'}")
-    _emit_section(
-        blocks,
-        "Summary",
-        [
-            f"Overviews: {len(sample.overviews)}",
-            f"Search maps: {len(sample.search_maps)}",
-            f"Search tiles: {len(sample.search_tiles)}",
-            f"Batch positions: {len(sample.batch_positions)}",
-            f"Tilt series: {len(sample.tilt_series)}",
-        ],
+    return "\n".join(
+        summary_lines(
+            [sample_folder(sample)],
+            tilt_series=sample.tilt_series,
+            batch_positions=sample.batch_positions,
+            atlases=[sample.atlas] if sample.atlas is not None else [],
+        )
     )
-    settings = acquisition_setting_lines_for_scope(
-        [tilt.metadata for tilt in sample.tilt_series],
-        [batch.metadata for batch in sample.batch_positions],
-    )
-    _emit_section(blocks, "Acquisition", settings)
-    _emit_warnings_section(blocks, sample.warnings)
-    return "\n".join(blocks)
 
 
 def _atlas_description(atlas: Atlas) -> str:
     metadata = first_metadata(atlas.metadata)
     blocks: list[str] = ["Atlas"]
-    _emit_section(
+    emit_section(
         blocks,
         "Summary",
         [
             f"Pixel size: {xml_pixel_size(metadata)}",
-            f"Magnification: {metadata_value(metadata, 'NominalMagnification')}",
+            f"Magnification: {magnification_value(metadata)}",
             f"Tiles: {atlas_tile_count(atlas)}",
             f"Tile image files: {len(atlas.tile_paths)}",
             f"Tile metadata files: {len(atlas.tile_metadata_paths)}",
             f"Alignment files: {len(atlas.alignment_paths)}",
         ],
     )
-    _emit_section(blocks, "Files", [f"Image: {path_text(atlas.image_path)}"])
-    _emit_section(blocks, "Metadata source", mrc_metadata_lines(atlas.mrc_metadata))
-    _emit_warnings_section(blocks, atlas.warnings)
+    emit_section(blocks, "Files", [f"Image: {path_text(atlas.image_path)}"])
+    emit_section(blocks, "Metadata source", mrc_metadata_lines(atlas.mrc_metadata))
+    if atlas.image_path is None:
+        # The record is all there is: said once here, and its warning ("no mosaic
+        # was found") is the page's, which says what was looked for and where.
+        emit_section(blocks, "Recorded", ["Atlas record: Metadata only"])
+        _emit_warnings_section(blocks, [w for w in atlas.warnings if w != ATLAS_IMAGE_NOT_FOUND_WARNING])
+    else:
+        _emit_warnings_section(blocks, atlas.warnings)
     return "\n".join(blocks)
 
 
 def _overview_description(overview: Overview) -> str:
     metadata = first_metadata(overview.metadata)
     blocks: list[str] = [f"Overview: {overview.name}"]
-    _emit_section(
+    emit_section(
         blocks,
         "Summary",
         [
@@ -233,7 +177,7 @@ def _overview_description(overview: Overview) -> str:
             f"Linked search maps: {len(overview.linked_search_map_ids)}",
         ],
     )
-    _emit_section(blocks, "Files", [f"Image: {overview.image_path}"])
+    emit_section(blocks, "Files", [f"Image: {overview.image_path}"])
     _emit_warnings_section(blocks, overview.warnings)
     return "\n".join(blocks)
 
@@ -241,20 +185,29 @@ def _overview_description(overview: Overview) -> str:
 def _search_map_description(search_map: SearchMap) -> str:
     metadata = first_metadata(search_map.metadata)
     blocks: list[str] = [f"Search map: {search_map.name}"]
+    image_stems = {path.stem for path in search_map.tile_paths}
+    metadata_stems = {path.stem for path in search_map.tile_metadata_paths}
     summary_rows = [
         f"Pixel size: {xml_pixel_size(metadata)}",
-        f"Magnification: {metadata_value(metadata, 'NominalMagnification')}",
-        f"Tiles: {len({path.stem for path in search_map.tile_paths})}",
-        f"Tile image files: {len(search_map.tile_paths)}",
-        f"Tile metadata files: {len(search_map.tile_metadata_paths)}",
+        f"Magnification: {magnification_value(metadata)}",
+        f"Tiles: {len(image_stems)}",
+    ]
+    if image_stems != metadata_stems:
+        # Each tile has an image and a metadata file; the counts are worth
+        # reading only when the two sets of tiles differ (design review F8).
+        summary_rows += [
+            f"Tile image files: {len(search_map.tile_paths)}",
+            f"Tile metadata files: {len(search_map.tile_metadata_paths)}",
+        ]
+    summary_rows += [
         f"Linked batch positions: {len(search_map.linked_batch_position_ids)}",
         f"Linked tilt series: {len(search_map.linked_tilt_series_ids)}",
     ]
     planned, acquired = search_map_tile_counts(search_map)
-    if planned or acquired:
+    if (planned or acquired) and planned != acquired:
         summary_rows.append(f"Tile completion: {acquired} of {planned}")
-    _emit_section(blocks, "Summary", summary_rows)
-    _emit_section(
+    emit_section(blocks, "Summary", summary_rows)
+    emit_section(
         blocks,
         "Files",
         [
@@ -266,14 +219,21 @@ def _search_map_description(search_map: SearchMap) -> str:
     # Microscope information read directly from SearchMap.xml's
     # microscopeData block. Vacuum / pressure fields were dropped because
     # they don't carry actionable signal for a review session.
-    _emit_section(blocks, "Microscope information", microscope_state_lines(search_map.metadata))
+    emit_section(blocks, "Microscope information", microscope_state_lines(search_map.metadata))
     _emit_warnings_section(blocks, search_map.warnings)
     return "\n".join(blocks)
 
 
 def _search_tile_description(search_tile: SearchTile) -> str:
     blocks: list[str] = [f"Search tile: {search_tile.name}"]
-    _emit_section(
+    # The primary method is the expected one; only a fallback (or no link at
+    # all) is worth a row (design review F9).
+    method_rows = (
+        []
+        if search_tile.link_method == PROJECTION_LINK_METHOD
+        else [f"Link method: {search_tile.link_method or 'unresolved'}"]
+    )
+    emit_section(
         blocks,
         "Summary",
         [
@@ -281,11 +241,11 @@ def _search_tile_description(search_tile: SearchTile) -> str:
             f"Batch position: {search_tile.batch_position_name or 'unknown'}",
             f"Tile index: {search_tile.tile_index if search_tile.tile_index is not None else 'unknown'}",
             f"Acquisition time: {format_timestamp(search_tile.acquisition_time)}",
-            f"Link method: {search_tile.link_method or 'unresolved'}",
+            *method_rows,
             f"Linked tilt series: {len(search_tile.linked_tilt_series_ids)}",
         ],
     )
-    _emit_section(
+    emit_section(
         blocks,
         "Files",
         [
@@ -293,7 +253,7 @@ def _search_tile_description(search_tile: SearchTile) -> str:
             f"XML: {path_text(search_tile.xml_path)}",
         ],
     )
-    _emit_section(blocks, "Metadata source", mrc_metadata_lines(search_tile.mrc_metadata))
+    emit_section(blocks, "Metadata source", mrc_metadata_lines(search_tile.mrc_metadata))
     _emit_warnings_section(blocks, search_tile.warnings)
     return "\n".join(blocks)
 
@@ -308,7 +268,7 @@ def _batch_position_description(
     # microscope wrote is labelled as such, so "Acquired" beside a "Failed"
     # row reads as two facts rather than a contradiction.
     status_rows = [f"Status: {display_status_label(list_status.status)}"] if list_status is not None else []
-    _emit_section(
+    emit_section(
         blocks,
         "Summary",
         [
@@ -318,7 +278,7 @@ def _batch_position_description(
             f"Linked tilt series: {len(batch_position.linked_tilt_series_ids)}",
         ],
     )
-    _emit_section(
+    emit_section(
         blocks,
         "Acquisition",
         [
@@ -326,7 +286,7 @@ def _batch_position_description(
             for label in ("Detector", SEARCH_SPOT_LABEL, ACQUISITION_SPOT_LABEL, "Probe mode")
         ],
     )
-    _emit_section(
+    emit_section(
         blocks,
         "Files",
         [
@@ -342,12 +302,16 @@ def _tilt_series_description(
     tilt_series: TiltSeries,
     *,
     validation: TiltSeriesValidation | None = None,
+    with_status: bool = True,
 ) -> str:
     validation = validation or standalone_tilt_validation(tilt_series)
     quality_lines = tilt_series_quality_lines(tilt_series, validation=validation)
-    validation_lines = tilt_series_validation_lines(tilt_series, validation=validation)
+    validation_lines = tilt_series_validation_lines(tilt_series, validation=validation, with_status=with_status)
     blocks: list[str] = [f"Tilt series: {tilt_series.name}"]
-    _emit_section(
+    # The verdict and the rule behind it lead: a reviewer opens this panel to
+    # learn why a series was flagged (design review R4).
+    emit_section(blocks, "Validation", validation_lines)
+    emit_section(
         blocks,
         "Summary",
         [
@@ -362,8 +326,8 @@ def _tilt_series_description(
             f"Acquisition time: {format_duration_long(series_duration_seconds(tilt_series))}",
         ],
     )
-    _emit_section(blocks, "Acquisition", acquisition_setting_lines([tilt_series.metadata]))
-    _emit_section(
+    emit_section(blocks, "Acquisition", acquisition_setting_lines([tilt_series.metadata]))
+    emit_section(
         blocks,
         "Files",
         [
@@ -371,8 +335,7 @@ def _tilt_series_description(
             f"MDOC: {path_text(tilt_series.mdoc_path)}",
         ],
     )
-    _emit_section(blocks, "Validation", validation_lines)
-    _emit_section(blocks, "Quality", quality_lines)
+    emit_section(blocks, "Quality", quality_lines)
     _emit_warnings_section(blocks, tilt_series.warnings)
     return "\n".join(blocks)
 
@@ -392,32 +355,14 @@ def _entity_group_description(group: EntityGroup) -> str:
 
 
 def _linked_sample_group_description(group: LinkedSampleGroup) -> str:
-    blocks: list[str] = [f"Sample: {group.label}"]
-    # Free-standing kv preserves the legacy ``Atlas: yes/no`` contract that
-    # :meth:`MainWindow._context_description` post-processes.
-    blocks.append(f"Atlas: {'yes' if group.atlas else 'no'}")
-    _emit_section(
-        blocks,
-        "Summary",
-        [
-            f"Linked sessions: {len(group.samples)}",
-            f"Overviews: {len(group.overviews)}",
-            f"Search maps: {len(group.search_maps)}",
-            f"Search tiles: {len(group.search_tiles)}",
-            f"Batch positions: {len(group.batch_positions)}",
-            f"Tilt series: {len(group.tilt_series)}",
-        ],
+    return "\n".join(
+        summary_lines(
+            [sample_folder(sample) for sample in group.samples],
+            tilt_series=group.tilt_series,
+            batch_positions=group.batch_positions,
+            atlases=[group.atlas] if group.atlas is not None else [],
+        )
     )
-    settings = acquisition_setting_lines_for_scope(
-        [tilt.metadata for tilt in group.tilt_series],
-        [batch.metadata for batch in group.batch_positions],
-    )
-    _emit_section(blocks, "Acquisition", settings)
-    # The warnings the dashboard shows for this group: its samples' own and
-    # their entities' (tilt series, batch positions, ...). Only the samples'
-    # own were listed, so the panel said "None" beside a dashboard full of them.
-    _emit_warnings_section(blocks, linked_sample_group_warnings(group))
-    return "\n".join(blocks)
 
 
 def _search_map_group_description(label: str, values: list[Any]) -> str:
@@ -429,11 +374,10 @@ def _search_map_group_description(label: str, values: list[Any]) -> str:
         [
             f"{label}: {count_phrase(len(search_maps), 'search map')}",
             f"Pixel size: {common_xml_pixel_size(metadata_values)}",
-            f"Magnification: {common_metadata_value(metadata_values, 'NominalMagnification')}",
+            f"Magnification: {common_magnification_value(metadata_values)}",
             f"Linked batch positions: {batch_count}",
             f"Linked tilt series: {tilt_count}",
-            "",
-            _warning_block(warning for search_map in search_maps for warning in search_map.warnings),
+            *_warning_block(warning for search_map in search_maps for warning in search_map.warnings),
         ]
     )
 
@@ -447,8 +391,7 @@ def _search_tile_group_description(label: str, values: list[Any]) -> str:
             f"{label}: {len(search_tiles)} search tiles",
             f"Resolved images: {resolved}",
             f"Linked tilt series: {linked_tilts}",
-            "",
-            _warning_block(warning for tile in search_tiles for warning in tile.warnings),
+            *_warning_block(warning for tile in search_tiles for warning in tile.warnings),
         ]
     )
 
@@ -460,10 +403,9 @@ def _atlas_group_description(label: str, values: list[Any]) -> str:
         [
             f"{label}: {count_phrase(len(atlases), 'atlas', 'atlases')}",
             f"Pixel size: {common_xml_pixel_size(metadata_values)}",
-            f"Magnification: {common_metadata_value(metadata_values, 'NominalMagnification')}",
+            f"Magnification: {common_magnification_value(metadata_values)}",
             f"Tiles: {sum(atlas_tile_count(atlas) for atlas in atlases)}",
-            "",
-            _warning_block(warning for atlas in atlases for warning in atlas.warnings),
+            *_warning_block(warning for atlas in atlases for warning in atlas.warnings),
         ]
     )
 
@@ -499,19 +441,15 @@ def _tilt_series_group_description(label: str, values: list[Any]) -> str:
             f"Target defocus: {target_defocus_range_text(tilt_series)}",
             f"Total collection time: {format_duration_long(total_duration)}",
             f"Average acquisition time (complete series): {format_duration_long(sum(durations) / len(durations) if durations else None)}",
-            "",
-            _warning_block(warning for tilt in tilt_series for warning in tilt.warnings),
+            *_warning_block(warning for tilt in tilt_series for warning in tilt.warnings),
         ]
     )
 
 
-def _warning_block(warnings: Iterable[str]) -> str:
-    """The Warnings section exactly as ``_emit_warnings_section`` writes it.
+def _warning_block(warnings: Iterable[str]) -> list[str]:
+    """The Warnings section exactly as ``_emit_warnings_section`` writes it,
+    after the blank line that separates it; empty when there are none."""
 
-    Group descriptions said "Warnings: none" where every other description
-    said "Warnings:" over an indented "None".
-    """
-
-    blocks: list[str] = []
+    blocks: list[str] = [""]
     _emit_warnings_section(blocks, warnings)
-    return "\n".join(blocks)
+    return blocks if len(blocks) > 1 else []

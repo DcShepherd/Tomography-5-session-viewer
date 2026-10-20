@@ -1,9 +1,11 @@
 """Build the scoped Atlas summary rows."""
 from __future__ import annotations
 
-from tomography_session_browser.domain.coerce import float_or_none, int_or_zero
-from tomography_session_browser.domain.models import Atlas
-from tomography_session_browser.parsers.xml_parser import find_first
+from dataclasses import dataclass, replace
+from enum import StrEnum
+
+from tomography_session_browser.domain.traversal import is_single_atlas_placeholder
+from tomography_session_browser.presentation.atlas_rows import atlas_row, collection_members
 from tomography_session_browser.presentation.dashboard.atlas_counts import canonical_atlas_key
 from tomography_session_browser.presentation.dashboard.models import (
     AtlasCountModel,
@@ -11,123 +13,96 @@ from tomography_session_browser.presentation.dashboard.models import (
     AtlasSummaryModel,
     DashboardScope,
 )
-from tomography_session_browser.presentation.formatting import format_timestamp
-from tomography_session_browser.services.item_status import atlas_tile_count
+from tomography_session_browser.presentation.dashboard.scopes import scope_samples
+from tomography_session_browser.presentation.workspace import Workspace, display_sample_name
 
 
 def atlas_summary_from_scope(
-    scope: DashboardScope, atlas_counts: AtlasCountModel
+    scope: DashboardScope, atlas_counts: AtlasCountModel, workspace: Workspace | None = None
 ) -> AtlasSummaryModel:
-    """Atlas summary built from the already-resolved scope atlases.
+    """The scope's atlases as rows, from the already-resolved scope atlases.
 
-    ``atlas_counts`` carries the deduplicated four-way counts derived
-    from the original scope input (a Session, a list of Sessions, a
-    Sample, or a LinkedSampleGroup). Those drive the headline numbers;
-    the per-atlas detail rows continue to be sourced from
-    ``scope.atlases`` so the atlas list stays comprehensive.
+    ``atlas_counts`` carries the deduplicated four-way counts derived from the
+    original scope input (a Session, a list of Sessions, a Sample, or a
+    LinkedSampleGroup); the rows stay the scope's own atlases, each once.
     """
 
     rows: list[AtlasRowModel] = []
-    pixel_sizes: list[float] = []
-    image_sizes: list[tuple[int, int]] = []
     seen_atlas_keys: set[str] = set()
-
     for sample_label, atlas in scope.atlases:
         key = canonical_atlas_key(atlas)
         if key in seen_atlas_keys:
             continue
         seen_atlas_keys.add(key)
-        size = _atlas_image_size(atlas)
-        pixel_um = _atlas_pixel_size_um(atlas)
-        if pixel_um is not None:
-            pixel_sizes.append(pixel_um)
-        if size is not None:
-            image_sizes.append(size)
-        rows.append(
-            AtlasRowModel(
-                sample_label=sample_label,
-                image_path=str(atlas.image_path) if atlas.image_path else None,
-                image_size=size,
-                pixel_size_um=pixel_um,
-                tile_count=atlas_tile_count(atlas),
-                acquisition_time=atlas_acquisition_time(atlas),
-            )
-        )
+        rows.append(atlas_row(sample_label, atlas, workspace, samples=scope_samples(scope)))
+    return AtlasSummaryModel(rows=rows, counts=atlas_counts)
 
-    pixel_range: tuple[float, float] | None = (min(pixel_sizes), max(pixel_sizes)) if pixel_sizes else None
-    image_range: tuple[tuple[int, int], tuple[int, int]] | None = None
-    if image_sizes:
-        smallest = min(image_sizes, key=lambda s: s[0] * s[1])
-        largest = max(image_sizes, key=lambda s: s[0] * s[1])
-        image_range = (smallest, largest)
 
-    # Legacy fields are now sourced from the corrected counts so any
-    # reader that looked at ``atlas_count`` / ``sample_count_with_atlas``
-    # gets the same number the four-way breakdown shows.
-    return AtlasSummaryModel(
-        atlas_count=atlas_counts.sample_atlas_count,
-        sample_count_with_atlas=atlas_counts.samples_with_atlas_count,
-        rows=rows,
-        pixel_size_range_um=pixel_range,
-        image_size_range=image_range,
-        counts=atlas_counts,
+class AtlasFilter(StrEnum):
+    """The contact sheet's segments; the value is the segment's label."""
+
+    ALL = "All"
+    MISSING = "Missing"
+    WITH_COLLECTION = "With collection"
+
+
+@dataclass(frozen=True, slots=True)
+class AtlasSheetModel:
+    """An atlas session's contact sheet: a tile for every atlas the scope holds.
+
+    That is every atlas the Atlas tab lists, and also the "Single Atlas"
+    placeholder when the scope has one: it is not a grid, so it is not counted
+    with the others, but its image (or the absence of it) is something to see.
+    """
+
+    tiles: tuple[AtlasRowModel, ...] = ()
+
+    def tiles_for(self, name: AtlasFilter) -> tuple[AtlasRowModel, ...]:
+        if name is AtlasFilter.MISSING:
+            return tuple(tile for tile in self.tiles if tile.missing)
+        if name is AtlasFilter.WITH_COLLECTION:
+            return tuple(tile for tile in self.tiles if tile.collection_sample_ids)
+        return self.tiles
+
+    def count(self, name: AtlasFilter) -> int:
+        return len(self.tiles_for(name))
+
+
+def atlas_sheet(scope: DashboardScope, summary_rows: list[AtlasRowModel], workspace: Workspace | None = None) -> AtlasSheetModel:
+    """The scope's atlas rows, with a tile first for each Single Atlas placeholder
+    the rows do not already hold (a scope of that sample alone does)."""
+
+    held = {row.atlas_id for row in summary_rows}
+    placeholders: list[AtlasRowModel] = []
+    for sample in scope_samples(scope):
+        atlas = sample.atlas
+        if atlas is None or not is_single_atlas_placeholder(sample) or atlas.id in held:
+            continue
+        held.add(atlas.id)
+        placeholders.append(atlas_row(display_sample_name(sample.name), atlas, workspace, samples=scope_samples(scope)))
+    # The tree numbers its samples ("1. Specimen_alpha"); a tile names the atlas.
+    named = [replace(row, sample_label=display_sample_name(row.sample_label)) for row in summary_rows]
+    return AtlasSheetModel((*placeholders, *named))
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRef:
+    """A loaded session, named to be opened (``id`` is what the window finds it by)."""
+
+    id: str
+    name: str
+
+
+def collection_sessions(scope: DashboardScope, workspace: Workspace | None) -> tuple[SessionRef, ...]:
+    """The loaded sessions whose collection data is linked to this scope's atlases,
+    in the order the project holds them."""
+
+    if workspace is None:
+        return ()
+    members = [member for _label, atlas in scope.atlases
+               for member in collection_members(atlas, workspace, samples=scope_samples(scope))]
+    return tuple(
+        SessionRef(session.id, session.name)
+        for session in workspace.sessions
+        if any(member is sample for sample in session.samples for member in members)
     )
-
-
-def _atlas_image_size(atlas: Atlas) -> tuple[int, int] | None:
-    """Return ``(width, height)`` for the displayed atlas image in pixels.
-
-    Prefers the MRC dimensions (the parser now selects ``Atlas_*.mrc`` as the
-    primary image when available — that is the native-resolution mosaic).
-    Falls back to the embedded XML ``ImageSize`` and, last, the cached JPG
-    dimensions used as a fallback display image.
-    """
-
-    if atlas.mrc_metadata is not None:
-        if atlas.mrc_metadata.nx and atlas.mrc_metadata.ny:
-            return atlas.mrc_metadata.nx, atlas.mrc_metadata.ny
-    embedded = find_first(atlas.metadata, "ImageSize") if isinstance(atlas.metadata, dict) else None
-    if isinstance(embedded, dict):
-        w = int_or_zero(embedded.get("width"))
-        h = int_or_zero(embedded.get("height"))
-        if w and h:
-            return w, h
-    cached = atlas.metadata.get("AtlasImageSize") if isinstance(atlas.metadata, dict) else None
-    if isinstance(cached, dict):
-        w = int_or_zero(cached.get("width"))
-        h = int_or_zero(cached.get("height"))
-        if w and h:
-            return w, h
-    return None
-
-
-def _atlas_pixel_size_um(atlas: Atlas) -> float | None:
-    """Return the atlas pixel size in micrometres, or ``None``.
-
-    The XML stores pixel size in metres (``numericValue`` under
-    ``pixelSize/x``); we centralise the unit conversion so callers always work
-    in micrometres — the natural unit for users browsing electron microscopy
-    sessions.
-    """
-
-    if not isinstance(atlas.metadata, dict):
-        return None
-    pixel_size = find_first(atlas.metadata, "pixelSize")
-    if isinstance(pixel_size, dict):
-        x_value = pixel_size.get("x")
-        if isinstance(x_value, dict):
-            value_m = float_or_none(x_value.get("numericValue"))
-            if value_m is not None and value_m > 0:
-                return value_m * 1e6  # metres → micrometres
-    return None
-
-
-def atlas_acquisition_time(atlas: Atlas) -> str | None:
-    if not isinstance(atlas.metadata, dict):
-        return None
-    when = find_first(atlas.metadata, "acquisitionDateTime")
-    if isinstance(when, str) and when:
-        # Same wall-clock formatting as the context panel; the raw ISO string
-        # (``2026-03-19T12:18:58.3951038+11:00``) was shown verbatim here.
-        return format_timestamp(when)
-    return None

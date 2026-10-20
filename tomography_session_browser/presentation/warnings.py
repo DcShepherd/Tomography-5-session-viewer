@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import field
 from typing import Any
+from tomography_session_browser.domain.identity import canonical_entity_key
 from tomography_session_browser.domain.models import Sample, Session
-from tomography_session_browser.presentation.dashboard.models import WarningGroupModel
+from tomography_session_browser.presentation.dashboard.models import AttributedWarning, WarningGroupModel
 from tomography_session_browser.presentation.scopes import LinkedSampleGroup
 from tomography_session_browser.services.status_taxonomy import (
     WarningPresentation,
@@ -18,15 +19,16 @@ from tomography_session_browser.services.status_taxonomy import (
 from tomography_session_browser.services.warning_classification import classify_warning, summarise_warnings
 
 
-def entity_scope_warnings(value: Session | Sample, label: str, seen_entities: set[int]) -> list[str]:
-    """Collect descendant warnings once without changing parser wording."""
-    warnings: list[str] = []
+def entity_scope_warnings(value: Session | Sample, label: str, seen_entities: set[int]) -> list[AttributedWarning]:
+    """Collect descendant warnings once without changing parser wording, each
+    attributed to the entity it was recorded against."""
+    warnings: list[AttributedWarning] = []
 
     def add_entity(label: str, entity: Any | None) -> None:
         if entity is None or id(entity) in seen_entities:
             return
         seen_entities.add(id(entity))
-        warnings.extend(prefix_warnings(label, getattr(entity, "warnings", ())))
+        warnings.extend(attributed_warnings(label, getattr(entity, "warnings", ()), entity))
 
     add_entity(f"{label} / Atlas", value.atlas)
     for attribute in ("overviews", "search_maps", "search_tiles", "batch_positions", "tilt_series"):
@@ -35,14 +37,22 @@ def entity_scope_warnings(value: Session | Sample, label: str, seen_entities: se
     return warnings
 
 
-def session_warnings(session: Session) -> list[str]:
-    warnings = prefix_warnings(f"{session.name} / Session", session.warnings)
+def attributed_session_warnings(session: Session) -> list[AttributedWarning]:
+    """A session's warnings: its own, its samples', and every entity's under them."""
+
+    warnings = attributed_warnings(f"{session.name} / Session", session.warnings, session)
     seen_entities: set[int] = set()
     for sample in session.samples:
-        warnings.extend(prefix_warnings(f"{session.name} / {sample.name}", sample.warnings))
+        warnings.extend(attributed_warnings(f"{session.name} / {sample.name}", sample.warnings, sample))
         warnings.extend(entity_scope_warnings(sample, sample.name, seen_entities))
     warnings.extend(entity_scope_warnings(session, session.name, seen_entities))
     return warnings
+
+
+def session_warnings(session: Session) -> list[str]:
+    """``attributed_session_warnings`` as text: what the report and Context write."""
+
+    return [warning.text for warning in attributed_session_warnings(session)]
 
 
 def warning_presentations(
@@ -121,17 +131,32 @@ def grouped_warnings(warnings: Iterable[str]) -> dict[str, list[str]]:
     )
 
 
-def linked_sample_group_warnings(group: LinkedSampleGroup) -> list[str]:
-    warnings: list[str] = []
+def attributed_linked_sample_group_warnings(group: LinkedSampleGroup) -> list[AttributedWarning]:
+    warnings: list[AttributedWarning] = []
     seen_entities: set[int] = set()
     for member in group.samples:
-        warnings.extend(prefix_warnings(member.name, member.warnings))
+        warnings.extend(attributed_warnings(member.name, member.warnings, member))
         warnings.extend(entity_scope_warnings(member, member.name, seen_entities))
     return warnings
 
 
-def prefix_warnings(prefix: str, warnings: Iterable[str]) -> list[str]:
-    return [f"{prefix}: {warning}" for warning in warnings]
+def linked_sample_group_warnings(group: LinkedSampleGroup) -> list[str]:
+    return [warning.text for warning in attributed_linked_sample_group_warnings(group)]
+
+
+def attributed_warnings(prefix: str, warnings: Iterable[str], source: Any | None) -> list[AttributedWarning]:
+    """``source``'s own warnings, prefixed with where they came from and
+    attributed to ``source``. Without a source they stay unattributed."""
+
+    keys = frozenset() if source is None else frozenset({canonical_entity_key(source)})
+    return [AttributedWarning(f"{prefix}: {warning}", keys) for warning in warnings]
+
+
+def unprefixed_warnings(warnings: Iterable[str], source: Any) -> list[AttributedWarning]:
+    """``source``'s warnings as the parser wrote them, attributed to ``source``."""
+
+    keys = frozenset({canonical_entity_key(source)})
+    return [AttributedWarning(warning, keys) for warning in warnings]
 
 
 def summarize_warnings(warnings: list[str]) -> list[str]:
@@ -153,7 +178,7 @@ def summarize_warnings(warnings: list[str]) -> list[str]:
     return summarized + remaining
 
 
-def dashboard_warning_groups(warnings: list[str]) -> list[WarningGroupModel]:
+def dashboard_warning_groups(warnings: Sequence[AttributedWarning]) -> list[WarningGroupModel]:
     """Group raw warning text into compact dashboard rows.
 
     ``count`` is the number of **affected objects**, not the number of warning
@@ -168,13 +193,29 @@ def dashboard_warning_groups(warnings: list[str]) -> list[WarningGroupModel]:
     ordering had already classified.
     """
 
-    raw_by_category = grouped_warnings(warnings)
+    texts = [warning.text for warning in warnings]
+    raw_by_category = grouped_warnings(texts)
+    members_by_category: dict[str, list[AttributedWarning]] = {}
+    for warning in warnings:
+        members_by_category.setdefault(classify_warning(warning.text).category, []).append(warning)
     return [
         WarningGroupModel(
             label=presentation.condition,
             count=presentation.affected_count,
             severity=severity_for_attention(presentation.attention),
             items=list(raw_by_category.get(presentation.condition, ())),
+            entity_keys=_group_entity_keys(members_by_category.get(presentation.condition, ())),
         )
-        for presentation in warning_presentations(warnings)
+        for presentation in warning_presentations(texts)
     ]
+
+
+def _group_entity_keys(members: Iterable[AttributedWarning]) -> frozenset[tuple[str, str]] | None:
+    """The objects a group covers, or ``None`` if any member names none."""
+
+    keys: set[tuple[str, str]] = set()
+    for member in members:
+        if not member.entity_keys:
+            return None
+        keys |= member.entity_keys
+    return frozenset(keys)

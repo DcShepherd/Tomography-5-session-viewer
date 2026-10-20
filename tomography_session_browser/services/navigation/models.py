@@ -35,6 +35,8 @@ class NavigationResolution:
     state: str = STATE_UNRESOLVED
     explanation: str = ""
     provenance: str = ""
+    #: The action needs a selection first, rather than a missing relationship.
+    selection_required: bool = False
 
     @property
     def navigable(self) -> bool:

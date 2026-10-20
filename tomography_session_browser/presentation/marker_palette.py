@@ -70,6 +70,12 @@ STATUS_PENDING: Final[str] = "#38bdf8"
 STATUS_COMPLETE: Final[str] = "#3fb950"
 STATUS_UNATTRIBUTED: Final[str] = "#9ca3af"
 
+#: An exposure area is a hole in the specimen's support, which is what a reader
+#: looks at, so its fill is a tint (12 %) that the image reads through; its
+#: colour stays on the outline. Review decision D26, screen only: the PDF strokes
+#: markers and fills none (Q4).
+EXPOSURE_FILL_ALPHA: Final[int] = 31
+
 #: Outline and fill opacity (of 255) per marker type, when the type sets the colour.
 _TYPE_STYLES: Final[dict[str, tuple[str, str | None, int]]] = {
     MarkerType.SEARCH_MAP: (FRAME, None, 0),
@@ -78,7 +84,7 @@ _TYPE_STYLES: Final[dict[str, tuple[str, str | None, int]]] = {
     # another marker type already means.
     MarkerType.BATCH_POSITION: (STATUS_UNATTRIBUTED, None, 70),
     MarkerType.TEMPLATE_AREA: (MARKER_TEMPLATE, None, 35),
-    MarkerType.EXPOSURE_AREA: (MARKER_EXPOSURE, None, 65),
+    MarkerType.EXPOSURE_AREA: (MARKER_EXPOSURE, None, EXPOSURE_FILL_ALPHA),
     # Cyan and dotted: a frame by its line, but kept easy to find.
     MarkerType.CAMERA_FOV: (MARKER_CAMERA, CAMERA_FILL, 34),
     MarkerType.BATCH_LABEL: (MARKER_EXPOSURE, None, 0),
@@ -174,6 +180,10 @@ STATUS_STROKES: Final[dict[str, str]] = {
 }
 
 
+def _status_fill_alpha(marker: ImageMarker) -> int:
+    return EXPOSURE_FILL_ALPHA if marker.marker_type == MarkerType.EXPOSURE_AREA else _STATUS_FILL_ALPHA
+
+
 def marker_style(marker: ImageMarker, *, queued_stroke: str, fallback_stroke: str) -> MarkerStyle:
     """The style ``marker`` is drawn in, everywhere but its selected state.
 
@@ -195,10 +205,10 @@ def marker_style(marker: ImageMarker, *, queued_stroke: str, fallback_stroke: st
         and marker.marker_type in _FAILURE_TYPES
         and "fail" in (marker.status or "").lower()
     ):
-        return MarkerStyle(STATUS_FAILED, STATUS_FAILED, _STATUS_FILL_ALPHA, "failed")
+        return MarkerStyle(STATUS_FAILED, STATUS_FAILED, _status_fill_alpha(marker), "failed")
     if reason is not None and marker.marker_type in _STATUS_TYPES:
         stroke = STATUS_STROKES[reason]
-        return MarkerStyle(stroke, stroke, _STATUS_FILL_ALPHA, reason)
+        return MarkerStyle(stroke, stroke, _status_fill_alpha(marker), reason)
     style = _TYPE_STYLES.get(marker.marker_type)
     if style is None:
         return MarkerStyle(fallback_stroke, fallback_stroke, _FALLBACK_FILL_ALPHA, "type")

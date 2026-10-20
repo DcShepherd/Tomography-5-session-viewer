@@ -275,30 +275,18 @@ def exact_exposure_marker(
         for marker in exposure_markers
         if marker_exposure_match_key(marker) in candidates
     ]
+    if not exact and batch is not None and batch.name and normalise_exposure_key(tilt.name) == normalise_exposure_key(batch.name):
+        exact = [
+            marker for marker in exposure_markers
+            if normalise_exposure_key(marker.metadata.get("area_name") or raw_marker_name(marker)) == "exposure"
+        ]
     if len(exact) == 1:
         return exact[0]
-    if len(exact) > 1:
-        LOGGER.debug(
-            "multiple exact exposure markers matched tilt=%s candidates=%s markers=%s",
-            tilt.name,
-            sorted(candidates),
-            [marker.id for marker in exact],
-        )
-        return exact[0]
-    if batch is not None and batch.name and normalise_exposure_key(tilt.name) == normalise_exposure_key(batch.name):
-        return next(
-            (
-                marker
-                for marker in exposure_markers
-                if normalise_exposure_key(marker.metadata.get("area_name") or raw_marker_name(marker)) == "exposure"
-            ),
-            None,
-        )
     LOGGER.debug(
-        "no exact exposure marker matched tilt=%s candidates=%s available=%s",
+        "no single exposure marker matched tilt=%s candidates=%s matches=%s",
         tilt.name,
         sorted(candidates),
-        [marker_exposure_match_key(marker) for marker in exposure_markers],
+        [marker.id for marker in exact],
     )
     return None
 

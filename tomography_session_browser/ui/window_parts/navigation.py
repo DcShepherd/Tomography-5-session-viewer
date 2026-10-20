@@ -30,6 +30,7 @@ from tomography_session_browser.domain.models import (
 from tomography_session_browser.presentation.navigation_context import (
     NavigationContext,
 )
+from tomography_session_browser.presentation.context_stack import entity_display_label_singular
 from tomography_session_browser.presentation.navigation_plan import (
     JUMP_LABELS,
     Jump,
@@ -71,6 +72,7 @@ from tomography_session_browser.ui.window_parts.state import (
     WindowState,
 )
 from tomography_session_browser.presentation.tab_keys import TabKey
+from tomography_session_browser.presentation.exposure_areas import exposure_area_title
 from collections.abc import Iterable
 
 def navigation_markers(value: Any, context: MarkerContext) -> Iterable[ImageMarker]:
@@ -107,7 +109,7 @@ class MarkerNavigation(QObject):
             )
         )
         if not isinstance(batch, BatchPosition):
-            self.window.statusBar().showMessage(
+            self.parts.context.post_navigation_message(
                 "The selected cluster member could not be resolved to a batch position."
             )
             return
@@ -121,7 +123,7 @@ class MarkerNavigation(QObject):
             self.ui.context_panel.set_text(
                 f"{marker.tooltip or ''}\n\n{target.explanation}".strip()
             )
-            self.window.statusBar().showMessage(target.explanation)
+            self.parts.context.post_navigation_message(target.explanation)
             return
 
         search_map = target.search_map
@@ -148,8 +150,8 @@ class MarkerNavigation(QObject):
                 destination_marker_id,
                 arrive=True,
             )
-        self.window.statusBar().showMessage(
-            f"Opened {self.parts.scopes.label_for(search_map)} for {self.parts.scopes.label_for(batch)}."
+        self.parts.context.post_navigation_message(
+            f"Opened search map {self.parts.scopes.label_for(search_map)} for batch position {self.parts.scopes.label_for(batch)}."
         )
 
 
@@ -197,7 +199,8 @@ class MarkerNavigation(QObject):
 
     def viewer_navigation_actions(self, value: Any) -> list[ViewerNavigationAction]:
         return [ViewerNavigationAction(key, f"\u2197 {JUMP_LABELS[key]}",
-                                       enabled=jump.resolution.navigable, tooltip=jump.tooltip)
+                                       enabled=jump.resolution.navigable, tooltip=jump.tooltip,
+                                       selection_required=jump.resolution.selection_required)
                 for key, jump in self.parts.navigation.navigation_plan_for(value).items()]
 
 
@@ -211,10 +214,10 @@ class MarkerNavigation(QObject):
         self.parts.viewers.cancel_scope_preparation()
         effects = NavigationEffects(
             viewer_tabs=self.ui.viewer_tabs,
-            statusBar=self.window.statusBar,
+            post_message=self.parts.context.post_navigation_message,
             inert_navigation_message=self.inert_navigation_message,
             show_unresolved_relationship_panel=self.show_unresolved_relationship_panel,
-            current_history_location=self.parts.history.current_history_location,
+            begin_navigation=self.parts.history.begin_navigation,
             enter_navigation_scope=self.enter_navigation_scope,
             select_viewer_object=self.parts.viewers.select_viewer_object,
             label_for=self.parts.scopes.label_for,
@@ -401,7 +404,7 @@ class MarkerNavigation(QObject):
                 )
                 self.ui.context_panel.set_title(marker.label or "Atlas marker")
                 self.ui.context_panel.set_text(marker.tooltip or message)
-                self.window.statusBar().showMessage(message)
+                self.parts.context.post_navigation_message(message)
                 return
             if navigate and self.parts.navigation.open_atlas_batch_overview(marker):
                 return
@@ -459,14 +462,19 @@ class MarkerNavigation(QObject):
                 "Status: unresolved",
             ]
             self.ui.context_panel.set_text("\n".join(lines))
-            self.window.statusBar().showMessage(status_text)
+            self.parts.context.post_navigation_message(status_text)
             return
         if not navigate:
             self.parts.viewers.select_visible_tab_object(linked)
             self.parts.context.set_context(self.parts.scopes.label_for(linked), linked)
-            self.window.statusBar().showMessage(f"Selected {self.parts.scopes.label_for(linked)} from marker.")
+            message = (
+                f"{exposure_area_title(marker)} selected."
+                if marker.marker_type == MarkerType.EXPOSURE_AREA
+                else f"Selected {entity_display_label_singular(tab_label_for_object(linked))} {self.parts.scopes.label_for(linked)} from marker."
+            )
+            self.parts.context.post_navigation_message(message)
             return
-        departure = self.parts.history.current_history_location()
+        departure = self.parts.history.begin_navigation()
         self.state.review.preserve_tree_root_context = False
         self.state.dashboard.dashboard_scope_prefers_tree = True
         context = self.parts.scopes.context_for_object(linked)
@@ -474,7 +482,8 @@ class MarkerNavigation(QObject):
             self.state.review.scope = context
             self.parts.viewers.render_viewer_tabs()
         self.parts.viewers.select_viewer_object(linked)
-        self.parts.context.show_arrival_message(f"Opened {self.parts.scopes.label_for(linked)} from marker.")
+        kind = entity_display_label_singular(tab_label_for_object(linked))
+        self.parts.context.show_arrival_message(f"Opened {kind} {self.parts.scopes.label_for(linked)} from marker.")
         self.parts.history.record_history(departure)
 
 
@@ -493,10 +502,10 @@ class MarkerNavigation(QObject):
         if not target.navigable or target.overview is None:
             self.ui.context_panel.set_title(marker.label or "Batch position")
             self.ui.context_panel.set_text(f"{marker.tooltip or ''}\n\n{target.explanation}".strip())
-            self.window.statusBar().showMessage(target.explanation)
+            self.parts.context.post_navigation_message(target.explanation)
             return True
 
-        departure = self.parts.history.current_history_location()
+        departure = self.parts.history.begin_navigation()
         overview = target.overview
         self.state.viewer.selection_state = SelectionState(
             selected_object_type=type(batch).__name__,
@@ -528,8 +537,8 @@ class MarkerNavigation(QObject):
         )
         viewer.select_marker(linked_marker.id if linked_marker is not None else None, arrive=True)
         self.parts.context.set_context(self.parts.scopes.label_for(batch), batch)
-        self.window.statusBar().showMessage(
-            f"Opened {self.parts.scopes.label_for(overview)} for batch position {self.parts.scopes.label_for(batch)}."
+        self.parts.context.post_navigation_message(
+            f"Opened overview {self.parts.scopes.label_for(overview)} for batch position {self.parts.scopes.label_for(batch)}."
         )
         self.parts.history.record_history(departure)
         return True

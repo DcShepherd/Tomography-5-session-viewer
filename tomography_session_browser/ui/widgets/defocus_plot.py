@@ -649,7 +649,7 @@ class DefocusScatterPlot(QWidget):
         # activation was delayed and could be cancelled by a following press.
         #
         # This widget has a distinct highlight state, which is why Space and
-        # Enter differ here while a plain StatCard treats them alike.
+        # Enter differ here while a summary card treats them alike.
         if key in {Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter}:
             index = self._keyboard_point_index if self._keyboard_point_index >= 0 else 0
             point = points[index]

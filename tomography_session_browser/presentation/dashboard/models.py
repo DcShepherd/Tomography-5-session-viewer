@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TYPE_CHECKING
 from tomography_session_browser.domain.models import (
     Atlas,
     BatchPosition,
@@ -13,6 +14,9 @@ from tomography_session_browser.domain.models import (
     TiltSeries,
 )
 from tomography_session_browser.presentation.workspace import EntityKind
+
+if TYPE_CHECKING:
+    from tomography_session_browser.presentation.dashboard.summary import DashboardSummary
 
 
 @dataclass(slots=True)
@@ -125,6 +129,11 @@ class StatusTileModel:
     status: str  # one of TILE_STATUS_* constants
     tooltip: str
     destination: str = ""  # tab label to switch to on click ("Search map", etc.)
+    #: The batch position a tilt-series tile belongs to, as the tilt series'
+    #: list says it ("" when it has none); ``group_inferred`` when the batch
+    #: was inferred from the series' name rather than recorded.
+    group: str = ""
+    group_inferred: bool = False
 
 
 @dataclass(slots=True)
@@ -140,6 +149,10 @@ class StatCardModel:
     destination: str  # tab label to switch to when the card itself is clicked
     #: Which entities the card counts; find a card by this, never by its label.
     kind: EntityKind
+    #: One line under the number when the count alone would mislead: the Batch
+    #: positions card, when some rows are failed groups inferred from series
+    #: names rather than recorded batches ("4 recorded · 1 inferred failed").
+    detail: str = ""
 
 
 @dataclass(slots=True)
@@ -173,122 +186,30 @@ class SearchMapAcquisitionRollup:
 
 
 @dataclass(slots=True)
-class SearchMapOverviewRowModel:
-    id: str
-    label: str
-    status: str
-    planned: int
-    acquired: int
-    failed_tilt_series: int
-    incomplete_tilt_series: int
-    unknown_tilt_series: int
-    acquisition_associated: bool = True
-    failed_batch_groups: int = 0
-    batch_positions: int = 0
-    acquired_batch_positions: int = 0
-
-    @property
-    def missing(self) -> int:
-        if not self.acquisition_associated:
-            return 0
-        accounted = (
-            self.acquired
-            + self.failed_tilt_series
-            + self.incomplete_tilt_series
-            + self.unknown_tilt_series
-        )
-        return max(self.planned - accounted, 0)
-
-    @property
-    def score(self) -> tuple[int, int, int, int, int, str]:
-        """Sort key: worst/most actionable rows first."""
-
-        association_rank = 1 if self.acquisition_associated else 0
-        status_rank = {
-            TILE_STATUS_FAILED: 4,
-            TILE_STATUS_WARNING: 3,
-            TILE_STATUS_MISSING: 2,
-            TILE_STATUS_NEUTRAL: 1,
-            TILE_STATUS_COMPLETE: 0,
-        }.get(self.status, 0)
-        return (
-            association_rank,
-            status_rank,
-            self.failed_tilt_series,
-            self.incomplete_tilt_series + self.unknown_tilt_series + self.missing,
-            self.planned,
-            self.label.casefold(),
-        )
-
-    @property
-    def is_affected(self) -> bool:
-        """True when this search map has something a reviewer should act on."""
-
-        if not self.acquisition_associated:
-            return False
-        if self.status in {TILE_STATUS_FAILED, TILE_STATUS_WARNING, TILE_STATUS_MISSING}:
-            return True
-        return bool(
-            self.failed_tilt_series
-            or self.incomplete_tilt_series
-            or self.unknown_tilt_series
-            or self.missing
-            or self.acquired_batch_positions < self.batch_positions
-        )
-
-    @property
-    def summary(self) -> str:
-        if not self.acquisition_associated:
-            return "N/A"
-        return f"{self.acquired_batch_positions}/{self.batch_positions} batch positions"
-
-
-@dataclass(slots=True)
-class SearchMapOverviewModel:
-    rows: list[SearchMapOverviewRowModel]
-    complete: int
-    incomplete: int
-    failed: int
-    unknown: int
-    not_associated: int = 0
-
-    @property
-    def total(self) -> int:
-        return len(self.rows)
-
-    @property
-    def worst(self) -> list[SearchMapOverviewRowModel]:
-        """The rows that actually warrant attention, worst first.
-
-        This used to return the top five by score regardless of whether
-        anything was wrong, so a healthy session filled a section headed
-        "MOST AFFECTED" with green, fully-complete maps. Only rows that are
-        genuinely affected qualify; when none are, the section is empty and
-        the card says so.
-        """
-
-        affected = [row for row in self.rows if row.is_affected]
-        return sorted(affected, key=lambda row: row.score, reverse=True)[:5]
-
-    @property
-    def has_affected_rows(self) -> bool:
-        return any(row.is_affected for row in self.rows)
-
-
-@dataclass(slots=True)
 class DashboardFilterModel:
     label: str
     count: int
     tab: str
     query: str
     tooltip: str
+    #: The rows the summary counted, independent of the destination list's scope.
+    row_keys: frozenset[str] | None = None
+    scope_label: str = ""
 
 
-@dataclass(slots=True)
-class WarningRowModel:
-    severity: str  # "info" | "warning" | "error"
-    sample: str | None
-    message: str
+@dataclass(frozen=True, slots=True)
+class AttributedWarning:
+    """A warning, and the parsed objects it was recorded against.
+
+    ``entity_keys`` are ``domain/identity.canonical_entity_key`` values: the
+    sample, session or entity whose ``.warnings`` it came from, or every tilt
+    series a derived warning covers. Empty means "not attributed", which only
+    a warning with no object at all can be. Display-only; nothing is written
+    back to the object.
+    """
+
+    text: str
+    entity_keys: frozenset[tuple[str, str]] = frozenset()
 
 
 @dataclass(slots=True)
@@ -297,6 +218,9 @@ class WarningGroupModel:
     count: int
     severity: str  # "info" | "warning" | "error"
     items: list[str]
+    #: The union of the members' ``entity_keys``; ``None`` as soon as one
+    #: member is not attributed, since the group then covers an unknown object.
+    entity_keys: frozenset[tuple[str, str]] | None = None
 
 
 @dataclass(slots=True)
@@ -439,41 +363,32 @@ class InferredBatchGroup:
 class AtlasRowModel:
     sample_label: str
     image_path: str | None  # rendered atlas image (jpg) if present
-    image_size: tuple[int, int] | None  # pixels
-    pixel_size_um: float | None  # display pixel size in micrometres
-    tile_count: int
-    acquisition_time: str | None
+    #: The atlas's files could not be found (its own warnings say so, or it has
+    #: no image).
+    missing: bool = False
+    #: The grid's atlas was acquired more than once; this is the one shown.
+    reacquired: bool = False
+    #: The one data-collection sample linked to this atlas's sample, when there
+    #: is exactly one; ``None`` for none or several (no guess).
+    linked_sample: str | None = None
+    #: That sample's tilt series; ``None`` while its collection is not loaded.
+    tilt_series_count: int | None = None
+    #: The atlas's own id: what a click on its tile opens.
+    atlas_id: str = ""
+    #: All loaded collection members, even when there is no single link label.
+    collection_sample_ids: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
 class AtlasSummaryModel:
-    """Atlas-side summary surfaced on the dashboard.
+    """The atlases a scope holds, and how many there are.
 
-    Distinct from the data-collection summary so atlas-only sessions still
-    render meaningful information instead of a row of zero-count cards.
-
-    The model carries two views of "how many atlases":
-
-    * :attr:`counts` — the four-way breakdown
-      (:class:`AtlasCountModel`) used by the dashboard widget and the
-      PDF cover. This is the corrected, deduplicated number set.
-    * :attr:`atlas_count` and :attr:`sample_count_with_atlas` — kept
-      for backwards compatibility with older callers that read these
-      fields directly. Both are now sourced from
-      :class:`AtlasCountModel` so they agree with the four-way counts.
-
-    The legacy ``atlas_count`` is the **sample atlas** count (atlases
-    linked to data-collection samples) — the value the user expects to
-    see in the "Atlases" header. It is NOT inflated by per-sample
-    Atlas/ folders that belong to a screening session with no linked
-    data collection.
+    ``rows`` are the atlases the Atlas tab lists (a Single Atlas placeholder is
+    not one: it is neither a grid nor a second atlas); ``counts`` is the
+    four-way breakdown the PDF cover uses too.
     """
 
-    atlas_count: int
-    sample_count_with_atlas: int
     rows: list[AtlasRowModel]
-    pixel_size_range_um: tuple[float, float] | None  # min, max across atlases
-    image_size_range: tuple[tuple[int, int], tuple[int, int]] | None  # (smallest, largest)
     counts: AtlasCountModel = field(default_factory=AtlasCountModel)
 
 
@@ -481,16 +396,11 @@ class AtlasSummaryModel:
 class DashboardModel:
     """Aggregate model that drives the Session-tab dashboard.
 
-    Two of the three high-level sections are independently optional:
-
-    * ``has_atlases`` toggles the Atlas Summary block.
-    * ``has_collection_data`` toggles the counts row, the timeline, defocus
-      and dose charts, and the search-map and batch-position cards.
-
-    Atlas-only sessions render only the Atlas Summary; data-collection-only
-    sessions render only the Collection block; mixed sessions render both.
-    The widget consumes these flags so we don't show empty zero-count cards
-    on a session that was never going to acquire data.
+    ``summary`` says which page the scope gets (collection, sample, atlas
+    session or empty) and carries what only that page needs; the fields here
+    are what the pages share: the count cards, the outcomes, the charts, the
+    filters and the warning groups. The PDF reads ``counts``, ``outcomes`` and
+    the acquisition window.
     """
 
     title: str
@@ -500,15 +410,11 @@ class DashboardModel:
     acquisition_start: str | None
     acquisition_end: str | None
     acquisition_duration: str | None  # human-readable elapsed time, e.g. "14 hours and 4 minutes"
-    completeness: str  # "complete" | "warning" | "error"
-    completeness_label: str
     counts: list[StatCardModel]
     outcomes: TiltSeriesOutcomeModel
     defocus_readout: DefocusPlotModel
     dose_information: DoseInformationPlotModel
-    search_map_overview: SearchMapOverviewModel
     filters: list[DashboardFilterModel]
-    warnings: list[WarningRowModel]
     warning_groups: list[WarningGroupModel]
     batch_positions: list[BatchPositionProgressModel]
     timeline_items: dict[str, TimelineItemModel]
@@ -517,6 +423,8 @@ class DashboardModel:
     has_atlases: bool
     has_collection_data: bool
     atlas_summary: AtlasSummaryModel | None
+    #: Which page the dashboard draws, and what only that page needs.
+    summary: DashboardSummary
 
 
 @dataclass(slots=True)
@@ -540,7 +448,7 @@ class DashboardScope:
     tilt_series: list[TiltSeries]
     samples: list[Sample]
     sample_groups: list[tuple[str, list[Sample]]]
-    warnings: list[str]
+    warnings: list[AttributedWarning]
     is_sample_scope: bool = False
 
 

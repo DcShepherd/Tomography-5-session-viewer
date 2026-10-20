@@ -4,7 +4,9 @@ from dataclasses import dataclass, replace
 import logging
 from typing import Any, Callable
 from PySide6.QtCore import QThreadPool
+from tomography_session_browser.presentation.navigation_history import HistoryLocation
 from tomography_session_browser.presentation.prepared_session import PreparedSessionUi, prepare_session_ui_payload
+from tomography_session_browser.presentation.tab_keys import TabKey
 from tomography_session_browser.presentation.workspace import Scope, Workspace
 from tomography_session_browser.presentation.dashboard.models import DashboardModel
 from tomography_session_browser.presentation.viewer_tabs import PreparedViewerTabs
@@ -20,6 +22,14 @@ class ScopeRequest:
     viewer_scope: Scope
     value: Any
     label: str
+    #: The tab to show once the scope is published: the active one for an
+    #: ordinary tree selection, ``TabKey.SESSION`` for a summary's own link.
+    #: Applied by the publication owner, never by the worker.
+    destination_tab: TabKey
+    #: Where the reviewer came from, for an explicit route that records
+    #: history. Recorded after the scope publishes; dropped with a request
+    #: that is superseded, cancelled or fails.
+    departure: HistoryLocation | None = None
     cached_dashboard: tuple[DashboardModel, SessionTimeline | None] | None = None
     cached_viewer_tabs: PreparedViewerTabs | None = None
 
@@ -38,11 +48,13 @@ class ScopePreparation:
         self.generation += 1
         self.pending = None
 
-    def request(self, workspace: Workspace, scope: Scope, viewer_scope: Scope, value: Any, label: str, *,
+    def request(self, workspace: Workspace, scope: Scope, viewer_scope: Scope, value: Any, label: str,
+                destination_tab: TabKey, *, departure: HistoryLocation | None = None,
                 cached_dashboard: tuple[DashboardModel, SessionTimeline | None] | None = None,
                 cached_viewer_tabs: PreparedViewerTabs | None = None) -> None:
         self.generation += 1
-        self.pending = ScopeRequest(self.generation, workspace, scope, viewer_scope, value, label, cached_dashboard, cached_viewer_tabs)
+        self.pending = ScopeRequest(self.generation, workspace, scope, viewer_scope, value, label, destination_tab,
+                                    departure, cached_dashboard, cached_viewer_tabs)
         self.start_pending()
 
     def start_pending(self) -> None:

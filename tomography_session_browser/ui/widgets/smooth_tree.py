@@ -19,12 +19,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QModelIndex, QSize, Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QModelIndex, QPoint, QPointF, QPersistentModelIndex, QSize, Qt
+from PySide6.QtGui import QMouseEvent, QPixmap
 from PySide6.QtWidgets import QAbstractItemView, QTreeWidget, QTreeWidgetItem, QWidget
 import shiboken6
 
 from tomography_session_browser.ui.motion import BranchReveal, SmoothScroller, motion_enabled
+from tomography_session_browser.ui.widgets.rounded_viewport import round_viewport
+from tomography_session_browser.ui.widgets.branch_input import PaintedRow, row_at, visible_row_snapshot
 
 #: Keys that open (True) or close (False) the current branch.
 _BRANCH_KEYS = {
@@ -47,6 +49,7 @@ class _BranchWatch:
     scroll: int
     size: QSize
     picture: QPixmap
+    rows: tuple[PaintedRow, ...]
 
 
 def _descends_from(index: QModelIndex, ancestor: QModelIndex) -> bool:
@@ -63,9 +66,13 @@ class SmoothScrollTree(QTreeWidget):
         super().__init__(parent)
         self._branch_watch: _BranchWatch | None = None
         self._branch_reveal: BranchReveal | None = None
+        self._open_rows: tuple[PaintedRow, ...] = ()
+        self._closed_rows: tuple[PaintedRow, ...] = ()
+        self._mapped_press: tuple[QPersistentModelIndex, QPoint, int] | None = None
         # First: setting the scroll mode already calls ``scrollTo``.
         self.scroller = SmoothScroller(self)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        round_viewport(self)
         # Anything that moves or changes the rows makes a reveal's pictures
         # stale: show the tree as it is.
         self.verticalScrollBar().valueChanged.connect(self._end_branch_reveal)
@@ -98,6 +105,8 @@ class SmoothScrollTree(QTreeWidget):
         return reveal if reveal is not None and shiboken6.isValid(reveal) and reveal.isVisible() else None
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        self._mapped_press = None
+        event = self._map_painted_press(event)
         self._end_branch_reveal()
         position = event.position().toPoint()
         item = self.itemAt(position)
@@ -109,10 +118,12 @@ class SmoothScrollTree(QTreeWidget):
         self._check_branch(keep=True)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
+        event = self._map_press_continuation(event)
         super().mouseReleaseEvent(event)
         self._check_branch(keep=False)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt API
+        event = self._map_press_continuation(event) if self._mapped_press else self._map_painted_press(event)
         self._end_branch_reveal()
         self._watch_branch(self.itemAt(event.position().toPoint()))
         super().mouseDoubleClickEvent(event)
@@ -138,8 +149,45 @@ class SmoothScrollTree(QTreeWidget):
     def _end_branch_reveal(self, *_args) -> None:
         reveal = self._branch_reveal
         self._branch_reveal = None
+        self._open_rows = self._closed_rows = ()
         if reveal is not None and shiboken6.isValid(reveal):
             reveal.dismiss()
+
+    def _map_painted_press(self, event: QMouseEvent) -> QMouseEvent:
+        """Resolve the row in the displayed picture before ending its motion."""
+        reveal = self.branch_reveal
+        position = event.position().toPoint()
+        if reveal is None or not reveal.geometry().contains(position):
+            return event
+        opened, source = reveal.source_at(position)
+        row = row_at(self._open_rows if opened else self._closed_rows, source.y())
+        # Remember even a painted blank: it must not become a different row on release.
+        index = row.index if row is not None else QPersistentModelIndex()
+        offset = source.y() - row.rect.top() if row is not None else 0
+        self._mapped_press = (index, position, offset)
+        self._end_branch_reveal()
+        if index.isValid():
+            # A child still visible in the closing picture was explicitly chosen.
+            # Reopen its ancestry, rather than select a hidden or unrelated row.
+            parent = QModelIndex(index).parent()
+            while parent.isValid():
+                self.setExpanded(parent, True)
+                parent = parent.parent()
+            self.executeDelayedItemsLayout()
+        return self._map_press_continuation(event)
+
+    def _map_press_continuation(self, event: QMouseEvent) -> QMouseEvent:
+        if self._mapped_press is None:
+            return event
+        index, original, offset = self._mapped_press
+        # Keep Qt's normal selection, modifiers, arrow hit testing and activation.
+        target = QPoint(-1, -1)
+        if index.isValid():
+            rect = self.visualRect(QModelIndex(index))
+            delta = event.position().toPoint() - original
+            target = QPoint(event.position().toPoint().x(), rect.top() + offset + delta.y())
+        return QMouseEvent(event.type(), QPointF(target), event.globalPosition(),
+                           event.button(), event.buttons(), event.modifiers())
 
     def _watch_branch(self, item: QTreeWidgetItem | None) -> None:
         """Keep a picture of the tree in case this input toggles ``item``.
@@ -163,6 +211,7 @@ class SmoothScrollTree(QTreeWidget):
             scroll=self.verticalScrollBar().value(),
             size=viewport.size(),
             picture=viewport.grab(),
+            rows=visible_row_snapshot(self),
         )
 
     def _check_branch(self, *, keep: bool) -> None:
@@ -202,6 +251,8 @@ class SmoothScrollTree(QTreeWidget):
             return
         now = viewport.grab()
         opened, closed = (now, watch.picture) if expanded else (watch.picture, now)
+        current_rows = visible_row_snapshot(self)
+        self._open_rows, self._closed_rows = (current_rows, watch.rows) if expanded else (watch.rows, current_rows)
         self._branch_reveal = BranchReveal(viewport, top, opened, closed, extent, opening=expanded)
 
     def _branch_extent(self, index: QModelIndex) -> int:

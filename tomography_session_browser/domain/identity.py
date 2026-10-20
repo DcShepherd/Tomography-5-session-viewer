@@ -40,7 +40,9 @@ def path_identity_key(path: str | Path) -> str:
     """The key every spelling of one folder shares: absolute, forward
     slashes, casefolded."""
 
-    value = Path(path)
+    # A ``Path`` is used as it is: copying one through ``Path()`` costs more than
+    # the rest of this function, and every list row asks.
+    value = path if isinstance(path, Path) else Path(path)
     if not value.is_absolute():
         value = Path.cwd() / value
     return str(value).replace("\\", "/").casefold()
@@ -69,6 +71,29 @@ def canonical_entity_key(value: Any) -> tuple[str, str]:
     if entity_id:
         return type_name, f"id:{entity_id}"
     return type_name, f"object:{id(value)}"
+
+
+def entity_key_text(value: Any) -> str:
+    """What a list row is: ``canonical_entity_key`` and the ``id``, as one string.
+
+    A viewer row, a remembered selection, a history entry and a tab's prepared
+    statuses and preview sources are all found by this key, never by position.
+    Neither half is enough alone, and real folders show both ways:
+
+    * the path alone merges the exposure-specific rows of one search tile (one
+      tile file, one row per batch position it was acquired for);
+    * the ``id`` alone merges two objects that share an ``id`` and differ in path.
+
+    Two values with one path and one ``id`` are one entity (the same parsed
+    object listed through a ``Session`` and its ``Sample``). An object with
+    neither a path nor an ``id`` has no identity that outlives it, so its key
+    is only good while the object is.
+    """
+
+    type_name, key = canonical_entity_key(value)
+    identifier = getattr(value, "id", None)
+    suffix = f"#{identifier}" if identifier and not key.startswith("id:") else ""
+    return f"{type_name}:{key}{suffix}"
 
 
 def summary_entity_key(value: Any) -> tuple[str, str]:

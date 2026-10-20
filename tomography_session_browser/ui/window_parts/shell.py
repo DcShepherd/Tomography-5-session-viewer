@@ -52,8 +52,9 @@ from tomography_session_browser.presentation.design_tokens import (
 from tomography_session_browser.ui.theme import (
     mark_theme_region,
 )
-from tomography_session_browser.ui.widgets.context_drawer import (
-    ContextDrawer,
+from tomography_session_browser.ui.widgets.panel_drawer import (
+    PanelDrawer,
+    WatchedGeometry,
 )
 from tomography_session_browser.ui.widgets.context_header import (
     ContextHeader,
@@ -95,6 +96,7 @@ class WindowShell(QObject):
     def __init__(self, window: QMainWindow, state: WindowState, ui: WindowUi, parts: WindowParts) -> None:
         super().__init__(window)
         self.window, self.state, self.ui, self.parts = window, state, ui, parts
+        self.list_column_watch = WatchedGeometry(self, lambda: self.parts.chrome.follow_list_column())
 
     def build_toolbar(self) -> None:
         toolbar = QToolBar("Main")
@@ -347,6 +349,9 @@ class WindowShell(QObject):
             self.ui.tabs.setCurrentIndex(TAB_LABELS.index(settings.last_tab))
         # Tab changes need to be persisted.
         self.ui.connections.append(lambda signal=self.ui.tabs.currentChanged: signal.connect(self.parts.context.on_tab_changed))
+        # The tab being looked at keeps its name when the bar is short of room. (An open
+        # Context drawer follows the list column of the tab now shown: ``list_column_watch``.)
+        self.ui.connections.append(lambda signal=self.ui.tabs.currentChanged: signal.connect(lambda _index: self.parts.chrome.refit_tabs_for_current()))
 
 
     def apply_initial_geometry(self) -> None:
@@ -381,12 +386,14 @@ class WindowShell(QObject):
         )
         panel, layout = self.parts.project_panel.widget, self.parts.project_panel.layout
         self.ui.project_filter = self.parts.project_panel.filter
+        panel.setFocusProxy(self.ui.project_filter)
         self.ui.project_badge_legend = self.parts.project_panel.badge_legend
         self.ui.project_drop_hint = self.parts.project_panel.drop_hint
         self.ui.tree = self.parts.project_panel.tree
         self.ui.connections.append(lambda signal=self.ui.tree.customContextMenuRequested: signal.connect(self.parts.project.on_project_tree_context_menu))
         self.ui.connections.append(lambda signal=self.ui.tree.currentItemChanged: signal.connect(self.parts.project.tree_selection_changed))
         self.ui.connections.append(lambda signal=self.ui.tree.itemPressed: signal.connect(self.parts.project.project_tree_item_pressed))
+        self.ui.connections.append(lambda signal=self.ui.tree.itemClicked: signal.connect(self.parts.project.project_tree_item_clicked))
         self.ui.connections.append(lambda signal=self.ui.tree.itemDoubleClicked: signal.connect(self.parts.project.project_tree_item_double_clicked))
         # Enter previously did nothing on any tree row, for any entity type.
         self.ui.connections.append(lambda signal=self.ui.tree.itemActivated: signal.connect(self.parts.project.project_tree_item_activated))
@@ -413,6 +420,10 @@ class WindowShell(QObject):
         self.parts.project_panel.sync_empty_state()
         self.ui.project_dock.setWidget(panel)
         self.window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.ui.project_dock)
+        self.ui.project_drawer = PanelDrawer(self.window, name="Project", from_left=True)
+        self.ui.connections.append(lambda signal=self.ui.project_drawer.escape_pressed: signal.connect(self.parts.chrome.close_project_drawer))
+        self.ui.project_drawer.stay_under = lambda: self.ui.loading_overlay
+        self.ui.project_drawer.toggle_control = lambda: self.ui.main_toolbar.widgetForAction(self.ui.project_panel_action)
 
 
     def build_right_panel(self) -> None:
@@ -436,7 +447,7 @@ class WindowShell(QObject):
         # On a narrow window the same panel moves into a drawer over the page
         # (plan D2): ``_update_context_drawer_mode``.
         self.ui.context_shell = panel
-        self.ui.context_drawer = ContextDrawer(self.window)
+        self.ui.context_drawer = PanelDrawer(self.window)
         self.ui.connections.append(lambda signal=self.ui.context_drawer.escape_pressed: signal.connect(self.parts.chrome.close_context_drawer_from_keyboard))
         self.ui.context_drawer.stay_under = lambda: self.ui.loading_overlay
         self.ui.context_drawer.toggle_control = lambda: self.ui.main_toolbar.widgetForAction(self.ui.context_panel_action)
@@ -457,15 +468,14 @@ class WindowShell(QObject):
             if label == TabKey.SESSION:
                 self.ui.session_dashboard = SessionDashboard(tab)
                 self.ui.connections.append(lambda signal=self.ui.session_dashboard.navigate_requested: signal.connect(self.parts.dashboard.navigate_to_tab))
-                self.ui.connections.append(lambda signal=self.ui.session_dashboard.search_map_clicked: signal.connect(self.parts.dashboard.on_dashboard_search_map_clicked))
                 self.ui.connections.append(lambda signal=self.ui.session_dashboard.tile_item_clicked: signal.connect(self.parts.dashboard.on_dashboard_tile_clicked))
-                self.ui.connections.append(lambda signal=self.ui.session_dashboard.sample_clicked: signal.connect(self.parts.dashboard.on_dashboard_sample_clicked))
-                self.ui.connections.append(lambda signal=self.ui.session_dashboard.filter_requested: signal.connect(self.parts.dashboard.on_dashboard_filter_requested))
+                self.ui.connections.append(lambda signal=self.ui.session_dashboard.scope_requested: signal.connect(self.parts.dashboard.on_dashboard_scope_requested))
+                self.ui.connections.append(lambda signal=self.ui.session_dashboard.filter_requested: signal.connect(self.parts.dashboard.on_dashboard_route_requested))
                 self.ui.connections.append(lambda signal=self.ui.session_dashboard.point_clicked: signal.connect(self.parts.dashboard.on_dashboard_plot_point_clicked))
                 self.ui.connections.append(lambda signal=self.ui.session_dashboard.point_double_clicked: signal.connect(self.parts.dashboard.on_dashboard_plot_point_double_clicked))
                 self.ui.connections.append(lambda signal=self.ui.session_dashboard.timeline_tilt_series_requested: signal.connect(self.parts.dashboard.on_dashboard_timeline_tilt_series_requested))
                 self.ui.connections.append(lambda signal=self.ui.session_dashboard.highlight_clear_requested: signal.connect(self.parts.dashboard.on_dashboard_highlight_clear_requested))
-                self.ui.connections.append(lambda signal=self.ui.session_dashboard.warning_details_requested: signal.connect(self.parts.dashboard.show_warning_details))
+                self.ui.connections.append(lambda signal=self.ui.session_dashboard.source_folders_requested: signal.connect(self.parts.chrome.reveal_context_panel))
                 layout.addWidget(self.ui.session_dashboard, stretch=1)
             else:
                 display_label = ENTITY_DISPLAY_LABELS.get(label, label)
@@ -485,6 +495,13 @@ class WindowShell(QObject):
                     on_marker_selection_cleared=self.parts.viewers.viewer_marker_selection_cleared,
                     show_marker_controls=label != TabKey.TILT_SERIES,
                     atlas_lod=label == TabKey.ATLAS,
+                    status_segments={
+                        TabKey.ATLAS: ("missing",),
+                        TabKey.OVERVIEW: ("with-acquisitions", "no-acquisitions"),
+                        TabKey.SEARCH_MAP: ("failed", "incomplete", "complete"),
+                    }.get(label, ("failed", "complete")),
+                    # Exposure areas are chosen on a batch position, and only there (D9).
+                    show_exposure_chooser=label == TabKey.BATCH_POSITION,
                     # The search-map tile grid covers much of an Overview;
                     # selecting a tile on press made that area impossible to
                     # pan. Double-click still opens the search map.
@@ -500,10 +517,12 @@ class WindowShell(QObject):
                     else None,
                 )
                 self.ui.viewer_tabs[label] = viewer_tab
+                # An open Context drawer sits over this tab's list column and follows it.
+                self.list_column_watch.watch(viewer_tab.parts.list_pane.list_panel)
                 self.ui.connections.append(lambda signal=viewer_tab.header_title_changed: signal.connect(lambda _title: self.parts.context.sync_context_heading()))
                 # Keep the header's filter summary and Clear action in step
                 # with what the reviewer types.
-                self.ui.connections.append(lambda signal=viewer_tab.list_filter.textChanged: signal.connect(lambda _text: self.parts.context.refresh_context_header()))
+                self.ui.connections.append(lambda signal=viewer_tab.query_changed: signal.connect(lambda _query: self.parts.context.refresh_context_header()))
                 self.ui.connections.append(lambda signal=viewer_tab.empty_state_action_requested: signal.connect(self.parts.context.on_empty_state_action))
                 layout.addWidget(viewer_tab, stretch=1)
             index = self.ui.tabs.addTab(tab, ENTITY_DISPLAY_LABELS.get(label, label))
@@ -520,7 +539,6 @@ class WindowShell(QObject):
         # and borrowed Atlas context are stated on all of them rather than
         # only on the dashboard.
         self.ui.context_header = ContextHeader(container)
-        self.ui.connections.append(lambda signal=self.ui.context_header.filter_clear_requested: signal.connect(self.parts.context.clear_active_tab_filter))
         outer.addWidget(self.ui.context_header)
         outer.addWidget(self.ui.tabs, stretch=1)
         self.window.setCentralWidget(container)

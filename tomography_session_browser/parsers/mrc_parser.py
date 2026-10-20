@@ -20,6 +20,10 @@ MRC_HEADER_BYTES = 1024
 DEFAULT_MAX_PREVIEW_DIMENSION = 2048
 NORMALISATION = "area_downsample_percentile_0.5_99.5"
 
+# Even 64 * 65535 is below float32's exact-integer limit (2**24), so every
+# intermediate sum is exact. This also bounds the number of strided passes.
+_INTEGER_PREVIEW_MAX_SHRINK = 8
+
 
 @dataclass(frozen=True, slots=True)
 class MrcInspection:
@@ -379,6 +383,13 @@ def _downsample_for_preview(frame: np.ndarray, shrink: int) -> np.ndarray:
     if reduced_height <= 0 or reduced_width <= 0:
         return np.asarray(frame)
     trimmed = frame[: reduced_height * shrink, : reduced_width * shrink]
+    if frame.dtype.kind in "iu" and frame.dtype.itemsize <= 2 and shrink <= _INTEGER_PREVIEW_MAX_SHRINK:
+        # Accumulate into the reduced image only; never copy the full memmap.
+        total = np.zeros((reduced_height, reduced_width), dtype=np.int32)
+        for dy in range(shrink):
+            for dx in range(shrink):
+                total += trimmed[dy::shrink, dx::shrink]
+        return total.astype(np.float32) / np.float32(shrink * shrink)
     blocks = trimmed.reshape(reduced_height, shrink, reduced_width, shrink)
     return blocks.mean(axis=(1, 3), dtype=np.float32)
 

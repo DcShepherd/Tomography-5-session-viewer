@@ -6,6 +6,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QPushButton, QVBoxLayout, QWidget
 from tomography_session_browser.ui.widgets.empty_state_panel import EmptyStatePanel
+from tomography_session_browser.ui.widgets.canvas_shell import CanvasShell
 from tomography_session_browser.ui.motion import live_section_reveal
 from tomography_session_browser.services.pixel_size import scale_bar_pixel_size
 from tomography_session_browser.ui.icons import themed_icon
@@ -13,7 +14,7 @@ from tomography_session_browser.presentation.design_tokens import CANVAS_CHROME,
 import logging
 LOGGER = logging.getLogger("tomography_session_browser.ui.image_viewer")
 from tomography_session_browser.ui.viewer.atlas_lod_items import AtlasMarkerLegend
-from tomography_session_browser.ui.viewer.constants import ATLAS_LOD_CONTROL_LABELS, BUTTON_ZOOM_STEP, FLOATING_CONTROL_BOTTOM_INSET_PX, FLOATING_CONTROL_INSET_PX, FLOATING_CONTROL_SIZE_PX, MAX_SCALE_BAR_SCREEN_PX, MIN_SCALE_BAR_SCREEN_PX, PYRAMID_LEVELS, QWIDGETSIZE_MAX, ZOOM_LABEL_MIN_WIDTH_PX, ZOOM_PANEL_HORIZONTAL_PADDING_PX
+from tomography_session_browser.ui.viewer.constants import BUTTON_ZOOM_STEP, FLOATING_CONTROL_BOTTOM_INSET_PX, FLOATING_CONTROL_INSET_PX, FLOATING_CONTROL_SIZE_PX, MAX_SCALE_BAR_SCREEN_PX, MIN_SCALE_BAR_SCREEN_PX, PYRAMID_LEVELS, QWIDGETSIZE_MAX, ZOOM_LABEL_MIN_WIDTH_PX, ZOOM_PANEL_HORIZONTAL_PADDING_PX
 from tomography_session_browser.ui.viewer.preview_image import source_image_size_for_item
 from tomography_session_browser.ui.viewer.scale_bar import ScaleBarWidget, format_pixel_size_label, format_scale_length_label, nice_scale_length_meters
 from typing import TYPE_CHECKING
@@ -32,13 +33,13 @@ class CanvasControls:
         viewer_layout = QVBoxLayout(viewer_panel)
         viewer_layout.setContentsMargins(0, 0, 0, 0)
         viewer_layout.setSpacing(6)
-        viewer_shell = QWidget(viewer_panel)
+        viewer_shell = CanvasShell(viewer_panel)
         self.view.viewer_shell = viewer_shell
-        viewer_shell.setObjectName("viewerCanvasShell")
         viewer_shell_layout = QGridLayout(viewer_shell)
         viewer_shell_layout.setContentsMargins(0, 0, 0, 0)
         viewer_shell_layout.setSpacing(0)
         viewer_shell_layout.addWidget(self.view.viewer, 0, 0)
+        viewer_shell.set_focus_source(self.view.viewer)
 
         # Stacked over the canvas so an empty list explains itself with a real
         # panel rather than a bare line of text on a black rectangle. Hidden
@@ -240,10 +241,12 @@ class CanvasControls:
         self.view.export_image_button.setEnabled(False)
         self.view.overlay_button.setFixedHeight(FLOATING_CONTROL_SIZE_PX)
         self.view.image_badge.setFixedHeight(FLOATING_CONTROL_SIZE_PX)
-        self.view.status = QLabel(empty_text, self.view)
+        # Exceptions only: hidden until a fallback, an unreadable MRC or a
+        # warning has something to say (``ListPane.set_status_text``).
+        self.view.status = QLabel("", self.view)
         self.view.status.setObjectName("viewerStatus")
         self.view.status.setWordWrap(True)
-        self.view.status.setToolTip(empty_text)
+        self.view.status.setVisible(False)
 
         return controls, zoom_label_width
 
@@ -276,22 +279,12 @@ class CanvasControls:
 
         self.view._set_canvas_control_icons()
         if self.entity_icon is not None:
-            for index in range(self.view.list.topLevelItemCount()):
-                self.view.list.topLevelItem(index).setIcon(
-                    0,
-                    themed_icon(self.entity_icon, size=16),
-                )
+            for row in self.view.parts.list_pane.rows.object_rows():
+                row.setIcon(0, themed_icon(self.entity_icon, size=16))
         for key, button in self.view.parts.viewer_header.navigation_buttons.items():
             button.setIcon(themed_icon(self.view.parts.viewer_header.navigation_icon_names.get(key, "arrow-right"), size=14))
         # The menu holds jumps both ways, so its own button keeps the plain arrow.
         self.view.parts.viewer_header.navigation_menu_button.setIcon(themed_icon("arrow-right", size=14))
-        if self.view.parts.overlay_panel.atlas_lod:
-            icon_by_key = {
-                key: icon_name
-                for key, _label, icon_name, _default in ATLAS_LOD_CONTROL_LABELS
-            }
-            for key, checkbox in self.view.parts.overlay_panel.atlas_lod_checks.items():
-                checkbox.setIcon(themed_icon(icon_by_key[key], color=CANVAS_CHROME.icon, size=16))
         if self.view.isVisible():
             self.view._recolour_canvas()
         else:
@@ -372,13 +365,27 @@ class CanvasControls:
         left, right, bottom = self.view._floating_control_insets()
         baseline = shell.height() - bottom
         scale_anchor.move(left, baseline - scale_anchor.height())
-        zoom_anchor.move(shell.width() - right - zoom_anchor.width(), baseline - zoom_anchor.height())
+        zoom_left = shell.width() - right - zoom_anchor.width()
+        zoom_anchor.move(self.clear_of_open_panel(zoom_left, zoom_anchor), baseline - zoom_anchor.height())
         # A legend opening or closing rides along with its anchor (a zoom
         # step moves the anchor with a letterboxed image's edge).
         legend = getattr(self.view, "atlas_marker_legend", None)
         reveal = live_section_reveal(legend) if legend is not None else None
         if reveal is not None:
             reveal.align_to(self.view._rect_in_shell(legend))
+
+    def clear_of_open_panel(self, zoom_left: int, zoom_anchor: QWidget) -> int:
+        """Where the zoom stack's left edge goes: beside the Overlays panel when that panel would reach it.
+
+        Judged against the lowest the stack can sit (an image that fills the
+        canvas), so zooming a letterboxed image never flips it from side to side.
+        """
+
+        panel_rect = self.view._open_panel_rect()
+        shell = self.view.viewer_shell
+        if panel_rect is None or panel_rect.bottom() < shell.height() - FLOATING_CONTROL_BOTTOM_INSET_PX - zoom_anchor.height() - SPACE_S:
+            return zoom_left
+        return max(min(zoom_left, panel_rect.left() - SPACE_S - zoom_anchor.width()), 0)
 
     def zoom_changed(self, zoom: float) -> None:
         # Zoom is measured relative to fit-to-view, so a fitted image used to

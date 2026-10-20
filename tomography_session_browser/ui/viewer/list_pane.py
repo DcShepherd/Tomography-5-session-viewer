@@ -4,17 +4,20 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QHeaderView, QSplitter, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QHeaderView, QMenu, QSplitter, QToolButton, QTreeWidgetItem, QVBoxLayout, QWidget
 from tomography_session_browser.services.preview_sources import PreviewSources
 from tomography_session_browser.domain.markers import ImageMarker
-from tomography_session_browser.presentation.viewer_items import panel_title_for_items as _panel_title_for_items, summary_for_item as _summary_for_item, status_label_for_item as _status_label_for_item
+from tomography_session_browser.presentation.design_tokens import SPACE_S
+from tomography_session_browser.presentation.viewer_items import singular_title_for_items as _singular_title_for_items, panel_title_for_items as _panel_title_for_items, summary_for_item as _summary_for_item, status_label_for_item as _status_label_for_item
 from tomography_session_browser.presentation.empty_states import KIND_LOAD_FAILED, EmptyState, viewer_empty_state
 from tomography_session_browser.ui.widgets.empty_state_panel import EmptyStatePanel
 from tomography_session_browser.ui.motion import ItemHoverAnimator
-from tomography_session_browser.services.item_status import ItemListStatus, display_status_label
+from tomography_session_browser.ui.theme import TIER_SUPPORTING, apply_tier
+from tomography_session_browser.services.item_status import ItemListStatus, display_status_label, split_filter_query
+from tomography_session_browser.ui.viewer.list_filter_bar import ListFilterBar
+from tomography_session_browser.ui.viewer.row_index import RowIndex
 from tomography_session_browser.ui.widgets.smooth_tree import SmoothScrollTree
-from tomography_session_browser.ui.viewer.constants import FILTER_TAG_PREFIX, LIST_PRIMARY_ROLE, LIST_STATUS_ROLE, LIST_SUMMARY_ROLE, LIST_TAGS_ROLE, LIST_TOOLTIP_ROLE, VIEWER_CANVAS_MIN_WIDTH_PX, VIEWER_LIST_FLOOR_PX, VIEWER_LIST_MIN_WIDTH_PX, VIEWER_OBJECT_ROLE
+from tomography_session_browser.ui.viewer.constants import LIST_PRIMARY_ROLE, LIST_STATUS_ROLE, LIST_SUMMARY_ROLE, LIST_TAGS_ROLE, LIST_TOOLTIP_ROLE, PLAIN_PROVENANCE, VIEWER_CANVAS_MIN_WIDTH_PX, VIEWER_LIST_FLOOR_PX, VIEWER_LIST_MIN_WIDTH_PX, VIEWER_OBJECT_ROLE, VIEWER_KEY_ROLE
 from tomography_session_browser.ui.viewer.list_rows import ViewerListDelegate, list_status_mark, warning_count_text, warning_tooltip
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -29,26 +32,28 @@ class ViewerListPane:
 
     def create_splitter(self, viewer_panel: QWidget, show_list: bool) -> QSplitter:
         splitter = QSplitter(Qt.Orientation.Horizontal, self.view)
+        splitter.setObjectName("viewerSplitter")
         splitter.setChildrenCollapsible(True)
         splitter.addWidget(viewer_panel)
         self.list_splitter = splitter if show_list else None
         if show_list:
             list_panel = QWidget(splitter)
             list_panel.setObjectName("viewerListPanel")
+            self.list_panel = list_panel
             list_layout = QVBoxLayout(list_panel)
-            list_layout.setContentsMargins(0, 0, 0, 0)
+            list_layout.setContentsMargins(SPACE_S, 0, SPACE_S, 0)
             list_layout.setSpacing(0)
             list_top = QWidget(list_panel)
             list_top_layout = QHBoxLayout(list_top)
-            list_top_layout.setContentsMargins(12, 10, 12, 8)
+            list_top_layout.setContentsMargins(0, 10, 0, SPACE_S)
             list_top_layout.addWidget(self.view.list_header)
             list_top_layout.addStretch(1)
-            list_top_layout.addWidget(self.view.list_count)
+            list_top_layout.addWidget(self.list_toggle)
             list_layout.addWidget(list_top)
             filter_wrap = QWidget(list_panel)
             filter_layout = QVBoxLayout(filter_wrap)
-            filter_layout.setContentsMargins(10, 0, 10, 8)
-            filter_layout.addWidget(self.view.list_filter)
+            filter_layout.setContentsMargins(0, 0, 0, SPACE_S)
+            filter_layout.addWidget(self.filter_bar)
             list_layout.addWidget(filter_wrap)
             list_layout.addWidget(self.view.list, stretch=1)
             splitter.addWidget(list_panel)
@@ -69,9 +74,11 @@ class ViewerListPane:
 
         return splitter
 
-    def create_widgets(self, show_list: bool) -> None:
+    def create_widgets(self, show_list: bool, status_segments: tuple[str, ...] = ("failed", "complete")) -> None:
         self.view.list = SmoothScrollTree(self.view)
         self.view.list.setObjectName("viewerList")
+        # Every lookup of a row by its object goes through this, never a position.
+        self.rows = RowIndex(self.view.list)
         self.view.list.setColumnCount(1)
         self.view.list.setHeaderHidden(True)
         self.view.list.setIconSize(QSize(16, 16))
@@ -91,68 +98,180 @@ class ViewerListPane:
         self.view.list.currentItemChanged.connect(self.view._item_changed)
         self.view.list.setVisible(show_list)
 
-        self.view.list_filter = QLineEdit(self.view)
-        self.view.list_filter.setObjectName("viewerFilter")
-        self.view.list_filter.setPlaceholderText("Filter items...")
-        self.view.list_filter.setToolTip("Filter this list by name, status, or summary")
-        self.view.list_filter.setAccessibleName("Filter viewer items")
-        self.view.list_filter.setClearButtonEnabled(True)
-        self.clear_filter_shortcut = QShortcut(
-            QKeySequence(Qt.Key.Key_Escape),
-            self.view.list_filter,
-        )
-        self.clear_filter_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
-        self.clear_filter_shortcut.activated.connect(self.view.list_filter.clear)
-        self.view.list_filter.setVisible(show_list)
-        self.view.list_filter.textChanged.connect(self.view._filter_list)
+        self.filter_bar = ListFilterBar(self.view, offered=status_segments)
+        self.filter_bar.setVisible(show_list)
+        self.filter_bar.query_changed.connect(self.on_query_changed)
         self.view.list_header = QLabel("Items", self.view)
         self.view.list_header.setObjectName("viewerPanelHeader")
         self.view.list_header.setVisible(show_list)
-        self.view.list_count = QLabel("0", self.view)
-        self.view.list_count.setObjectName("panelCount")
-        self.view.list_count.setVisible(show_list)
+        self.create_collapse_controls()
 
-    def filter_list(self, text: str) -> None:
-        query = text.strip().lower()
-        # ``is:<tag>`` tokens match a row's status tags exactly (the
-        # dashboard's drill-downs use them); the rest is free text.
-        words = query.split()
-        tags = {word[len(FILTER_TAG_PREFIX):] for word in words if word.startswith(FILTER_TAG_PREFIX)}
-        free_text = " ".join(word for word in words if not word.startswith(FILTER_TAG_PREFIX))
+    # ------------------------------------------------- a list of one, collapsed
+
+    def create_collapse_controls(self) -> None:
+        """The toggle in the list's header, and the compact row that stands in for the list.
+
+        The list stays by default (R8). Only while it holds exactly one object
+        row may it be collapsed to a selector above the canvas, and the choice
+        is this tab's, for the window's lifetime: nothing stores it.
+        """
+
+        self.list_panel: QWidget | None = None
+        self.list_collapsed = False
+        self.list_toggle = QToolButton(self.view)
+        self.list_toggle.setObjectName("viewerListToggle")
+        self.list_toggle.setText("Hide list")
+        self.list_toggle.setToolTip("Hide the list: there is one item, and it stays selected")
+        self.list_toggle.setAccessibleName("Hide the list")
+        self.list_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.list_toggle.clicked.connect(lambda: self.set_list_collapsed(True))
+        self.list_toggle.setVisible(False)
+
+        self.compact_row = QWidget(self.view)
+        self.compact_row.setObjectName("viewerCompactSelector")
+        layout = QHBoxLayout(self.compact_row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(SPACE_S)
+        self.compact_heading = QLabel("", self.compact_row)
+        self.compact_heading.setObjectName("viewerCompactHeading")
+        apply_tier(self.compact_heading, TIER_SUPPORTING)
+        layout.addWidget(self.compact_heading)
+        self.compact_selector = QToolButton(self.compact_row)
+        self.compact_selector.setObjectName("viewerCompactItem")
+        self.compact_selector.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.compact_selector.setMenu(QMenu(self.compact_selector))
+        layout.addWidget(self.compact_selector)
+        layout.addStretch(1)
+        self.show_list_button = QToolButton(self.compact_row)
+        self.show_list_button.setObjectName("viewerShowList")
+        self.show_list_button.setText("Show list")
+        self.show_list_button.setAccessibleName("Show the list")
+        self.show_list_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.show_list_button.clicked.connect(lambda: self.set_list_collapsed(False))
+        layout.addWidget(self.show_list_button)
+        self.compact_row.setVisible(False)
+
+    def set_list_collapsed(self, collapsed: bool) -> None:
+        """Remember the choice for this tab, and apply it if the list holds one row."""
+
+        self.list_collapsed = collapsed
+        self.sync_collapse()
+        (self.show_list_button if collapsed else self.view.list).setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def sync_collapse(self) -> None:
+        """Show the list, or its compact row, as this tab's rows and choice say.
+
+        The toggle is there only while the list holds exactly one object row;
+        with none or several the list is shown, and the choice waits for the
+        next time this tab holds one.
+        """
+
+        panel = self.list_panel
+        if panel is None:
+            return
+        rows = list(self.rows.object_rows())
+        one_row = len(rows) == 1
+        filtered = self.filter_bar.is_filtered()
+        collapsed = self.list_collapsed and one_row and not filtered
+        self.list_toggle.setVisible(one_row)
+        panel.setVisible((bool(rows) or filtered) and not collapsed)
+        self.compact_row.setVisible(collapsed)
+        if collapsed:
+            row = rows[0]
+            name = str(row.data(0, LIST_PRIMARY_ROLE) or row.text(0))
+            self.compact_heading.setText(_singular_title_for_items(self.view.parts.tab_selection.items))
+            self.compact_selector.setText(name)
+            self.compact_selector.setToolTip(f"{name}: the one item in this list")
+            menu = self.compact_selector.menu()
+            menu.clear()
+            action = menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(True)
+        else:
+            # The list was out of sight while the item was chosen: show it on its row.
+            current = self.view.parts.tab_selection.current_value
+            row = self.rows.row_for_value(current) if current is not None else None
+            if row is not None and self.view.list.currentItem() is not row:
+                blocked = self.view.list.blockSignals(True)
+                try:
+                    self.view.list.setCurrentItem(row)
+                finally:
+                    self.view.list.blockSignals(blocked)
+
+    # ----------------------------------------------------------------- query
+
+    def query(self) -> str:
+        """The list's filter, whole: the status tag a segment owns and the box's text."""
+
+        return self.filter_bar.query()
+
+    def set_query(self, text: str, *, notify: bool = True,
+                  row_keys: frozenset[str] | None = None, scope_label: str = "") -> None:
+        """Make ``text`` the filter; ``set_query("")`` clears all of it.
+
+        ``notify=False`` is for a rebuild, which applies the filter itself once
+        the rows exist, without the signal driving a refresh in its middle.
+        """
+
+        self.filter_bar.set_query(text, notify=notify, row_keys=row_keys, scope_label=scope_label)
+        if not notify:
+            self.view._filter_list()
+
+    def on_query_changed(self, _query: str) -> None:
+        self.view._filter_list()
+        self.view.query_changed.emit(self.query())
+
+    def filter_list(self, text: str | None = None) -> None:
+        query = (self.query() if text is None else text).strip()
+        # ``is:<tag>`` words match a row's status tags exactly (the status
+        # segments and the dashboard's drill-downs use them); the rest is free text.
+        parsed = split_filter_query(query)
         visible_count = 0
-        for index in range(self.view.list.topLevelItemCount()):
-            item = self.view.list.topLevelItem(index)
+        total = 0
+        in_scope_count = 0
+        tag_counts: dict[str, int] = {}
+        for item in self.rows.object_rows():
+            total += 1
             status = str(item.data(0, LIST_STATUS_ROLE) or "")
             summary = str(item.data(0, LIST_SUMMARY_ROLE) or "")
             row_tags = item.data(0, LIST_TAGS_ROLE) or ()
-            matches = tags.issubset(row_tags) and (
-                not free_text
-                or free_text in item.text(0).lower()
-                or free_text in status.lower()
-                or free_text in summary.lower()
-                or free_text in item.toolTip(0).lower()
-            )
+            keys = self.filter_bar.row_keys
+            in_scope = keys is None or item.data(0, VIEWER_KEY_ROLE) in keys
+            if in_scope:
+                in_scope_count += 1
+                for tag in row_tags:
+                    tag_counts[tag] = tag_counts.get(tag, 0) + 1
+            matches = in_scope and parsed.matches(row_tags, item.text(0), status, summary, item.toolTip(0))
             item.setHidden(not matches)
             if matches:
                 visible_count += 1
-        total = self.view.list.topLevelItemCount()
-        # Honest count under a filter: "0 of 20" rather than a bare "0", which
-        # reads the same as a scope that genuinely holds nothing.
-        if query:
-            self.view.list_count.setText(f"{visible_count} of {total}")
-            announced = f"{visible_count} of {total} shown, filtered by {query}"
-        else:
-            self.view.list_count.setText(str(total))
-            announced = f"{total} shown"
-        # The bare number is meaningless out of context to a screen reader.
-        self.view.list_count.setAccessibleName("Visible item count")
-        self.view.list_count.setAccessibleDescription(announced)
+        self.rows.refresh_groups(failed_filtered="failed" in parsed.tags)
+        # The segments say how many rows each status has, whatever the box says.
+        self.filter_bar.set_counts(tag_counts, in_scope_count)
+        self.filter_bar.set_result(visible_count, total)
+        self.sync_collapse()
         self.view._refresh_empty_state_panel()
+
+    def refresh_filter_feedback(self, visible: int, total: int) -> None:
+        """Retain the image while explaining when its canonical row is hidden."""
+        filtered = self.filter_bar.is_filtered()
+        messages = []
+        if filtered and not visible:
+            messages.append(f"No matching {self.current_entity_label().lower()}.")
+        current = self.view.parts.tab_selection.current_value
+        row = self.rows.row_for_value(current) if current is not None else None
+        if filtered and row is not None and row.isHidden() and self.view.viewer.has_image():
+            messages.append("Current image is outside this filter.")
+        feedback = " ".join(messages)
+        self.filter_bar.set_feedback(feedback)
+        announced = (f"{visible} of {total} shown, filtered by {self.filter_bar.description()}"
+                     if filtered else f"{total} shown")
+        self.view.list_header.setAccessibleDescription(". ".join(part for part in (announced, feedback) if part))
 
     def item_status_for_value(self, value: Any) -> ItemListStatus | None:
         """The shared row status this tab shows for ``value``, if it lists it."""
 
-        if self.item_status_for is None or not any(item is value for item in self.view.parts.tab_selection.items):
+        if self.item_status_for is None or self.rows.row_for_value(value) is None:
             return None
         return self.item_status_for(value)
 
@@ -194,11 +313,8 @@ class ViewerListPane:
     def refresh_row_decorations(self) -> None:
         """Re-read every row's status without rebuilding the list."""
 
-        for index in range(self.view.list.topLevelItemCount()):
-            tree_item = self.view.list.topLevelItem(index)
+        for tree_item in self.rows.object_rows():
             value = tree_item.data(0, VIEWER_OBJECT_ROLE)
-            if value is None:
-                continue
             label = str(tree_item.data(0, LIST_PRIMARY_ROLE) or tree_item.text(0))
             self.view._decorate_row(tree_item, value, label)
         self.view.list.viewport().update()
@@ -242,7 +358,7 @@ class ViewerListPane:
         # The filter matches on status and summary text, so re-apply it: the
         # visible set and the count must agree with the decorations just
         # written, not with the ones they replaced.
-        self.view._filter_list(self.view.list_filter.text())
+        self.view._filter_list()
         # Navigation buttons carry the resolver's verdict for the current row;
         # that verdict is derived from the same providers.
         self.view._update_navigation_actions(self.view.parts.tab_selection.current_value)
@@ -257,8 +373,8 @@ class ViewerListPane:
         """Tell this tab what scope and entity type it is showing.
 
         ``entity_label`` matters when the list is *empty*: the type cannot be
-        inferred from zero items, and "No items in Sample A" is markedly less
-        useful than "No search maps in Sample A".
+        inferred from zero items, and "No items in Collection" is markedly less
+        useful than "No search maps in Collection".
         """
 
         self.has_sessions = has_sessions
@@ -275,8 +391,8 @@ class ViewerListPane:
 
         return viewer_empty_state(
             has_sessions=self.has_sessions,
-            total_items=self.view.list.topLevelItemCount(),
-            filter_text=self.view.list_filter.text().strip(),
+            total_items=self.rows.counts()[1],
+            filter_text=self.filter_bar.description(),
             scope_name=self.scope_name,
             entity_label=self.view._current_entity_label(),
         )
@@ -297,9 +413,8 @@ class ViewerListPane:
         Deliberately does **not** cover a loaded image. Filtering the list to
         nothing while a valid preview is on screen is not an empty state — the
         image is real content, and hiding it behind a panel would destroy more
-        information than the panel adds. That case is already carried by the
-        honest ``0 of 20`` count and by the context header's filter note and
-        Clear action.
+        information than the panel adds. The list explains a retained image
+        outside its filter and keeps its count and Clear all filters action.
 
         The panel is for when the canvas itself has nothing: no session loaded,
         a scope holding none of this entity, or a filter applied before any
@@ -309,11 +424,8 @@ class ViewerListPane:
         panel = getattr(self.view, "empty_state_panel", None)
         if panel is None:
             return
-        visible_rows = sum(
-            1
-            for index in range(self.view.list.topLevelItemCount())
-            if not self.view.list.topLevelItem(index).isHidden()
-        )
+        visible_rows, total = self.rows.counts()
+        self.refresh_filter_feedback(visible_rows, total)
         if self.view.viewer.has_image():
             self.view._set_empty_state_panel_visible(panel, False)
             return
@@ -327,7 +439,7 @@ class ViewerListPane:
         # it would describe something the reviewer cannot see, so the honest
         # "0 of N" wins there.
         override = self.empty_state_override
-        filtered_to_nothing = bool(self.view.list_filter.text().strip()) and not visible_rows
+        filtered_to_nothing = self.filter_bar.is_filtered() and not visible_rows
         if override is not None and override.kind == KIND_LOAD_FAILED:
             state = override
         elif filtered_to_nothing:
@@ -365,15 +477,17 @@ class ViewerListPane:
         )
 
     def set_status_text(self, text: str, *, tooltip: str | None = None, tone: str = "") -> None:
-        """The provenance line under the canvas: what is shown and from where.
+        """The line under the canvas, for exceptions only (design review F7).
 
         It is the only place a JPEG fallback, an unreadable MRC or the image's
-        parse warnings are said, so those take a tone (harmonisation A3)
-        rather than reading like the plain "MRC: name.mrc" beside them.
+        parse warnings are said, so those take a tone (harmonisation A3). A
+        plain MRC or image has nothing to flag: its name is the status bar's
+        and the badge's, so empty text hides the line altogether.
         """
 
         self.view.status.setText(text)
         self.view.status.setToolTip(tooltip or text)
+        self.view.status.setVisible(bool(text))
         if (self.view.status.property("tone") or "") != tone:
             self.view.status.setProperty("tone", tone)
             style = self.view.status.style()
@@ -390,6 +504,8 @@ class ViewerListPane:
     ) -> str:
         # The frame is in the readout beside the scrubber; the tooltip keeps it.
         warning_text = warning_count_text(warnings or [])
+        if not warning_text and source in PLAIN_PROVENANCE:
+            return ""
         return f"{source}: {path.name}{warning_text}"
 
     def path_status_tooltip(
@@ -400,7 +516,9 @@ class ViewerListPane:
         slice_count: int = 1,
         warnings: list[str] | None = None,
     ) -> str:
-        return f"{source}: {path}{self.view._frame_text(slice_count)}{warning_tooltip(warnings or [])}"
+        frame = self.view._frame_text(slice_count)
+        frame_line = f"\n{frame}" if frame else ""
+        return f"{source}: {path}{frame_line}{warning_tooltip(warnings or [])}"
 
     def fit_list_minimum(self) -> None:
         """Lower the list's minimum only as far as the viewer needs (plan F3.5).

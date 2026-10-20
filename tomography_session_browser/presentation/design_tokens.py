@@ -347,6 +347,12 @@ STATUS_TONE_COLOURS: Final[dict[str, str]] = {
 # Alpha (of 255) of a status tone's fill behind its text.
 STATUS_TONE_FILL_ALPHA: Final[int] = 40
 
+#: Normal states use a disc/ring rather than an exception pill, on screen and paper.
+NORMAL_STATUS_GLYPHS: Final[dict[str, str]] = {
+    "complete": "disc", "available": "disc", "pending": "ring",
+    "with acquisitions": "disc", "no acquisitions": "ring",
+}
+
 
 #: The dashboard's status tones: the colour a status gives its dot, chip or
 #: count. They carried inline style sheets that baked the palette in, so a

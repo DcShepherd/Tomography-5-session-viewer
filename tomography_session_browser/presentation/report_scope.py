@@ -127,11 +127,22 @@ def normalise_report_scope(
         if group.key not in request.group_keys:
             continue
         group_sessions = [session for session in group.sessions if session_key(session) in sessions_by_key]
-        if group.kind == "linked" and not request.include_atlas_overview:
-            group_sessions = [session for session in group_sessions if _is_collection_session(session)]
+        primary_sessions = group_sessions
+        if group.kind == "linked":
+            primary_sessions = [
+                session for session in group_sessions
+                if _is_collection_session(session) or session_key(session) in request.session_keys
+            ]
+            if request.include_atlas_overview:
+                primary_ids = {id(session) for session in primary_sessions}
+                supporting_session_ids.update(
+                    id(session) for session in group_sessions if id(session) not in primary_ids
+                )
+            else:
+                group_sessions = primary_sessions
         if not group_sessions:
             continue
-        selected_session_ids.update(id(session) for session in group_sessions)
+        selected_session_ids.update(id(session) for session in primary_sessions)
         explicit_labels.append(group.display_name)
         report_groups.append(_project_report_group(group.display_name, group, group_sessions, use_group_kind=True))
 

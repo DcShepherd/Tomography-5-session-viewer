@@ -32,7 +32,7 @@ the visible flash that a full rebuild produces on every slider tick.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import re
 from typing import Callable, Iterable
@@ -100,9 +100,14 @@ _BODY_RIGHT_MARGIN = SPACE_S
 _EMPTY_TITLE = "No selection"
 #: Keys whose value is a status word, drawn as the status pill.
 _STATUS_KEYS = frozenset({"Status"})
+#: Record identities stay on one line, including names containing spaces.
+_IDENTITY_KEYS = frozenset({"Atlas", "Overview", "Search map", "Search tile", "Batch position", "Tilt series"})
 #: The section whose ``- warning`` lines are drawn as callouts.
 _WARNINGS_SECTION = "Warnings"
 _WARNING_PREFIX = "- "
+#: Sections of raw detail a reviewer opens on purpose (the file's own header).
+#: They start folded; the header toggles them (design review F13).
+_FOLDED_SECTIONS = frozenset({"Metadata source"})
 
 # Display-only glue for values. A number stays with its unit, and a unit such
 # as "Å/px" never breaks at its slash (Qt's line breaker allows a break after
@@ -264,7 +269,8 @@ class _ValueLabel(QLabel):
     * Copying returns the source text, without the display-only glue.
     """
 
-    def __init__(self, value: str, tooltip: str | None = None, parent: QWidget | None = None) -> None:
+    def __init__(self, value: str, tooltip: str | None = None, parent: QWidget | None = None,
+                 *, single_line: bool = False) -> None:
         super().__init__(parent)
         self.setObjectName("metaValue")
         self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -276,7 +282,8 @@ class _ValueLabel(QLabel):
         self._full = ""
         self._copy_full = ""
         self._extra_tooltip: str | None = None
-        self._single_token: bool | None = None
+        self._single_line = single_line
+        self._elide: bool | None = None
         self.set_value(value, tooltip)
 
     def value(self) -> str:
@@ -287,24 +294,24 @@ class _ValueLabel(QLabel):
         # What "Copy value" gives: the whole source value, qualifier included.
         self._copy_full = copy_text if copy_text is not None else value
         self._extra_tooltip = tooltip or None
-        single_token = bool(value) and not any(character.isspace() for character in value)
-        if single_token != self._single_token:
-            self._single_token = single_token
-            self.setWordWrap(not single_token)
+        elide = self._single_line or (bool(value) and not any(character.isspace() for character in value))
+        if elide != self._elide:
+            self._elide = elide
+            self.setWordWrap(not elide)
         self._refresh()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt signature
         super().resizeEvent(event)
-        if self._single_token:
+        if self._elide:
             self._refresh()
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt signature
         super().showEvent(event)
-        if self._single_token:
+        if self._elide:
             self._refresh()
 
     def _refresh(self) -> None:
-        if self._single_token:
+        if self._elide:
             # Elide only against a real, laid-out width. Before the label is
             # shown its geometry is a placeholder, and eliding against it
             # truncated short values such as "Nanoprobe".
@@ -317,13 +324,13 @@ class _ValueLabel(QLabel):
             shown = display_value(self._full)
         if super().text() != shown:
             super().setText(shown)
-        elided = bool(self._single_token) and shown != self._full
+        elided = bool(self._elide) and shown != self._full
         tooltip = self._extra_tooltip or (self._full if elided else "")
         if self.toolTip() != tooltip:
             self.setToolTip(tooltip)
 
     def _text_to_copy(self) -> str:
-        if self._single_token and super().text() != self._full:
+        if self._elide and super().text() != self._full:
             return self._copy_full
         selected = self.selectedText()
         # The whole value selected copies the source, with the qualifier
@@ -415,7 +422,7 @@ class _KeyValueRow(QWidget):
         column = QVBoxLayout()
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
-        self._value_label = _ValueLabel("", None, self)
+        self._value_label = _ValueLabel("", None, self, single_line=key in _IDENTITY_KEYS)
         column.addWidget(self._value_label)
         # A trailing "(…)" qualifier, on its own muted line.
         self._detail_label = QLabel(self)
@@ -519,6 +526,45 @@ class _SectionHeader(QLabel):
         self.setObjectName("metaSection")
 
 
+class _FoldHeader(QLabel):
+    """A section header that folds and unfolds the rows under it."""
+
+    toggled = Signal(bool)
+
+    def __init__(self, title: str, expanded: bool, parent: QWidget | None = None) -> None:
+        super().__init__("", parent)
+        self.setObjectName("metaSection")
+        self._title = title
+        self._expanded = expanded
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._refresh()
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def toggle(self) -> None:
+        self._expanded = not self._expanded
+        self._refresh()
+        self.toggled.emit(self._expanded)
+
+    def _refresh(self) -> None:
+        self.setText(f"{'▾' if self._expanded else '▸'}  {self._title}")
+        self.setAccessibleName(f"{self._title}, {'expanded' if self._expanded else 'collapsed'}")
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.toggle()
+            return
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt signature
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.toggle()
+            return
+        super().keyPressEvent(event)
+
+
 class _PlainRow(QLabel):
     def __init__(self, text: str, parent: QWidget | None = None) -> None:
         super().__init__(text, parent)
@@ -537,12 +583,14 @@ class _RowSpec:
     in place without rebuilding the widget.
     """
 
-    kind: str  # "section" | "kv" | "path" | "plain" | "spacer" | "status" | "callout"
+    kind: str  # "section" | "fold" | "kv" | "path" | "plain" | "spacer" | "status" | "callout"
     signature: tuple
     value: str
     indented: bool
     tooltip: str | None = None
     tone: str | None = None
+    #: The folded section this row sits under, if any; shown only while open.
+    fold: str = ""
 
 
 class MetadataPanel(QWidget):
@@ -592,6 +640,9 @@ class MetadataPanel(QWidget):
         # in place or rebuild.
         self._row_specs: list[_RowSpec] = []
         self._row_widgets: list[QWidget] = []
+        # Folded sections the reviewer has opened. Kept across items, so
+        # opening the header once is not undone by the next selection.
+        self._unfolded: set[str] = set()
         # Tone rules supplied by the window (the panel has no domain imports):
         # a status word to the header pill's tone, a warning to its
         # dashboard tone. Without them, rows render as plain key/values.
@@ -632,7 +683,7 @@ class MetadataPanel(QWidget):
         if not text or not text.strip():
             specs = [_RowSpec("plain", ("plain", self._placeholder), self._placeholder, False)]
         else:
-            specs = self._without_title_echo(list(self._parse(text.splitlines())))
+            specs = self._assign_folds(self._without_title_echo(list(self._parse(text.splitlines()))))
 
         # Fast path: same structure as last render → just update mutable
         # values on the existing widgets. This is the common case for tilt
@@ -648,6 +699,8 @@ class MetadataPanel(QWidget):
             self._clear()
             for spec in specs:
                 widget = self._build_widget(spec)
+                if spec.fold and spec.fold not in self._unfolded:
+                    widget.setVisible(False)
                 self._add(widget)
                 self._row_specs.append(spec)
                 self._row_widgets.append(widget)
@@ -740,6 +793,18 @@ class MetadataPanel(QWidget):
         for label in labels:
             label.setFixedWidth(width)
 
+    def _set_unfolded(self, title: str, expanded: bool) -> None:
+        """Show or hide the rows under a folded section's header."""
+
+        if expanded:
+            self._unfolded.add(title)
+        else:
+            self._unfolded.discard(title)
+        for spec, widget in zip(self._row_specs, self._row_widgets):
+            if spec.fold == title:
+                widget.setVisible(expanded)
+        self._body.adjustSize()
+
     def _signatures_match(self, specs: list[_RowSpec]) -> bool:
         if len(specs) != len(self._row_specs):
             return False
@@ -750,7 +815,7 @@ class MetadataPanel(QWidget):
                 return False
             # ``plain`` and ``section`` rows have no separate value slot, so
             # any text change is a structural change for those kinds.
-            if new_spec.kind in {"plain", "section", "spacer"}:
+            if new_spec.kind in {"plain", "section", "fold", "spacer"}:
                 continue
             # For kv/path the indent class is part of the structure (it
             # changes contentsMargins, which we don't update in place).
@@ -767,6 +832,20 @@ class MetadataPanel(QWidget):
             elif spec.kind == "status":
                 widget.set_value(spec.value, spec.tone)  # type: ignore[attr-defined]
         self._row_specs = list(specs)
+
+    @staticmethod
+    def _assign_folds(specs: list[_RowSpec]) -> list[_RowSpec]:
+        """Mark the rows under a folded section's header as belonging to it."""
+
+        section = ""
+        marked: list[_RowSpec] = []
+        for spec in specs:
+            if spec.kind in {"section", "fold"} and not spec.indented:
+                section = spec.value
+            elif spec.indented and section in _FOLDED_SECTIONS:
+                spec = replace(spec, fold=section)
+            marked.append(spec)
+        return marked
 
     def _without_title_echo(self, specs: list[_RowSpec]) -> list[_RowSpec]:
         """Drop a first row that only repeats the title ("Tilt series:
@@ -787,6 +866,10 @@ class MetadataPanel(QWidget):
             return spacer
         if spec.kind == "section":
             return _SectionHeader(spec.value)
+        if spec.kind == "fold":
+            header = _FoldHeader(spec.value, spec.value in self._unfolded)
+            header.toggled.connect(lambda expanded, title=spec.value: self._set_unfolded(title, expanded))
+            return header
         if spec.kind == "path":
             row: QWidget = _PathRow(spec.signature[1], spec.value)
         elif spec.kind == "kv":
@@ -826,9 +909,10 @@ class MetadataPanel(QWidget):
                 if value == "":
                     if not indented:
                         section = key
-                    yield _RowSpec("section", ("section", key), key, indented)
+                    kind = "fold" if not indented and key in _FOLDED_SECTIONS else "section"
+                    yield _RowSpec(kind, (kind, key), key, indented)
                     continue
-                if _looks_like_path(key, value):
+                if key not in _IDENTITY_KEYS and _looks_like_path(key, value):
                     yield _RowSpec("path", ("path", key, indented), value, indented)
                     continue
                 tone = self._status_tone(value) if key in _STATUS_KEYS and self._status_tone is not None else None

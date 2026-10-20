@@ -63,6 +63,7 @@ class PreviewImage:
 
     def __init__(self, view: ImagePreviewView) -> None:
         self.view = view
+        self.overlay_reference_size: tuple[int, int] | None = None
 
     def clear(self, message: str = "") -> None:
         self.view._stop_view_motion()
@@ -76,6 +77,7 @@ class PreviewImage:
         self.view._close_cluster_popup()
         self.scene.clear()
         self.pixmap_item = None
+        self.overlay_reference_size = None
         self.view.parts.marker_layer.marker_items = []
         self.view.parts.marker_layer.last_display_markers = []
         self.view.parts.marker_layer.cluster_cache.clear()
@@ -173,12 +175,14 @@ class PreviewImage:
         *,
         logical_image_key: Any | None = None,
         pyramid_level: int | None = None,
+        overlay_reference_size: tuple[int, int] | None = None,
     ) -> None:
         self.view._set_pixmap(
             QPixmap.fromImage(image),
             preserve_view=preserve_view,
             logical_image_key=logical_image_key,
             pyramid_level=pyramid_level,
+            overlay_reference_size=overlay_reference_size,
         )
 
     def rendered_image_rect(self) -> QRect | None:
@@ -264,6 +268,7 @@ class PreviewImage:
         *,
         logical_image_key: Any | None = None,
         pyramid_level: int | None = None,
+        overlay_reference_size: tuple[int, int] | None = None,
     ) -> None:
         # A new level of the same image (a pyramid upgrade) moves the scene
         # coordinates under a flight to a jump's target; fly on from here once
@@ -283,6 +288,10 @@ class PreviewImage:
         old_relative_center = relative_point(old_rect, old_center) if old_rect is not None and old_center is not None else None
         same_logical_image = logical_image_key is not None and logical_image_key == self.current_image_key
         is_new_logical_image = logical_image_key is None or not same_logical_image
+        if overlay_reference_size is not None:
+            self.overlay_reference_size = overlay_reference_size
+        elif is_new_logical_image:
+            self.overlay_reference_size = (pixmap.width(), pixmap.height())
         # An armed crossfade is spent on this image whatever it is, so it can
         # never carry over to a later frame change.
         dissolve_from = None

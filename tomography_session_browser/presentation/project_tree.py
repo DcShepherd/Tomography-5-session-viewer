@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from collections.abc import Sequence
-from typing import Literal
+from collections.abc import Iterable, Sequence
+from typing import Literal, TypeVar
 
 from tomography_session_browser.domain.traversal import has_collection_data
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.domain.models import Sample, Session
+from tomography_session_browser.presentation.scopes import LinkedSampleGroup
 from tomography_session_browser.services.session_linking import (
     atlas_link_resolutions,
     linked_sample_groups,
@@ -15,6 +16,7 @@ from tomography_session_browser.services.session_linking import (
 
 
 ProjectGroupKind = Literal["linked", "atlas", "collection", "unresolved"]
+_T = TypeVar("_T")
 
 #: The project-tree badge for each group kind; ``kind`` is its stable identity.
 PROJECT_GROUP_BADGES: dict[str, str] = {
@@ -22,6 +24,14 @@ PROJECT_GROUP_BADGES: dict[str, str] = {
     "atlas": "AT",
     "collection": "DC",
     "unresolved": "!",
+}
+#: The badge of a session row inside a group, by ``SessionKind`` value. A group
+#: has its own (above); the tree and the summary pages read this one.
+SESSION_KIND_BADGES: dict[str, str] = {
+    SessionKind.ATLAS_SCREENING.value: "AT",
+    SessionKind.MULTIGRID.value: "DC",
+    SessionKind.COLLECTION.value: "DC",
+    SessionKind.SINGLE_COLLECTION.value: "DC",
 }
 #: What each badge stands for. One table for the legend, the accessible
 #: names, every badge tooltip (tree and report dialog) and the PDF, so they
@@ -275,6 +285,57 @@ def project_group_badge_tooltip(group: ProjectTreeGroup) -> str:
     if group.kind == "unresolved":
         return f"{meaning} — kept separate"
     return meaning
+
+
+def scope_ancestors(scope: object, groups: Sequence[ProjectTreeGroup]) -> tuple[ProjectTreeGroup | Session, ...]:
+    """The scopes above ``scope`` in the project tree, coarsest first.
+
+    The walk reads the tree's own structure and nothing else: a Sample sits in
+    the Session whose ``samples`` holds it, a Session in the group whose
+    ``sessions`` holds it, a linked sample in the group holding its samples. A
+    review-context lookup would do worse here: for a Session or Sample scope
+    it can return that same scope.
+
+    Each step needs exactly one parent, found by identity. With none or
+    several the chain stops there, so the breadcrumb is shorter rather than
+    guessed. A scope is never visited twice, so the walk cannot loop.
+    """
+
+    chain: list[ProjectTreeGroup | Session] = []
+    visited = {id(scope)}
+    current = scope
+    while (parent := _only_parent(current, groups)) is not None and id(parent) not in visited:
+        chain.append(parent)
+        visited.add(id(parent))
+        current = parent
+    return tuple(reversed(chain))
+
+
+def _only_parent(scope: object, groups: Sequence[ProjectTreeGroup]) -> ProjectTreeGroup | Session | None:
+    sessions = _distinct(session for group in groups for session in group.sessions)
+    if isinstance(scope, Sample):
+        return _the_only(session for session in sessions if _sample_belongs_to_session(scope, session))
+    if isinstance(scope, Session):
+        return _the_only(group for group in groups if any(session is scope for session in group.sessions))
+    if isinstance(scope, LinkedSampleGroup):
+        return _the_only(
+            group
+            for group in groups
+            if any(_sample_belongs_to_session(sample, session) for sample in scope.samples for session in group.sessions)
+        )
+    return None
+
+
+def _distinct(items: Iterable[_T]) -> list[_T]:
+    unique: dict[int, _T] = {}
+    for item in items:
+        unique.setdefault(id(item), item)
+    return list(unique.values())
+
+
+def _the_only(candidates: Iterable[_T]) -> _T | None:
+    found = _distinct(candidates)
+    return found[0] if len(found) == 1 else None
 
 
 def session_badge_tooltip(badge: str) -> str:

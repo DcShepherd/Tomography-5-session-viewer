@@ -22,10 +22,11 @@ from tomography_session_browser.domain.models import (
 )
 from tomography_session_browser.domain.traversal import has_collection_data
 from tomography_session_browser.presentation.describe.entities import describe_object
-from tomography_session_browser.presentation.project_tree import ProjectTreeGroup, project_group_badge
+from tomography_session_browser.presentation.describe.sections import emit_section
+from tomography_session_browser.presentation.describe.summary import sessions_summary_lines
+from tomography_session_browser.presentation.project_tree import ProjectTreeGroup
 from tomography_session_browser.presentation.scopes import LinkedSampleGroup
 from tomography_session_browser.presentation.workspace import (
-    EntityKind,
     Workspace,
     atlas_display_key,
     display_atlases,
@@ -40,32 +41,28 @@ ContextFor = Callable[[Any], "Session | Sample | LinkedSampleGroup | ProjectTree
 
 
 def describe_project_group(group: ProjectTreeGroup) -> str:
-    lines = [
-        f"Project group: {group.display_name}",
-        f"Automatic name: {group.automatic_name}",
-        f"Type: {project_group_badge(group)}",
-        f"Loaded sessions: {len(group.sessions)}",
-    ]
-    if group.kind == "linked":
-        lines.append(f"Linked data collections: {len(group.collection_sessions)}")
-    for session in group.sessions:
-        lines.append("")
-        lines.append(f"{session.name}")
-        lines.append(f"  Kind: {session.kind.value}")
-        lines.append(f"  Path: {session.path}")
-    if group.warnings:
-        lines.append("")
-        lines.extend(group.warnings)
+    """A project group's source folders and shared settings (design review B2.6).
+
+    The page titles the group and carries its counts, so this is only where
+    its sessions came from and how they were acquired. A group's own link
+    warnings stay: an ambiguous atlas match must remain visible, and no other
+    page says it yet.
+    """
+
+    lines: list[str] = []
+    if group.is_renamed:
+        # Only a custom name has an automatic one worth saying; otherwise it
+        # is the same words twice. The tree and report tooltips follow the rule.
+        lines.append(f"Automatic name: {group.automatic_name}")
+    lines += sessions_summary_lines(group.sessions)
+    emit_section(lines, "Warnings", [f"- {warning}" for warning in group.warnings])
     return "\n".join(lines)
 
 
 def describe_loaded_sessions(sessions: Sequence[Session]) -> str:
-    """The project with no one group in scope: the sessions it holds."""
+    """The project with no one group in scope: every session it holds."""
 
-    return "\n".join(
-        [f"Loaded sessions ({len(sessions)}):"]
-        + [f"  - {session.name}" for session in sessions]
-    )
+    return "\n".join(sessions_summary_lines(sessions))
 
 
 def samples_for_context(context: Any) -> list[Sample]:
@@ -123,39 +120,47 @@ class ContextDescriber:
         self,
         value: Any,
         *,
+        describes_page_item: bool,
         tilt_validation: TiltSeriesValidation | None = None,
         list_status: ItemListStatus | None = None,
     ) -> str:
-        text = describe_object(value, tilt_validation=tilt_validation, list_status=list_status)
-        atlas_lines = self._atlas_linkage_context_lines(value)
-        if not atlas_lines:
-            return self._normalise_missing_atlas_text(text, value)
-        lines = [
-            line
-            for line in text.splitlines()
-            if line.strip() not in {"Atlas: no", "Atlas: yes", "Atlas: No atlas associated"}
-        ]
+        """The panel's text for ``value``: every description goes through here.
+
+        ``describes_page_item`` says the page beside the panel already titles
+        ``value`` and carries its status pill and its Linked strip. The text
+        then leaves out the Status row, and the atlas section when the strip's
+        Atlas jump offers the one atlas it would name.
+        """
+
+        text = describe_object(
+            value,
+            tilt_validation=tilt_validation,
+            list_status=list_status,
+            describes_page_item=describes_page_item,
+        )
+        if isinstance(value, Session | Sample | LinkedSampleGroup):
+            # A scope's summary is its source folders and settings; which atlas
+            # it has is the Atlas card's and the Atlas tab's to say.
+            return text
+        label, atlases = self._atlas_linkage(value)
+        if not atlases or (describes_page_item and len(atlases) == 1):
+            return text
+        lines = text.splitlines()
         if lines and lines[-1].strip():
             lines.append("")
         lines.append("Atlas linkage:")
-        lines.extend(f"  {line}" for line in atlas_lines)
+        lines.extend(f"  {line}" for line in self._atlas_linkage_lines(label, atlases, value))
         return "\n".join(lines)
 
-    def _normalise_missing_atlas_text(self, text: str, value: Any) -> str:
-        if isinstance(value, Sample | LinkedSampleGroup):
-            return text.replace("Atlas: no", "Atlas: No atlas associated")
-        if isinstance(value, Session) and not self._workspace.entities(EntityKind.ATLAS, value):
-            suffix = "\n\nAtlas linkage:\n  Atlas: No atlas associated"
-            return text if "Atlas linkage:" in text else f"{text}{suffix}"
-        return text
+    def _atlas_linkage(self, value: Any) -> tuple[str, list[Atlas]]:
+        """How ``value`` reaches an atlas, and which: direct, else linked, else none."""
 
-    def _atlas_linkage_context_lines(self, value: Any) -> list[str]:
         direct, linked = self._atlas_associations_for_context(value)
         if direct:
-            return self._atlas_linkage_lines("Direct atlas", direct, value)
+            return "Direct atlas", direct
         if linked:
-            return self._atlas_linkage_lines("Linked atlas from screening session", linked, value)
-        return []
+            return "Linked atlas from screening session", linked
+        return "", []
 
     def _atlas_associations_for_context(self, value: Any) -> tuple[list[Atlas], list[Atlas]]:
         if isinstance(value, Atlas):

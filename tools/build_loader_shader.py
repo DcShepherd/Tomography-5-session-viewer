@@ -7,7 +7,7 @@ repository root in the project Conda environment::
     python tools/build_loader_shader.py
 
 It runs Qt's ``qsb`` tool (installed with PySide6) and records the source's
-SHA-256 next to the result. ``tests/test_release_smoke.py`` fails when the source
+SHA-256 next to the result. ``tests/test_loader_orbs.py`` fails when the source
 and the recorded hash differ, so a shader edit cannot ship without its build.
 """
 
