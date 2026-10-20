@@ -1,9 +1,11 @@
 """Timeline components for the dashboard."""
 from __future__ import annotations
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QLabel, QToolButton, QWidget
 from tomography_session_browser.services.timeline_service import SessionTimeline
 from tomography_session_browser.presentation.dashboard.models import DashboardModel
 from tomography_session_browser.ui.theme import TIER_SUPPORTING, apply_tier
+from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 from tomography_session_browser.ui.widgets.time_chart import TIME_CHART_TIMELINE_MIN_HEIGHT
 from tomography_session_browser.ui.timeline.widget import TimelineStrip
 from tomography_session_browser.ui.dashboard.common import CardBox, card_header, card_layout
@@ -54,7 +56,7 @@ def build_timeline_card(dashboard: SessionDashboard, model: DashboardModel, time
             if mode == "density"
             else "Grouped lanes by sample or batch position"
             if mode == "lanes"
-            else "Density for large sessions, lanes for smaller scopes"
+            else "Lanes when every lane has a row tall enough for its name, otherwise density"
         )
         button.clicked.connect(
             lambda _checked=False, selected=mode, buttons=mode_buttons, strip=strip: dashboard._set_timeline_mode(strip, buttons, selected)
@@ -62,16 +64,32 @@ def build_timeline_card(dashboard: SessionDashboard, model: DashboardModel, time
         mode_buttons.append(button)
         mode_group.addButton(button)
         segmented_layout.addWidget(button)
+    # Said once when the lane names leave out the prefix they share.
+    prefix_note = ElidedLabel(mode=Qt.TextElideMode.ElideMiddle, prefer_full_width=True)
+    prefix_note.setObjectName("timelineLanePrefix")
+    prefix_note.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    apply_tier(prefix_note, TIER_SUPPORTING)
+    header.addWidget(prefix_note)
     header.addWidget(segmented)
     layout.addLayout(header)
+    strip.lane_label_prefix_changed.connect(lambda prefix: show_lane_prefix(prefix_note, prefix))
     strip.set_segment_metadata(model.timeline_items)
     strip.set_display_mode(dashboard._timeline_display_mode)
     strip.set_highlighted_tilt_series_id(dashboard._highlighted_tilt_series_id)
     strip.set_timeline(timeline)
+    show_lane_prefix(prefix_note, strip.lane_label_prefix())
     strip.segment_clicked.connect(dashboard._timeline_segment_clicked)
     dashboard._timeline_strip = strip
     layout.addWidget(strip, stretch=1)
     return card
+
+
+def show_lane_prefix(note: ElidedLabel, prefix: str) -> None:
+    """Say what the shortened lane names leave out, or nothing when they are whole."""
+
+    note.setText(f"Lanes: {prefix}…" if prefix else "")
+    note.setToolTip(f"The lane names leave out {prefix}, which every lane here starts with." if prefix else "")
+    note.setVisible(bool(prefix))
 
 
 def set_timeline_mode(dashboard: SessionDashboard, strip: TimelineStrip, buttons: list[QToolButton], mode: str) -> None:

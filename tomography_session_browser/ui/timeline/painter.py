@@ -10,7 +10,7 @@ from tomography_session_browser.services.timeline_service import InferredPause, 
 from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.ui.widgets.time_chart import TIME_CHART_LEFT_GUTTER, TIME_CHART_RIGHT_GUTTER, format_absolute_time, format_density_bin_duration, format_elapsed, format_elapsed_offset, format_time_axis_tick, time_axis_tick_count
 from dataclasses import field
-from tomography_session_browser.ui.timeline.constants import DENSITY_BIN_TARGET, HIGHLIGHT_FADE_ALPHA_FACTOR, HIGHLIGHT_RING_ALPHA, HIGHLIGHT_RING_WIDTH
+from tomography_session_browser.ui.timeline.constants import AXIS_HEIGHT_PX, DENSITY_BIN_TARGET, HIGHLIGHT_FADE_ALPHA_FACTOR, HIGHLIGHT_RING_ALPHA, HIGHLIGHT_RING_WIDTH, LANES_TOP_PX, MAX_LANE_LABEL_WIDTH_PX
 from tomography_session_browser.ui.timeline.models import TimelineLane
 from tomography_session_browser.ui.timeline.support import timeline_count_phrase
 from typing import TYPE_CHECKING
@@ -82,8 +82,8 @@ class TimelinePainter:
             chart_right = chart_left + chart_width
 
             header_top = 4
-            lane_top = 34
-            axis_top = self.view.height() - 24
+            lane_top = LANES_TOP_PX
+            axis_top = self.view.height() - AXIS_HEIGHT_PX
             if axis_top <= lane_top + 18:
                 axis_top = lane_top + 18
 
@@ -137,16 +137,15 @@ class TimelinePainter:
     ) -> None:
         lanes = self.view._lanes
         lane_count = len(lanes)
-        gap = 6 if lane_count <= 4 else 4 if lane_count <= 8 else 3
         available = max(axis_top - lane_top - 8, 32)
-        lane_height = max(7.0, min(24.0, (available - gap * (lane_count - 1)) / lane_count))
+        gap, lane_height = self.lane_rows(lane_count, available)
         total_height = lane_height * lane_count + gap * (lane_count - 1)
         y = lane_top + max((available - total_height) / 2, 0)
 
-        small_font = QFont(self.view.font())
-        small_font.setPointSizeF(max(self.view.font().pointSizeF() - (1.0 if lane_count > 8 else 0.5), 7.5))
-        painter.setFont(small_font)
+        painter.setFont(self.lane_label_font(lane_count))
         metrics = painter.fontMetrics()
+        # Without the shared prefix, the tail is what tells lanes apart.
+        elide = Qt.TextElideMode.ElideLeft if self.view.lane_label_prefix() else Qt.TextElideMode.ElideRight
 
         for lane in lanes:
             row_rect = QRectF(chart_left, y, chart_width, lane_height)
@@ -156,7 +155,7 @@ class TimelinePainter:
             painter.drawRoundedRect(row_rect, min(5, lane_height / 2), min(5, lane_height / 2))
 
             painter.setPen(colors["text"])
-            label = metrics.elidedText(lane.label, Qt.TextElideMode.ElideRight, max(int(chart_left - 14), 20))
+            label = metrics.elidedText(self.view.lane_display_label(lane), elide, max(int(chart_left - 14), 20))
             painter.drawText(
                 QRectF(0, y - 3, chart_left - 14, lane_height + 6),
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
@@ -702,11 +701,28 @@ class TimelinePainter:
             painter.setPen(QPen(colors["grid"], 1))
 
 
+    @staticmethod
+    def lane_rows(lane_count: int, available: float) -> tuple[float, float]:
+        """``(gap, row height)`` for ``lane_count`` lanes in ``available`` pixels."""
+
+        gap = 6 if lane_count <= 4 else 4 if lane_count <= 8 else 3
+        lane_height = max(7.0, min(24.0, (available - gap * (lane_count - 1)) / max(lane_count, 1)))
+        return gap, lane_height
+
+
+    def lane_label_font(self, lane_count: int) -> QFont:
+        """The lane names' font: a little smaller than the widget's, more so past 8 lanes."""
+
+        small_font = QFont(self.view.font())
+        small_font.setPointSizeF(max(self.view.font().pointSizeF() - (1.0 if lane_count > 8 else 0.5), 7.5))
+        return small_font
+
+
     def left_label_width(self, metrics) -> int:
         if not self.view._lanes:
             return 76
-        longest = max(metrics.horizontalAdvance(lane.label) for lane in self.view._lanes)
-        return min(max(longest + 6, 76), 150)
+        longest = max(metrics.horizontalAdvance(self.view.lane_display_label(lane)) for lane in self.view._lanes)
+        return min(max(longest + 6, 76), MAX_LANE_LABEL_WIDTH_PX)
 
 
     def right_label_width(self, metrics) -> int:

@@ -1,17 +1,28 @@
-"""Widget components for the timeline."""
+"""Widget components for the timeline.
+
+Auto shows lanes only when every lane has its own row and each row is at least
+one name tall at the lanes' own height; otherwise it shows the density view.
+It used to choose by series count alone, so 42 series over 20 batch positions
+drew 12 crowded rows and a "+8 positions" row holding the last three hours.
+
+Lane names are whole while every one fits the name gutter; otherwise all of
+them drop the prefix they share (``Grid2_20260627_1`` to ``_20`` become ``1``
+to ``20``), and ``lane_label_prefix_changed`` gives the prefix once.
+"""
 from __future__ import annotations
 from collections import OrderedDict
 from datetime import datetime
 from typing import Any
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QPainter
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QCursor, QFontMetricsF, QPainter
 from PySide6.QtWidgets import QMenu, QSizePolicy, QToolTip, QWidget
 from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.presentation.design_tokens import RADIUS_CONTROL
+from tomography_session_browser.presentation.formatting import shared_name_prefix
 from tomography_session_browser.services.timeline_service import SessionTimeline, TimelineSegment
 from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.ui.widgets.time_chart import TIME_CHART_TIMELINE_MIN_HEIGHT, format_absolute_time
-from tomography_session_browser.ui.timeline.constants import DENSITY_THRESHOLD_SEGMENTS, MAX_GROUPED_LANES, MAX_UNGROUPED_LANES
+from tomography_session_browser.ui.timeline.constants import AXIS_HEIGHT_PX, DENSITY_THRESHOLD_SEGMENTS, LANES_TOP_PX, MAX_GROUPED_LANES, MAX_LANE_LABEL_WIDTH_PX, MAX_UNGROUPED_LANES, OVERFLOW_LANE_KEY
 from tomography_session_browser.ui.timeline.models import TimelineLane
 from tomography_session_browser.ui.timeline.painter import TimelinePainter
 from tomography_session_browser.ui.timeline.support import group_key, status_icon
@@ -19,6 +30,8 @@ from tomography_session_browser.ui.timeline.support import group_key, status_ico
 
 class TimelineStrip(QWidget):
     segment_clicked = Signal(str, object)  # (tilt_series_id, 1-based frame_index | None)
+    # The prefix the lane names drop, "" while they are whole or not drawn.
+    lane_label_prefix_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -27,6 +40,7 @@ class TimelineStrip(QWidget):
         self._lanes: tuple[TimelineLane, ...] = ()
         self._segment_metadata: dict[str, Any] = {}
         self._display_mode = "auto"
+        self._lane_prefix = ""
         self._highlighted_tilt_series_id: str | None = None
         self._keyboard_segment_index = 0
         self._segment_color_override: QColor | None = None
@@ -52,12 +66,14 @@ class TimelineStrip(QWidget):
         self._timeline = timeline
         self._lanes = self._build_lanes(timeline)
         self._apply_height_hint()
+        self._sync_lane_label_prefix()
         self.update()
 
     def set_segment_metadata(self, metadata: dict[str, Any] | None) -> None:
         self._segment_metadata = dict(metadata or {})
         self._lanes = self._build_lanes(self._timeline)
         self._apply_height_hint()
+        self._sync_lane_label_prefix()
         self.update()
 
     def set_display_mode(self, mode: str) -> None:
@@ -67,10 +83,55 @@ class TimelineStrip(QWidget):
             mode = "auto"
         self._display_mode = mode
         self._apply_height_hint()
+        self._sync_lane_label_prefix()
         self.update()
 
     def display_mode(self) -> str:
         return self._display_mode
+
+    def uses_density_view(self) -> bool:
+        """Whether the strip shows the density view (chosen, or by Auto)."""
+
+        return self._timeline is not None and self._use_density_view(self._timeline)
+
+    def lanes_fit(self) -> bool:
+        """Whether every lane has its own row, at least one name tall, at the
+        height the lanes view asks for."""
+
+        lanes = self._lanes
+        if any(lane.key == OVERFLOW_LANE_KEY for lane in lanes):
+            return False
+        if not lanes:
+            return True
+        available = max(self._lanes_height_hint(len(lanes)) - AXIS_HEIGHT_PX - LANES_TOP_PX - 8, 32)
+        gap, lane_height = self.painter.lane_rows(len(lanes), available)
+        name_height = QFontMetricsF(self.painter.lane_label_font(len(lanes))).height()
+        return lane_height + gap >= name_height
+
+    def lane_label_prefix(self) -> str:
+        """The prefix the drawn lane names leave out ("" when none is left out)."""
+
+        return self._lane_prefix
+
+    def lane_display_label(self, lane: TimelineLane) -> str:
+        """A lane's name as drawn: without the shared prefix when one is left out."""
+
+        prefix = self._lane_prefix
+        if prefix and lane.key != OVERFLOW_LANE_KEY and lane.label.startswith(prefix):
+            return lane.label[len(prefix):]
+        return lane.label
+
+    def _sync_lane_label_prefix(self) -> None:
+        prefix = ""
+        if self._lanes and not self.uses_density_view():
+            named = [lane.label for lane in self._lanes if lane.key != OVERFLOW_LANE_KEY]
+            metrics = self.fontMetrics()
+            # The gutter keeps 6 px beside the longest name.
+            if any(metrics.horizontalAdvance(label) + 6 > MAX_LANE_LABEL_WIDTH_PX for label in named):
+                prefix = shared_name_prefix(named, min_remainder=1)
+        if prefix != self._lane_prefix:
+            self._lane_prefix = prefix
+            self.lane_label_prefix_changed.emit(prefix)
 
     def set_highlighted_tilt_series_id(self, tilt_series_id: str | None) -> None:
         self._highlighted_tilt_series_id = tilt_series_id
@@ -85,6 +146,9 @@ class TimelineStrip(QWidget):
     # ----- tooltips ----------------------------------------------------------
 
     def event(self, event):  # noqa: N802 - Qt signature
+        if event.type() == QEvent.Type.FontChange:
+            self._apply_height_hint()
+            self._sync_lane_label_prefix()
         if event.type() == event.Type.ToolTip and self._timeline is not None:
             pos = event.pos()
             label = self._tooltip_at(pos)
@@ -245,7 +309,7 @@ class TimelineStrip(QWidget):
         overflow_segments = tuple(segment for lane in lanes[MAX_GROUPED_LANES - 1 :] for segment in lane.segments)
         visible.append(
             TimelineLane(
-                key="other",
+                key=OVERFLOW_LANE_KEY,
                 label=f"+{count_phrase(len(lanes) - len(visible), 'group')}",
                 segments=overflow_segments,
                 grouped=True,
@@ -294,7 +358,7 @@ class TimelineStrip(QWidget):
         )
         visible.append(
             TimelineLane(
-                key="other",
+                key=OVERFLOW_LANE_KEY,
                 label=f"+{count_phrase(len(lanes) - len(visible), 'position')}",
                 segments=overflow_segments,
                 grouped=True,
@@ -307,24 +371,26 @@ class TimelineStrip(QWidget):
             self.setMinimumHeight(208)
             self.updateGeometry()
             return
-        lane_count = max(len(self._lanes), 1)
-        if lane_count <= 1:
-            height = 170
-        elif lane_count <= 4:
-            height = 182
-        elif lane_count <= 8:
-            height = 204
-        else:
-            height = 228
-        self.setMinimumHeight(height)
+        self.setMinimumHeight(self._lanes_height_hint(len(self._lanes)))
         self.updateGeometry()
+
+    @staticmethod
+    def _lanes_height_hint(lane_count: int) -> int:
+        lane_count = max(lane_count, 1)
+        if lane_count <= 1:
+            return 170
+        if lane_count <= 4:
+            return 182
+        if lane_count <= 8:
+            return 204
+        return 228
 
     def _use_density_view(self, timeline: SessionTimeline) -> bool:
         if self._display_mode == "density":
             return True
         if self._display_mode == "lanes":
             return False
-        return len(timeline.segments) > DENSITY_THRESHOLD_SEGMENTS
+        return len(timeline.segments) > DENSITY_THRESHOLD_SEGMENTS or not self.lanes_fit()
 
 
     def _metadata_for(self, segment: TimelineSegment) -> Any | None:
