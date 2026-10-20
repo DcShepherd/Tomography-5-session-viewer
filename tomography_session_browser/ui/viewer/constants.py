@@ -337,11 +337,6 @@ OVERLAY_MARKER_TYPES = tuple(
 SHARED_NAME_PREFIX_PROPERTY = "sharedNamePrefix"
 
 
-NAME_PREFIX_BOUNDARIES = "_- ."
-
-
-MIN_SHARED_PREFIX_CHARS = 4
-
 #: Sources whose provenance line says nothing when there is nothing to flag: a
 #: plain MRC or image has its name in the status bar and its pixel size in the
 #: badge, so the footer under the canvas is for exceptions only.

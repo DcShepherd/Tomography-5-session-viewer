@@ -13,13 +13,13 @@ from tomography_session_browser.presentation.viewer_items import panel_title_for
 from tomography_session_browser.presentation.empty_states import viewer_empty_state
 from tomography_session_browser.presentation.viewer_entries import Entry, ItemEntry
 from tomography_session_browser.presentation.exposure_areas import ExposureArea, exposure_areas
+from tomography_session_browser.presentation.formatting import shared_name_prefix
 from tomography_session_browser.ui.motion import veil
 from tomography_session_browser.services.item_status import ItemListStatus
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.ui.viewer.constants import LIST_PRIMARY_ROLE, LIST_REFILL_VEIL_MS, LIST_REFILL_VEIL_OPACITY, MAX_PREVIEW_DIMENSION, SHARED_NAME_PREFIX_PROPERTY, VIEWER_OBJECT_ROLE
 from tomography_session_browser.ui.viewer.group_rows import make_group_row
-from tomography_session_browser.ui.viewer.list_rows import shared_name_prefix
 from tomography_session_browser.ui.viewer.models import ViewerViewState
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:

@@ -1,6 +1,5 @@
 """List rows for the image viewer."""
 from __future__ import annotations
-import os
 from pathlib import Path
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter, QPen
@@ -12,29 +11,7 @@ from tomography_session_browser.services.atlas_marker_style import LEAF_STATUS_W
 from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.presentation.design_tokens import NORMAL_STATUS_GLYPHS, RADIUS_CONTROL, SPACE_M, SPACE_S, SPACE_XS, STATUS_TONE_COLOURS, STATUS_TONE_FILL_ALPHA, TYPE_BODY, TYPE_CAPTION
 from tomography_session_browser.ui.viewer.group_rows import group_row_size, paint_group_row
-from tomography_session_browser.ui.viewer.constants import VIEWER_ENTRY_ROLE, LIST_PRIMARY_ROLE, LIST_ROW_HEIGHT_PX, LIST_ROW_SINGLE_HEIGHT_PX, LIST_ROW_NAME_HEIGHT_PX, LIST_ROW_SUMMARY_HEIGHT_PX, LIST_STATUS_ROLE, LIST_SUMMARY_ROLE, MIN_SHARED_PREFIX_CHARS, NAME_PREFIX_BOUNDARIES, SHARED_NAME_PREFIX_PROPERTY
-
-
-def shared_name_prefix(names: list[str]) -> str:
-    """The leading words every name in a list shares, e.g. ``SearchMap_``.
-
-    Cut back to a word boundary so the prefix never splits a token such as a
-    date (``SearchMap_202603`` becomes ``SearchMap_``). Empty when the list is
-    too small, the prefix is too short to be worth dropping, or dropping it
-    would leave some name with almost nothing.
-    """
-
-    distinct = {name for name in names if name}
-    if len(distinct) < 2:
-        return ""
-    common = os.path.commonprefix(sorted(distinct))
-    cut = max(common.rfind(boundary) for boundary in NAME_PREFIX_BOUNDARIES)
-    prefix = common[: cut + 1] if cut >= 0 else ""
-    if len(prefix) < MIN_SHARED_PREFIX_CHARS:
-        return ""
-    if any(len(name) - len(prefix) < 2 for name in distinct):
-        return ""
-    return prefix
+from tomography_session_browser.ui.viewer.constants import VIEWER_ENTRY_ROLE, LIST_PRIMARY_ROLE, LIST_ROW_HEIGHT_PX, LIST_ROW_SINGLE_HEIGHT_PX, LIST_ROW_NAME_HEIGHT_PX, LIST_ROW_SUMMARY_HEIGHT_PX, LIST_STATUS_ROLE, LIST_SUMMARY_ROLE, SHARED_NAME_PREFIX_PROPERTY
 
 
 def fit_list_name(name: str, metrics: QFontMetrics, width: int, shared_prefix: str = "") -> str:

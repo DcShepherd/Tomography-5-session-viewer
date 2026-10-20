@@ -13,6 +13,13 @@ one-group case and looks as it always did. Gaps of both widths count against
 the minimum segment width, so a band that cannot afford its groups collapses
 to the proportional bar like any other that is too dense.
 
+A band that names its groups names all of them or none. Whole names when every
+one fits; otherwise the names without the prefix they all share (batch
+positions ``Grid2_20260627_1`` to ``_20`` become ``1`` to ``20``, the
+prefix given once by ``label_prefix_changed``); otherwise it collapses to the
+proportional bar. Shortening each name from the right used to cut away the one
+part that differed, so 20 groups read ``Grid…``, ``Grid2_2026…``.
+
 It used to draw squares of at most 18 px, so 12 atlases filled a third of
 the card at 4K, and a card that fell back to a thinner bar sat beside one
 showing squares in the same row.
@@ -29,6 +36,7 @@ from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 from tomography_session_browser.presentation.dashboard.models import TILE_STATUS_COMPLETE, TILE_STATUS_FAILED, TILE_STATUS_MISSING, TILE_STATUS_NEUTRAL, TILE_STATUS_WARNING, StatusTileModel
 from tomography_session_browser.presentation.design_tokens import SPACE_S, SPACE_XS
+from tomography_session_browser.presentation.formatting import shared_name_prefix
 from tomography_session_browser.ui.theme import current_palette
 
 
@@ -45,8 +53,12 @@ TILE_GAP = 3
 # Spacing between groups.
 GROUP_GAP = SPACE_S
 
-# Fewest characters (the ellipsis included) worth drawing of a group's name.
+# Fewest characters of a shortened group name (the ellipsis not counted) that
+# still name the group. A name that fits whole is drawn however short it is.
 MIN_LABEL_CHARS = 4
+
+#: A group name as drawn: its left edge, the room it has, and its text.
+GroupLabel = tuple[int, int, str]
 
 
 def grouped(items: list[StatusTileModel]) -> list[tuple[str, list[StatusTileModel]]]:
@@ -63,10 +75,13 @@ class StatusTileGrid(QWidget):
     """One status band: a segment per item, or a proportional bar.
 
     ``has_visible_grid()`` is True while the band is segmented, that is
-    while every item has a segment at least ``MIN_SEGMENT_PX`` wide.
+    while every item has a segment at least ``MIN_SEGMENT_PX`` wide and, on a
+    band that names its groups, every group can be named.
     """
 
     tile_clicked = Signal(str, str)  # (item_id, destination_tab_label)
+    # The prefix the group names drop, "" while they are whole or not drawn.
+    label_prefix_changed = Signal(str)
 
     def __init__(
         self,
@@ -83,6 +98,12 @@ class StatusTileGrid(QWidget):
         self._items = [item for _group, members in self._groups for item in members]
         self._band_height = band_height
         self._group_labels = group_labels and any(group for group, _members in self._groups)
+        # Dropped from every name when the whole names do not all fit. A
+        # batch number of one digit is a name here, unlike in a list row.
+        self._label_prefix = shared_name_prefix(
+            [group for group, _members in self._groups], min_remainder=1
+        ) if self._group_labels else ""
+        self._shown_prefix = ""
         self._tile_rects: list[tuple[QRect, StatusTileModel]] = []
         self._label_rects: list[tuple[QRect, str]] = []
         self._tile_size = 0
@@ -141,12 +162,17 @@ class StatusTileGrid(QWidget):
     def has_visible_grid(self) -> bool:
         """Whether the grid currently has room to render individual tiles.
 
-        ``False`` when there are too many items to render legibly at the
-        current width — the parent card should fall back to the grouped
-        status summary in that case.
+        ``False`` when there are too many items, or groups too narrow to be
+        named, to render legibly at the current width — the band then shows
+        the proportional bar.
         """
 
         return self._has_visible_grid
+
+    def shown_label_prefix(self) -> str:
+        """The prefix the drawn group names leave out ("" when none is left out)."""
+
+        return self._shown_prefix
 
     def tile_size(self) -> int:
         """Width of each segment in pixels at the last paint (0 when proportional)."""
@@ -216,8 +242,40 @@ class StatusTileGrid(QWidget):
             first += len(members)
         return spans
 
+    def label_plan(self, width: int) -> tuple[str, list[GroupLabel]] | None:
+        """``(dropped prefix, labels)`` for the group names across ``width``,
+        or None when some group cannot be named.
+
+        Whole names when every one fits its group; otherwise every name loses
+        the prefix they share and keeps its tail, which is what differs. A
+        shortened name must keep ``MIN_LABEL_CHARS`` characters; ``…4`` for
+        batch 14 would name the wrong batch. Unnamed groups are not labelled.
+        """
+
+        if not self._group_labels:
+            return "", []
+        metrics = self.fontMetrics()
+        spans = [(group, left, right - left + 1)
+                 for group, left, right in self.group_spans(self.segment_rects(width)) if group]
+        if all(metrics.horizontalAdvance(group) <= room for group, _left, room in spans):
+            return "", [(left, room, group) for group, left, room in spans]
+        prefix = self._label_prefix
+        # Past a shared prefix the tail differs; with none, either end may.
+        mode = Qt.TextElideMode.ElideLeft if prefix else Qt.TextElideMode.ElideMiddle
+        labels: list[GroupLabel] = []
+        for group, left, room in spans:
+            name = group[len(prefix):] if prefix and group.startswith(prefix) else group
+            text = metrics.elidedText(name, mode, room)
+            if text != name and len(text) - 1 < MIN_LABEL_CHARS:
+                return None
+            labels.append((left, room, text))
+        return prefix, labels
+
     def _segmented(self) -> bool:
-        return self.segment_width(self.width()) >= MIN_SEGMENT_PX
+        width = self.width()
+        if self.segment_width(width) < MIN_SEGMENT_PX:
+            return False
+        return self.label_plan(width) is not None
 
     def _label_row_height(self) -> int:
         return SPACE_XS + self.fontMetrics().height()
@@ -237,6 +295,14 @@ class StatusTileGrid(QWidget):
         height = self._wanted_height()
         if self.minimumHeight() != height or self.maximumHeight() != height:
             self.setFixedHeight(height)
+        self._sync_prefix()
+
+    def _sync_prefix(self) -> None:
+        plan = self.label_plan(self.width()) if self._segmented() else None
+        prefix = plan[0] if plan is not None else ""
+        if prefix != self._shown_prefix:
+            self._shown_prefix = prefix
+            self.label_prefix_changed.emit(prefix)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 — Qt signature
         super().resizeEvent(event)
@@ -267,11 +333,13 @@ class StatusTileGrid(QWidget):
             self._has_visible_grid = False
             return
 
-        if not self._segmented():
-            # Too many items for a segment each. Previously the widget simply
-            # drew nothing, so a card with (say) 85 tilt series showed a
-            # conspicuous blank where its neighbours showed a tile grid.
-            # A single proportional bar carries the same breakdown.
+        plan = self.label_plan(self.width()) if self.segment_width(self.width()) >= MIN_SEGMENT_PX else None
+        if plan is None:
+            # Too many items for a segment each, or groups too narrow to name.
+            # Previously the widget simply drew nothing, so a card with (say)
+            # 85 tilt series showed a conspicuous blank where its neighbours
+            # showed a tile grid. A single proportional bar carries the same
+            # breakdown.
             self._has_visible_grid = False
             self._tile_size = 0
             self._paint_proportion_bar()
@@ -297,30 +365,20 @@ class StatusTileGrid(QWidget):
                     painter.setPen(QPen(QColor(current_palette().text_strong), 2))
                     painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), radius, radius)
                     painter.setPen(Qt.PenStyle.NoPen)
-            if self._group_labels:
-                self._paint_group_labels(painter, rects)
+            self._paint_group_labels(painter, plan[1])
         finally:
             painter.end()
 
-    def _paint_group_labels(self, painter: QPainter, rects: list[QRect]) -> None:
-        """Each group's name under its segments, in the room the group has.
+    def _paint_group_labels(self, painter: QPainter, labels: list[GroupLabel]) -> None:
+        """Each group's name under its segments, as ``label_plan`` fitted it.
 
-        A name that does not fit is shortened with an ellipsis; one that would
-        be left with fewer than ``MIN_LABEL_CHARS`` characters is not drawn,
-        since a stub names nothing. The segments' tooltips and the tab list
-        still carry what the band cannot.
+        The segments' tooltips name the whole batch position.
         """
 
         metrics = painter.fontMetrics()
         top = self._band_height + SPACE_XS
         painter.setPen(self._color_label)
-        for group, left, right in self.group_spans(rects):
-            if not group:
-                continue
-            room = right - left + 1
-            text = metrics.elidedText(group, Qt.TextElideMode.ElideRight, room)
-            if len(text) < min(len(group), MIN_LABEL_CHARS):
-                continue
+        for left, room, text in labels:
             area = QRect(left, top, room, metrics.height())
             painter.drawText(area, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
             self._label_rects.append((area, text))

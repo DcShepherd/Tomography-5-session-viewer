@@ -1,6 +1,7 @@
 """Shared display formats with distinct compact and long duration policies."""
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -186,3 +187,34 @@ def format_duration_compact(seconds: float) -> str:
     if mins:
         return f"{mins}m {secs:02d}s"
     return f"{secs}s"
+
+
+#: Characters a shared name prefix may end on, so it never splits a token.
+NAME_PREFIX_BOUNDARIES = "_- ."
+
+#: Shortest shared prefix worth dropping from a set of names.
+MIN_SHARED_PREFIX_CHARS = 4
+
+
+def shared_name_prefix(names: list[str], *, min_remainder: int = 2) -> str:
+    """The leading words every name in a list shares, e.g. ``SearchMap_``.
+
+    Cut back to a word boundary so the prefix never splits a token such as a
+    date (``SearchMap_202603`` becomes ``SearchMap_``). Empty when the list is
+    too small, the prefix is too short to be worth dropping, or dropping it
+    would leave some name with fewer than ``min_remainder`` characters. A list
+    row keeps ``Position_1`` whole; the status band, which names batch positions
+    in a few pixels, accepts ``1``.
+    """
+
+    distinct = {name for name in names if name}
+    if len(distinct) < 2:
+        return ""
+    common = os.path.commonprefix(sorted(distinct))
+    cut = max(common.rfind(boundary) for boundary in NAME_PREFIX_BOUNDARIES)
+    prefix = common[: cut + 1] if cut >= 0 else ""
+    if len(prefix) < MIN_SHARED_PREFIX_CHARS:
+        return ""
+    if any(len(name) - len(prefix) < min_remainder for name in distinct):
+        return ""
+    return prefix

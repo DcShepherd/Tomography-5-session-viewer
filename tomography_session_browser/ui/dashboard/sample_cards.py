@@ -2,7 +2,8 @@
 
 One full-width Tilt series card: the recorded count, the outcomes that can
 open rows, and a band with one block per series, kept together by batch
-position and named under each group. Under it the smaller cards, one per
+position and named under each group (when the names lose the prefix they
+share, the card's heading row gives it once). Under it the smaller cards, one per
 kind the sample holds: Batch positions, Search maps, Overviews, and the Atlas
 with its picture. A card for a kind the sample does not hold is not drawn; the
 page says so on one line.
@@ -35,6 +36,7 @@ from tomography_session_browser.ui.dashboard.layout import ResponsiveCardGrid
 from tomography_session_browser.ui.dashboard.outcome import outcome_headline
 from tomography_session_browser.ui.theme import TIER_PRIMARY, TIER_SUPPORTING, apply_tier
 from tomography_session_browser.ui.widgets.growing_atlas_preview import GrowingAtlasPreview
+from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 from tomography_session_browser.ui.widgets.status_tile_grid import BAND_HEIGHT_PX, StatusTileGrid
 
 if TYPE_CHECKING:
@@ -172,10 +174,31 @@ def _tilt_series_card(dashboard: SessionDashboard, model: DashboardModel, card: 
     box = TiltSeriesCard()
     layout = card_layout(box)
     layout.setSpacing(SPACE_S)
-    layout.addWidget(_card_title(card.label))
+    head = QHBoxLayout()
+    head.setSpacing(SPACE_M)
+    head.addWidget(_card_title(card.label))
+    head.addStretch(1)
+    prefix_note = ElidedLabel(mode=Qt.TextElideMode.ElideMiddle, prefer_full_width=True)
+    prefix_note.setObjectName("bandLabelPrefix")
+    prefix_note.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    apply_tier(prefix_note, TIER_SUPPORTING)
+    head.addWidget(prefix_note)
+    layout.addLayout(head)
     layout.addWidget(outcome_headline(dashboard, model, noun="recorded"))
-    layout.addWidget(_band(dashboard, card, hero=True))
+    band = _band(dashboard, card, hero=True)
+    band.label_prefix_changed.connect(lambda prefix: _show_label_prefix(prefix_note, prefix))
+    _show_label_prefix(prefix_note, band.shown_label_prefix())
+    layout.addWidget(band)
     return box
+
+
+def _show_label_prefix(note: ElidedLabel, prefix: str) -> None:
+    """Say once what the shortened group names under the band leave out."""
+
+    note.setText(f"Batch positions: {prefix}…" if prefix else "")
+    note.setToolTip(f"The names under the band leave out {prefix}, which every batch position here starts with."
+                    if prefix else "")
+    note.setVisible(bool(prefix))
 
 
 def _count_card(dashboard: SessionDashboard, card: StatCardModel, route: DashboardFilterModel,
