@@ -149,11 +149,11 @@ Use the **Atlas**, **Overview**, **Search map**, **Search**, **Batch position**,
 
 Warnings and failed or incomplete labels are valid findings when data or links are missing. The application shows unresolved information. It does not create a scientific link.
 
-At a whole-grid Atlas view, nearby batch positions appear as counted clusters. Zoom in to show short batch IDs. Search-map footprints and tile grids appear only when they are readable. Select a batch marker to inspect it. Double-click a marker to open its one verified linked Overview. If several targets exist, the application does not navigate. It explains the reason.
+At a whole-grid Atlas view, nearby batch positions appear as counted clusters. As you zoom in, a cluster buds its positions apart; zooming out draws them back together. With reduced motion they regroup at once. Zoom in to show short batch IDs. Search-map footprints and tile grids appear only when they are readable. Select a batch marker to inspect it. Double-click a marker to open its one verified linked Overview. If several targets exist, the application does not navigate. It explains the reason.
 
 Use the **Overlays** panel to control clusters, labels, tile grids, the marker legend, and the per-exposure detail layer. The detail layer is off by default. At a linked project node, use **Data collections** to control markers for each collection. Selecting one data-collection node limits Atlas batch markers to that collection.
 
-Select **Remove all overlays** to clear all overlay checkboxes in the current tab, including the scale bar and marker legend. Select individual checkboxes to show overlays again.
+Select **Remove all overlays** to hide every overlay in the current tab, including the scale bar and marker legend. **Data collections** choices are kept. Select individual checkboxes to show overlays again.
 
 Double-click an exposure area in an Overview or Search-map image, or select it and press Enter, to open its search tile. This does what the **Search** jump does. If several search tiles match the exposure, or none was recorded for it, the application does not navigate and states the reason. On arrival, the selected exposure is highlighted only when exactly one exposure on the tile matches it; otherwise nothing is highlighted, and the status bar says so.
 

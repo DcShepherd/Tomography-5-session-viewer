@@ -1,6 +1,7 @@
 """Marker layer for the image viewer."""
 from __future__ import annotations
 from dataclasses import replace
+import shiboken6
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QPen, QPolygonF
 from PySide6.QtWidgets import QAbstractGraphicsShapeItem, QGraphicsItem, QGraphicsLineItem
@@ -13,8 +14,9 @@ from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.presentation.design_tokens import SANS_FONT_NAME
 from tomography_session_browser.presentation.marker_palette import FRAME_HALO
 from tomography_session_browser.ui.viewer.atlas_lod_items import AtlasLodLabelItem, AtlasLodMarkerItem
-from tomography_session_browser.ui.viewer.constants import ATLAS_LOD_CLUSTER, ATLAS_LOD_EXPOSURES, ATLAS_LOD_LABELS, ATLAS_LOD_TILE_GRIDS, EXPOSURE_MARKER_HIGHLIGHT_WIDTH, HIGH_DETAIL_SCALE, MEDIUM_DETAIL_SCALE
+from tomography_session_browser.ui.viewer.constants import ATLAS_LOD_CLUSTER, ATLAS_LOD_EXPOSURES, ATLAS_LOD_LABELS, ATLAS_LOD_TILE_GRIDS, EXPOSURE_MARKER_HIGHLIGHT_WIDTH, HIGH_DETAIL_SCALE, MEDIUM_DETAIL_SCALE, ROWLESS_MARKER_TYPE_ROWS
 from tomography_session_browser.ui.viewer.marker_paint import batch_label_color, batch_label_scene_origin, batch_label_text_path, exposure_highlight_color, marker_colors, marker_label_anchor, marker_outline, marker_scene_extent, metadata_box, metadata_point
+from tomography_session_browser.ui.viewer.marker_goo import GooBlob, MarkerGoo, blobs_from_markers, start_goo
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from tomography_session_browser.ui.viewer.preview_view import ImagePreviewView
@@ -27,6 +29,12 @@ class MarkerLayer:
         self.view = view
         self.input_markers: list[ImageMarker] | None = None
         self.intrinsic_selection: frozenset[str] = frozenset()
+        #: Row-less marker types Remove all overlays hid (``ROWLESS_MARKER_TYPE_ROWS``).
+        self.rowless_hidden: set[str] = set()
+        #: The Atlas batch glyphs last drawn, with what they were drawn from and at
+        #: which zoom, for the next regroup (``marker_goo``); and that regroup.
+        self.goo_layout: tuple[tuple[object, ...], int, list[GooBlob]] | None = None
+        self.goo: MarkerGoo | None = None
 
     def set_atlas_lod_enabled(self, enabled: bool) -> None:
         self.atlas_lod_enabled = bool(enabled)
@@ -47,6 +55,11 @@ class MarkerLayer:
             return
         if visible:
             self.visible_marker_types.add(marker_type)
+            # Layers without a row that Remove all overlays hid come back with
+            # the row they are drawn with; nothing else could show them again.
+            returning = {key for key in self.rowless_hidden if ROWLESS_MARKER_TYPE_ROWS[key] == marker_type}
+            self.visible_marker_types.update(returning)
+            self.rowless_hidden.difference_update(returning)
         else:
             self.visible_marker_types.discard(marker_type)
         self.view._redraw_markers()
@@ -54,6 +67,7 @@ class MarkerLayer:
     def hide_all_markers(self) -> None:
         """Hide every marker layer without discarding its source markers."""
         self.view._close_cluster_popup()
+        self.rowless_hidden.update(self.visible_marker_types.intersection(ROWLESS_MARKER_TYPE_ROWS))
         self.visible_marker_types.clear()
         self.view._redraw_markers()
 
@@ -118,6 +132,9 @@ class MarkerLayer:
             self.view._redraw_markers()
 
     def redraw_markers(self, changed_ids: set[str] | None = None) -> None:
+        if changed_ids is None:
+            # A full redraw replaces the glyphs a running regroup fades in.
+            self.dismiss_goo()
         retained = []
         for item in self.marker_items:
             marker = item.data(0)
@@ -128,6 +145,7 @@ class MarkerLayer:
         self.marker_items = retained
         first_new_item = len(retained)
         if self.view.parts.preview_image.pixmap_item is None:
+            self.goo_layout = None
             return
         if changed_ids is None:
             display_markers = self.view._display_markers()
@@ -277,7 +295,43 @@ class MarkerLayer:
             if not pen.isCosmetic():
                 pen.setWidthF(pen.widthF() * units)
                 item.setPen(pen)
+        if changed_ids is None:
+            self.regroup(self.marker_items[first_new_item:])
         self.view._update_marker_detail()
+
+    def regroup(self, new_items: list[QGraphicsItem]) -> None:
+        """Let the Atlas batch glyphs bud apart or flow together if only the zoom regrouped them."""
+
+        if not self.atlas_lod_enabled:
+            self.goo_layout = None
+            return
+        image = self.view.parts.preview_image
+        basis = (
+            id(self.source_markers),
+            frozenset(self.visible_marker_types),
+            tuple(sorted(self.atlas_lod_options.items())),
+            image.current_image_key,
+            image.current_image_shape,
+        )
+        zoom = zoom_bucket(self.view._zoom_scale())
+        blobs = blobs_from_markers(self.last_display_markers)
+        previous = self.goo_layout
+        self.goo_layout = (basis, zoom, blobs)
+        if previous is None or previous[0] != basis or previous[1] == zoom:
+            return
+        items_by_key: dict[str, list[QGraphicsItem]] = {}
+        for item in new_items:
+            marker = item.data(0)
+            if isinstance(marker, ImageMarker):
+                items_by_key.setdefault(marker.id, []).append(item)
+        self.goo = start_goo(self.view, previous[2], blobs, items_by_key)
+
+    def dismiss_goo(self) -> None:
+        """End a running regroup now, with every glyph showing in full."""
+
+        goo, self.goo = self.goo, None
+        if goo is not None and shiboken6.isValid(goo) and goo.is_animating:
+            goo.dismiss()
 
     def style_scene_units(self) -> float:
         """Displayed scene units per reference pixel, independent of zoom."""

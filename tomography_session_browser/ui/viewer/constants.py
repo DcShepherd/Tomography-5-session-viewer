@@ -249,6 +249,17 @@ DEFAULT_VISIBLE_MARKER_TYPES = (
 )
 
 
+#: Marker types with no Overlays row of their own, to the row they are drawn
+#: with. Remove all overlays hides them too; switching that row back on brings
+#: them back. Otherwise they stay shown whatever the row says.
+ROWLESS_MARKER_TYPE_ROWS = {
+    MarkerType.TILT_SERIES: MarkerType.BATCH_POSITION,
+    MarkerType.STAGE_CROSSHAIR: MarkerType.BATCH_POSITION,
+    MarkerType.LINK_LINE: MarkerType.EXPOSURE_AREA,
+    MarkerType.CONDITION_AREA: MarkerType.FOCUS_AREA,
+}
+
+
 EXPOSURE_MARKER_HIGHLIGHT_WIDTH = 4.0
 
 

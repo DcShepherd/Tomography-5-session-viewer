@@ -296,6 +296,8 @@ class ImagePreviewView(QGraphicsView):
         return self.parts.preview_image.rendered_image_rect()
 
     def render_current_view(self) -> tuple[QImage, float] | None:
+        # A regroup's glyphs are still fading in; the picture shows them whole.
+        self.parts.marker_layer.dismiss_goo()
         return self.parts.preview_image.render_current_view()
 
     @property

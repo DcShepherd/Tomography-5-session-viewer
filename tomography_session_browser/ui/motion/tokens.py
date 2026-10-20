@@ -45,6 +45,10 @@ DURATION_CAMERA_MAX_MS = 640
 DURATION_PULSE_MS = 650
 
 
+#: Atlas batch markers budding apart or flowing together as a zoom regroups them.
+DURATION_GOO_MS = 460
+
+
 STAGGER_MS = 25
 
 

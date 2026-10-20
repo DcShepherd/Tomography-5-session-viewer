@@ -399,20 +399,9 @@ class OverlayPanel:
                 self.user_marker_type_visible[key] = False
         for row in self.rows:
             self.sync_row(row)
-        collections_changed = False
-        for key, checkbox in self.atlas_collection_checks.items():
-            if not checkbox.isChecked():
-                continue
-            checkbox.blockSignals(True)
-            checkbox.setChecked(False)
-            checkbox.blockSignals(False)
-            if self.view.parts.canvas_controls.on_atlas_collection_visibility_changed is not None:
-                self.view.parts.canvas_controls.on_atlas_collection_visibility_changed(key, False)
-            collections_changed = True
-        if collections_changed:
-            # Rebuild collection-scoped markers once, not once per collection.
-            self.view.parts.tab_selection.forget_markers()
-            self.view._refresh_marker_selection()
+        # The Data collections boxes stay as they are: they choose which batch
+        # positions the Batch position layer draws, and are not layers. Clearing
+        # them left that row drawing nothing once it was switched back on.
         if self.view.marker_legend_checkbox is not None:
             self.view.marker_legend_checkbox.setChecked(False)
         self.view.scale_bar_checkbox.setChecked(False)

@@ -41,6 +41,7 @@ from tomography_session_browser.ui.motion.branch_reveal import BranchReveal
 from tomography_session_browser.ui.motion.tokens import CAMERA_PATH_RHO
 from tomography_session_browser.ui.motion.tokens import DURATION_CAMERA_MAX_MS
 from tomography_session_browser.ui.motion.tokens import DURATION_CAMERA_MS
+from tomography_session_browser.ui.motion.tokens import DURATION_GOO_MS
 from tomography_session_browser.ui.motion.tokens import DURATION_MICRO_MS
 from tomography_session_browser.ui.motion.tokens import DURATION_PANEL_MS
 from tomography_session_browser.ui.motion.tokens import DURATION_PULSE_MS
