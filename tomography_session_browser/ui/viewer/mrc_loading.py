@@ -1,0 +1,454 @@
+"""Mrc loading for the image viewer."""
+from __future__ import annotations
+from collections.abc import Callable
+from pathlib import Path
+import math
+from dataclasses import dataclass
+from typing import Any, Literal
+from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtGui import QImage
+from tomography_session_browser.domain.identity import entity_key_text
+from tomography_session_browser.services.preview_sources import PreviewSources
+from tomography_session_browser.presentation.empty_states import missing_preview_state
+from tomography_session_browser.presentation.viewer_items import missing_image_state
+import logging
+LOGGER = logging.getLogger("tomography_session_browser.ui.image_viewer")
+from tomography_session_browser.ui.viewer.constants import FIRST_ZOOM_PREVIEW_DIMENSION, MAX_PREVIEW_DIMENSION, MRC_JPEG_FALLBACK_GRACE_MS, PYRAMID_LEVELS
+from tomography_session_browser.ui.viewer.list_rows import warning_tooltip
+from tomography_session_browser.ui.viewer.preview_cache import CachedPreview
+from tomography_session_browser.ui.viewer.preview_image import source_image_size_for_item
+from tomography_session_browser.ui.viewer.preview_scheduler import cached_preview, preview_scheduler
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from tomography_session_browser.ui.viewer.viewer_tab import ViewerTab
+
+
+@dataclass(frozen=True, slots=True)
+class RasterRequest:
+    request_id: int
+    primary: Path | None
+    slice_index: int
+    path: Path
+    mode: Literal["image", "delayed", "failed"]
+    warnings: tuple[str, ...] = ()
+
+
+class MrcLoadSignals(QObject):
+    loaded = Signal(int, Path, int, QImage, int, list, int, int)
+    failed = Signal(int, Path, int, int, list)
+    raster_loaded = Signal(object, object)
+
+
+def emit_if_open(signal, *args) -> None:
+    try:
+        signal.emit(*args)
+    except RuntimeError:
+        LOGGER.debug("Dropped preview result; viewer was closed")
+
+
+class PreviewLoader:
+    """Loads the image one ViewerTab shows for its item: a raster, or an MRC
+    frame decoded off the GUI thread, with a JPEG fallback while it decodes.
+
+    Built before the tab's other parts, which it reaches through
+    ``view.parts``. The tab's own slots receive the worker results
+    (``mrc_signals``) and pass them here.
+    """
+
+    def __init__(self, view: ViewerTab, *, frames_share_zoom: bool = False) -> None:
+        self.view = view
+        #: Every frame of an item shares one crop (tilt series).
+        self.frames_share_zoom = frames_share_zoom
+        self.sources_for: Callable[[Any], PreviewSources] = lambda _value: PreviewSources(None)
+        self.prepared_sources: dict[str, PreviewSources] = {}
+        self.current_path: Path | None = None
+        self.current_fallback: Path | None = None
+        self.displayed_path: Path | None = None
+        self.displayed_slice_index: int | None = None
+        self.current_mrc_max_size = MAX_PREVIEW_DIMENSION
+        self.request_id = 0
+        self.pending_fallback_request: tuple[int, Path, int, Path, tuple[str, int, int | None]] | None = None
+        self.native_size = 0
+        self.outgoing_image_stale = False
+        self.loading_frame = False
+        self.requested_slice_index = 0
+        self.mrc_signals = MrcLoadSignals()
+        self.fallback_debounce = QTimer(view)
+        self.fallback_debounce.setSingleShot(True)
+        self.fallback_debounce.setInterval(MRC_JPEG_FALLBACK_GRACE_MS)
+        self.fallback_debounce.timeout.connect(self.show_delayed_mrc_fallback)
+
+    def set_sources(self, sources_for: Callable[[Any], PreviewSources],
+                    prepared_sources: dict[str, PreviewSources] | None) -> None:
+        """Where each item's preview comes from, and the sources already resolved."""
+
+        self.sources_for = sources_for
+        self.prepared_sources = prepared_sources or {}
+
+    def forget_item(self) -> None:
+        """The items were replaced: nothing is loading or shown, and a result
+        still on its way belongs to an older request."""
+
+        self.current_path = None
+        self.current_fallback = None
+        self.displayed_path = None
+        self.displayed_slice_index = None
+        self.current_mrc_max_size = MAX_PREVIEW_DIMENSION
+        self.request_id += 1
+        self.loading_frame = False
+
+    def load_detail_level(self, max_size: int) -> None:
+        """Decode the current frame again, ``max_size`` pixels across: a zoom wants more detail."""
+
+        self.current_mrc_max_size = max_size
+        if self.current_path is not None:
+            self.load_path(self.current_path, self.current_fallback, self.view.slice_slider.value())
+
+    def discard_outgoing_image(self) -> None:
+        """Blank the canvas while a decode is awaited for another item.
+
+        Decoding is asynchronous. Never label the outgoing item's pixels as the
+        newly selected scientific item. A preview already in the cache is
+        installed at once and never reaches here, so it keeps the dissolve.
+        """
+        if not self.outgoing_image_stale:
+            return
+        self.outgoing_image_stale = False
+        self.view.viewer.clear("Loading preview...")
+        self.displayed_path = None
+        self.displayed_slice_index = None
+        self.view.parts.canvas_controls.update_image_badge()
+        self.view.parts.canvas_controls.update_scale_bar()
+        self.view.parts.frame_scrubber.update_frame_label(self.view.slice_slider.maximum() + 1)
+        self.view.parts.frame_scrubber.notify_frame_changed(self.view.slice_slider.maximum() + 1)
+
+    def load_value(self, value: Any, slice_index: int, *, restore_frame: bool = False) -> None:
+        self.view.parts.frame_scrubber.cancel_pending()
+        self.loading_frame = False
+        preview_scheduler().cancel(self.mrc_signals)
+        preview_scheduler().cancel((self.mrc_signals, "raster"))
+        self.request_id += 1
+        self.native_size = 0
+        sources = self.source_for_value(value)
+        path = sources.primary
+        self.outgoing_image_stale = (path is not None and value is not self.view.parts.tab_selection.current_value
+                                     and path != self.current_path)
+        # Empty-state overrides such as ``missing_preview`` describe the row
+        # that is being left.  Clear the realised panel as well as the model
+        # before starting the next preview; MRC loading is asynchronous, so
+        # waiting for its completion otherwise leaves the old panel stacked
+        # over the canvas while the new section loads.
+        self.view.parts.list_pane.clear_empty_state_override()
+        if self.frames_share_zoom:
+            # Another tilt series opens fitted, and the zoom on the one being
+            # left is dropped: coming back to it shows it fitted too.
+            self.view.viewer.begin_view_group(id(value))
+        if value is not self.view.parts.tab_selection.current_value:
+            # Another item: dissolve into its image when it arrives (F5.4).
+            # Frame changes of the same item go through ``_load_path`` and
+            # stay a crisp cut.
+            self.view.viewer.crossfade_next_image()
+            # A jump still waiting to land belonged to the previous item; a
+            # jump to this one asks again once it is selected (F5.7).
+            self.view.viewer.arrive_at_marker(None)
+        self.view.parts.tab_selection.show_item(value)
+        self.view.viewer.clear_exposure_highlights(redraw=False)
+        self.view.parts.overlay_panel.update_atlas_collection_overlay_controls(value)
+        self.view.parts.viewer_header.update_header(value)
+        markers = self.view.parts.tab_selection.markers_of(value)
+        self.view.parts.overlay_panel.update_marker_type_availability(markers)
+        self.view.viewer.set_markers(markers, selected_marker_id=self.view.parts.tab_selection.active_selected_marker_id(value, markers))
+        self.view.parts.tab_selection.sync_exposure_chooser()
+        if self.view.parts.overlay_panel.atlas_lod:
+            self.view.atlas_marker_legend.set_markers(markers)
+        if path is None:
+            self.current_path = None
+            self.current_fallback = None
+            self.displayed_path = None
+            self.displayed_slice_index = None
+            self.view.viewer.clear("Preview unavailable")
+            self.view.parts.canvas_controls.update_image_badge()
+            # The page says it; the line under the canvas would only say it again.
+            self.view.parts.list_pane.set_status_text("")
+            self.view.parts.frame_scrubber.set_slice_state(1, 0, valid_stack=False)
+            self.view.parts.list_pane.show_empty_state(
+                missing_image_state(value)
+                or missing_preview_state(
+                    name=str(getattr(value, "name", None) or getattr(value, "id", "this item")),
+                    metadata_available=True,
+                )
+            )
+            return
+        self.current_path = path
+        self.current_fallback = sources.fallback
+        self.current_mrc_max_size = self.initial_mrc_preview_size(path)
+        if not restore_frame:
+            slice_index = self.view.parts.frame_scrubber.default_frame_index(value, path, slice_index)
+        self.load_path(path, sources.fallback, slice_index)
+
+    def source_for_value(self, value: Any) -> PreviewSources:
+        prepared = self.prepared_sources.get(entity_key_text(value))
+        return prepared if prepared is not None else self.sources_for(value)
+
+    def load_path(self, path: Path, fallback: Path | None, slice_index: int) -> None:
+        if path.suffix.lower() == ".mrc":
+            self.load_mrc_path(path, fallback, slice_index)
+            return
+        self.request_id += 1
+        self.request_raster(path, mode="image")
+
+    def request_raster(self, path: Path, *, mode: Literal["image", "delayed", "failed"], warnings: list[str] | None = None) -> None:
+        request = RasterRequest(self.request_id, self.current_path, self.view.slice_slider.value(), path, mode, tuple(warnings or ()))
+        cached = cached_preview((path, 0, 0))
+        if cached is not None:
+            self.outgoing_image_stale = False
+            self.raster_loaded(request, cached)
+            return
+        self.discard_outgoing_image()
+        signal = self.mrc_signals.raster_loaded
+        preview_scheduler().request((path, 0, 0), client=(self.mrc_signals, "raster"),
+            receive=lambda result: emit_if_open(signal, request, result))
+
+    def raster_loaded(self, request: RasterRequest, preview: CachedPreview) -> None:
+        request_id, primary, index = request.request_id, request.primary, request.slice_index
+        path, mode = request.path, request.mode
+        if request_id != self.request_id or primary != self.current_path:
+            return
+        if mode != "image" and index != self.view.slice_slider.value():
+            return
+        if mode == "delayed" and self.displayed_path == primary:
+            return
+        warnings = list(request.warnings) + preview.warnings
+        if not preview.image.isNull():
+            self.view.viewer.set_image(preview.image, logical_image_key=self.logical_image_key(primary or path, index),
+                                       overlay_reference_size=self.overlay_reference_size())
+        else:
+            self.view.viewer.clear("Preview unavailable")
+            self.displayed_path = None
+            self.displayed_slice_index = None
+        self.view.parts.tab_selection.refresh_marker_selection()
+        if not preview.image.isNull():
+            self.displayed_path = path
+            # A fallback is one raster image, not raw stack frame zero. History
+            # must not turn its unknown frame identity into an explicit restore.
+            self.displayed_slice_index = 0 if mode == "image" else None
+            self.view.parts.list_pane.set_empty_state_override(None)
+        elif not self.view.viewer.has_image():
+            self.view.parts.list_pane.set_empty_state_override(missing_preview_state(
+                name=str(
+                    getattr(self.view.parts.tab_selection.current_value, "name", None)
+                    or getattr(self.view.parts.tab_selection.current_value, "id", "this item")
+                ),
+                expected_path=str(path),
+                metadata_available=True,
+                warnings=tuple(warnings),
+            ))
+        self.view.parts.canvas_controls.update_image_badge()
+        self.view.parts.canvas_controls.update_scale_bar()
+        if mode == "image":
+            self.view.parts.frame_scrubber.set_slice_state(1, 0, valid_stack=False)
+        else:
+            self.loading_frame = mode == "delayed"
+            count = self.known_frame_count_for_path(primary) or 1
+            self.view.parts.frame_scrubber.set_slice_state(count, index, valid_stack=mode == "delayed" and count > 1)
+        caption = {"image": "Image", "delayed": "Loading MRC preview · JPEG fallback", "failed": "JPEG fallback · MRC unavailable"}[mode]
+        tooltip = self.view.parts.list_pane.path_status_tooltip(caption, path, warnings=warnings)
+        if mode != "image":
+            tooltip = f"MRC: {primary}\nFallback: {path}{warning_tooltip(warnings)}"
+        self.view.parts.list_pane.set_status_text(
+            self.view.parts.list_pane.compact_path_status(caption, path, warnings=warnings),
+            tooltip=tooltip,
+            tone="warn" if warnings or mode == "failed" else "",
+        )
+        self.view.parts.list_pane.refresh_empty_state_panel()
+
+    def load_mrc_path(self, path: Path, fallback: Path | None, slice_index: int) -> None:
+        self.fallback_debounce.stop()
+        self.pending_fallback_request = None
+        frame_count = self.known_frame_count_for_path(path)
+        clamped_index = max(0, min(slice_index, frame_count - 1)) if frame_count else max(0, slice_index)
+        self.loading_frame = True
+        self.requested_slice_index = clamped_index
+        self.view.parts.frame_scrubber.set_slice_state(frame_count or 1, clamped_index, valid_stack=(frame_count or 0) > 1)
+        logical_key = self.logical_image_key(path, clamped_index)
+        self.request_id += 1
+        request_id = self.request_id
+        cached = cached_preview((path, clamped_index, self.current_mrc_max_size))
+        if cached is not None:
+            # Already decoded: no worker, no blank canvas, and the dissolve
+            # armed for an item change still plays.
+            self.outgoing_image_stale = False
+            self.view.parts.frame_scrubber.set_slice_state(cached.slice_count, clamped_index, valid_stack=cached.slice_count > 1)
+            self.mrc_loaded(request_id, path, clamped_index, cached.image, cached.slice_count,
+                            cached.warnings, cached.estimated_bytes, cached.source_max)
+            return
+        self.discard_outgoing_image()
+        if fallback is not None:
+            self.pending_fallback_request = (request_id, path, clamped_index, fallback, logical_key)
+            # Loading is the canvas's to say, not an exception worth a footer.
+            self.view.parts.list_pane.set_status_text("")
+            self.fallback_debounce.start()
+        elif self.view.viewer.has_image():
+            self.view.parts.list_pane.set_status_text("")
+        else:
+            self.view.viewer.clear("Loading MRC preview...")
+            self.view.export_image_button.setEnabled(False)
+            self.view.parts.list_pane.set_status_text("")
+        signals = self.mrc_signals
+        def receive(result: CachedPreview) -> None:
+            if result.image.isNull():
+                emit_if_open(signals.failed, request_id, path, clamped_index, result.slice_count, result.warnings)
+            else:
+                emit_if_open(signals.loaded, request_id, path, clamped_index, result.image,
+                             result.slice_count, result.warnings, result.estimated_bytes, result.source_max)
+        preview_scheduler().request((path, clamped_index, self.current_mrc_max_size),
+                                    client=signals, receive=receive)
+
+    def show_delayed_mrc_fallback(self) -> None:
+        pending = self.pending_fallback_request
+        if pending is None:
+            return
+        request_id, path, slice_index, fallback, logical_key = pending
+        if request_id != self.request_id or path != self.current_path or slice_index != self.view.slice_slider.value():
+            return
+        if self.displayed_path == path:
+            return
+        self.request_raster(fallback, mode="delayed")
+
+    def known_frame_count_for_path(self, path: Path | None) -> int:
+        value = self.view.parts.tab_selection.current_value
+        metadata = getattr(value, "mrc_metadata", None)
+        if metadata is not None and getattr(metadata, "path", None) == path and getattr(metadata, "nz", None):
+            return int(metadata.nz)
+        number_of_frames = getattr(value, "number_of_frames", None)
+        if isinstance(number_of_frames, int) and number_of_frames > 0:
+            return number_of_frames
+        sections = getattr(value, "sections", None)
+        if sections:
+            return len(sections)
+        return 0
+
+    def initial_mrc_preview_size(self, path: Path | None) -> int:
+        if path is None or path.suffix.lower() != ".mrc":
+            return MAX_PREVIEW_DIMENSION
+        source_max = self.view.parts.canvas_controls.known_mrc_source_max_for_path(path)
+        if source_max > 0:
+            return max(1, min(FIRST_ZOOM_PREVIEW_DIMENSION, source_max))
+        return FIRST_ZOOM_PREVIEW_DIMENSION
+
+    def overlay_reference_size(self) -> tuple[int, int] | None:
+        """Style both fallback and upgrades in the initial MRC preview's units."""
+        path = self.current_path
+        if path is None or path.suffix.lower() != ".mrc":
+            return None
+        size = source_image_size_for_item(self.view.parts.tab_selection.current_value, path)
+        if size is None:
+            return None
+        shrink = max(1, math.ceil(max(size) / FIRST_ZOOM_PREVIEW_DIMENSION))
+        return max(1, size[0] // shrink), max(1, size[1] // shrink)
+
+    def mrc_loaded(
+        self,
+        request_id: int,
+        path: Path,
+        slice_index: int,
+        image: QImage,
+        slice_count: int,
+        warnings: list[str],
+        estimated_bytes: int,
+        source_max: int = 0,
+    ) -> None:
+        if request_id != self.request_id or path != self.current_path or slice_index != self.view.slice_slider.value():
+            LOGGER.debug("Ignored stale MRC preview path=%s slice=%s request=%s", path, slice_index, request_id)
+            return
+        self.loading_frame = False
+        self.native_size = source_max
+        self.fallback_debounce.stop()
+        self.pending_fallback_request = None
+        self.view.viewer.set_image(
+            image,
+            logical_image_key=self.logical_image_key(path, slice_index),
+            pyramid_level=self.current_mrc_max_size,
+            overlay_reference_size=self.overlay_reference_size(),
+        )
+        self.view.parts.list_pane.clear_empty_state_override()
+        self.view.parts.tab_selection.refresh_marker_selection()
+        self.displayed_path = path
+        self.displayed_slice_index = slice_index
+        self.view.parts.canvas_controls.update_image_badge()
+        self.view.parts.canvas_controls.update_scale_bar()
+        self.view.parts.frame_scrubber.set_slice_state(slice_count, slice_index, valid_stack=slice_count > 1)
+        self.view.parts.list_pane.set_status(path, slice_count, warnings, "MRC")
+        self.prefetch_neighbors(path, slice_index, slice_count)
+        self.prefetch_current_high_detail(path, slice_index)
+        LOGGER.debug("Displayed MRC preview path=%s slice=%s estimated_bytes=%s", path, slice_index, estimated_bytes)
+
+    def mrc_failed(self, request_id: int, path: Path, slice_index: int, slice_count: int, warnings: list[str]) -> None:
+        if request_id != self.request_id or path != self.current_path or slice_index != self.view.slice_slider.value():
+            return
+        self.loading_frame = False
+        self.fallback_debounce.stop()
+        self.pending_fallback_request = None
+        if self.current_fallback is not None:
+            self.request_raster(self.current_fallback, mode="failed", warnings=warnings)
+            return
+        self.view.viewer.clear("Preview unavailable")
+        self.displayed_path = None
+        self.displayed_slice_index = None
+        self.view.export_image_button.setEnabled(False)
+        self.view.parts.canvas_controls.set_image_badge_wanted(False)
+        self.view.scale_bar.setVisible(False)
+        self.view.parts.frame_scrubber.set_slice_state(slice_count, slice_index, valid_stack=False)
+        self.view.parts.list_pane.set_status_text(
+            self.view.parts.list_pane.compact_path_status("MRC unavailable", path, slice_count=slice_count, warnings=warnings),
+            tooltip=self.view.parts.list_pane.path_status_tooltip("MRC unavailable", path, slice_count=slice_count, warnings=warnings),
+            tone="bad",
+        )
+        self.view.parts.list_pane.set_empty_state_override(missing_preview_state(
+            name=str(
+                getattr(self.view.parts.tab_selection.current_value, "name", None)
+                or getattr(self.view.parts.tab_selection.current_value, "id", "this item")
+            ),
+            expected_path=str(path),
+            metadata_available=True,
+            warnings=tuple(warnings),
+        ))
+        self.view.parts.list_pane.refresh_empty_state_panel()
+
+    def logical_image_key(self, path: Path, slice_index: int) -> tuple[str, int, int | None]:
+        return (str(path), slice_index, id(self.view.parts.tab_selection.current_value) if self.view.parts.tab_selection.current_value is not None else None)
+
+    def prefetch_neighbors(self, path: Path, slice_index: int, slice_count: int) -> None:
+        if slice_count <= 1:
+            return
+        max_size = min(max(self.current_mrc_max_size, MAX_PREVIEW_DIMENSION), FIRST_ZOOM_PREVIEW_DIMENSION)
+        source_max = self.view.parts.canvas_controls.known_mrc_source_max_for_path(path)
+        if source_max > 0:
+            max_size = min(max_size, source_max)
+        for offset in (1, -1, 2, -2):
+            neighbor = slice_index + offset
+            if 0 <= neighbor < slice_count:
+                self.prefetch_mrc_frame(path, neighbor, max_size)
+
+    def prefetch_current_high_detail(self, path: Path, slice_index: int) -> None:
+        if self.current_mrc_max_size >= FIRST_ZOOM_PREVIEW_DIMENSION:
+            return
+        target = self.next_mrc_detail_level(path, self.current_mrc_max_size)
+        if target is None:
+            return
+        target = min(target, FIRST_ZOOM_PREVIEW_DIMENSION)
+        if target <= self.current_mrc_max_size:
+            return
+        self.prefetch_mrc_frame(path, slice_index, target)
+
+    def next_mrc_detail_level(self, path: Path, current_size: int) -> int | None:
+        source_max = self.view.parts.canvas_controls.known_mrc_source_max_for_path(path)
+        if source_max <= current_size:
+            return None
+        for level in PYRAMID_LEVELS:
+            if level > current_size:
+                return min(level, source_max)
+        return source_max
+
+    def prefetch_mrc_frame(self, path: Path, slice_index: int, max_size: int = MAX_PREVIEW_DIMENSION) -> None:
+        preview_scheduler().request((path, slice_index, max_size))

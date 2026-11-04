@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="928" height="120" viewBox="0 0 928 120">
+  <g transform="translate(0, 14) scale(4)" fill="none">
+    <line x1="7.22" y1="3" x2="14.78" y2="3" stroke="#6fb3a8" stroke-width="1.4" stroke-linecap="round" opacity="0.55"/>
+    <line x1="5.15" y1="6" x2="16.85" y2="6" stroke="#6fb3a8" stroke-width="1.4" stroke-linecap="round" opacity="0.75"/>
+    <line x1="3.44" y1="9" x2="18.56" y2="9" stroke="#6fb3a8" stroke-width="1.4" stroke-linecap="round" opacity="0.9"/>
+    <line x1="2" y1="11.6" x2="20" y2="11.6" stroke="#f0f3f7" stroke-width="1.6" stroke-linecap="round"/>
+    <line x1="3.44" y1="14.2" x2="18.56" y2="14.2" stroke="#6fb3a8" stroke-width="1.4" stroke-linecap="round" opacity="0.9"/>
+    <line x1="5.15" y1="17.2" x2="16.85" y2="17.2" stroke="#6fb3a8" stroke-width="1.4" stroke-linecap="round" opacity="0.7"/>
+    <line x1="7.22" y1="20" x2="14.78" y2="20" stroke="#6fb3a8" stroke-width="1.4" stroke-linecap="round" opacity="0.5"/>
+  </g>
+  <g transform="translate(128, 60)">
+    <text y="-12" font-size="88" font-weight="600" fill="#f0f3f7" letter-spacing="-0.33" dominant-baseline="alphabetic" style="font-family:'Segoe UI', Arial, sans-serif">Tomography</text>
+    <text y="54" font-size="38" font-weight="500" fill="#8d96a4" letter-spacing="1.5" style="font-family:'Cascadia Mono', Consolas, monospace">SESSION BROWSER</text>
+  </g>
+</svg>

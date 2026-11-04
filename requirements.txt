@@ -1,0 +1,6 @@
+# Runtime and test requirements.
+PySide6==6.11.2
+Pillow>=10
+numpy>=1.26
+reportlab>=4
+pytest>=8

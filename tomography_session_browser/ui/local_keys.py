@@ -1,0 +1,32 @@
+"""Local Help metadata owners and their eligible tabs; no command dispatch."""
+from tomography_session_browser.presentation.tab_keys import TabKey, VIEWER_TAB_KEYS
+
+LOCAL_KEY_MODULES = {
+    'dashboard.atlas_session_summary': frozenset((TabKey.SESSION,)),
+    'dashboard.route_link': frozenset((TabKey.SESSION,)),
+    'dashboard.widget': frozenset((TabKey.SESSION,)),
+    'timeline.widget': frozenset((TabKey.SESSION,)),
+    'tomograms.capture_popup': frozenset((TabKey.TOMOGRAMS,)),
+    'tomograms.capture_rows': frozenset((TabKey.TOMOGRAMS,)),
+    'tomograms.corner': frozenset((TabKey.TOMOGRAMS,)),
+    'tomograms.histogram': frozenset((TabKey.TOMOGRAMS,)),
+    'tomograms.image_settings': frozenset((TabKey.TOMOGRAMS,)),
+    'tomograms.navigator': frozenset((TabKey.TOMOGRAMS,)),
+    'tomograms.plane_slider': frozenset((TabKey.TOMOGRAMS,)),
+    'tomograms.tab': frozenset((TabKey.TOMOGRAMS,)),
+    'viewer.preview_view': frozenset(VIEWER_TAB_KEYS),
+    'viewer.viewer_tab': frozenset(VIEWER_TAB_KEYS),
+    'widgets.defocus_plot': frozenset((TabKey.SESSION,)),
+    'widgets.index_chart': frozenset((TabKey.SESSION,)),
+    'widgets.link_button': frozenset(TabKey),
+    'widgets.metadata_panel': frozenset(TabKey),
+    'widgets.smooth_tree': frozenset(TabKey),
+    'widgets.status_tile_grid': frozenset((TabKey.SESSION,)),
+    'viewer.list_pane': frozenset(VIEWER_TAB_KEYS),
+    'tomograms.tags.entry': frozenset((TabKey.TOMOGRAMS,)),
+    'tomograms.tags.panel': frozenset((TabKey.TOMOGRAMS,)),
+    'tomograms.tags.filter_field': frozenset((TabKey.TOMOGRAMS,)),
+    'tomograms.tooltips': frozenset((TabKey.TOMOGRAMS,)),
+    'tomograms.playback': frozenset((TabKey.TOMOGRAMS,)),
+    'widgets.panel_drawer': frozenset(TabKey),
+}

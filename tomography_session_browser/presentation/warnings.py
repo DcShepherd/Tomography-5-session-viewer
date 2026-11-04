@@ -1,0 +1,180 @@
+"""Shape warnings through the canonical service classification rules."""
+from __future__ import annotations
+
+import re
+from collections import Counter
+from collections.abc import Iterable, Sequence
+from dataclasses import field
+from typing import Any
+from tomography_session_browser.domain.identity import canonical_entity_key
+from tomography_session_browser.domain.models import Sample, Session
+from tomography_session_browser.presentation.dashboard.models import AttributedWarning, WarningGroupModel
+from tomography_session_browser.presentation.scopes import LinkedSampleGroup
+from tomography_session_browser.services.warning_classification import classify_warning, summarise_warnings
+
+
+def entity_scope_warnings(value: Session | Sample, label: str, seen_entities: set[int]) -> list[AttributedWarning]:
+    """Collect descendant warnings once without changing parser wording, each
+    attributed to the entity it was recorded against."""
+    warnings: list[AttributedWarning] = []
+
+    def add_entity(label: str, entity: Any | None) -> None:
+        if entity is None or id(entity) in seen_entities:
+            return
+        seen_entities.add(id(entity))
+        warnings.extend(attributed_warnings(label, getattr(entity, "warnings", ()), entity))
+
+    add_entity(f"{label} / Atlas", value.atlas)
+    for attribute in ("overviews", "search_maps", "search_tiles", "batch_positions", "tilt_series"):
+        for entity in getattr(value, attribute):
+            add_entity(f"{label} / {entity.name or entity.id}", entity)
+    return warnings
+
+
+def attributed_session_warnings(session: Session) -> list[AttributedWarning]:
+    """A session's warnings: its own, its samples', and every entity's under them."""
+
+    warnings = attributed_warnings(f"{session.name} / Session", session.warnings, session)
+    seen_entities: set[int] = set()
+    for sample in session.samples:
+        warnings.extend(attributed_warnings(f"{session.name} / {sample.name}", sample.warnings, sample))
+        warnings.extend(entity_scope_warnings(sample, sample.name, seen_entities))
+    warnings.extend(entity_scope_warnings(session, session.name, seen_entities))
+    return warnings
+
+
+def session_warnings(session: Session) -> list[str]:
+    """``attributed_session_warnings`` as text: what the report and Context write."""
+
+    return [warning.text for warning in attributed_session_warnings(session)]
+
+
+def warning_severity(warning: str) -> str:
+    """Severity for one raw warning, from the shared classifier.
+
+    The single entry point for "how bad is this one line?". A private
+    substring rule in this module used to answer it separately, so the same
+    finding could be coloured ``info`` on a row while being ordered as a
+    ``warning`` in the group directly above it.
+    """
+
+    return classify_warning(warning).severity
+
+
+def grouped_warnings(warnings: Iterable[str]) -> dict[str, list[str]]:
+    """Group warnings by the shared classifier's categories.
+
+    D2 migrated this off its own seven substring buckets and onto the same
+    rules the report cover uses, so the dashboard and the PDF now name a
+    warning identically. The signature is unchanged — callers still get an
+    ordered mapping of heading to raw warning strings — but the headings are
+    the shared category names and empty categories are omitted.
+    """
+
+    ordered: dict[str, list[str]] = {}
+    for warning in warnings:
+        ordered.setdefault(classify_warning(warning).category, []).append(warning)
+    # Errors first, then warnings, then information, matching the dashboard
+    # and report ordering from T1.
+    severity_rank = {"error": 0, "warning": 1, "info": 2}
+    return dict(
+        sorted(
+            ordered.items(),
+            key=lambda item: (
+                severity_rank.get(classify_warning(item[1][0]).severity, 1),
+                -len(item[1]),
+                item[0],
+            ),
+        )
+    )
+
+
+def attributed_linked_sample_group_warnings(group: LinkedSampleGroup) -> list[AttributedWarning]:
+    warnings: list[AttributedWarning] = []
+    seen_entities: set[int] = set()
+    for member in group.samples:
+        warnings.extend(attributed_warnings(member.name, member.warnings, member))
+        warnings.extend(entity_scope_warnings(member, member.name, seen_entities))
+    return warnings
+
+
+def linked_sample_group_warnings(group: LinkedSampleGroup) -> list[str]:
+    return [warning.text for warning in attributed_linked_sample_group_warnings(group)]
+
+
+def attributed_warnings(prefix: str, warnings: Iterable[str], source: Any | None) -> list[AttributedWarning]:
+    """``source``'s own warnings, prefixed with where they came from and
+    attributed to ``source``. Without a source they stay unattributed."""
+
+    keys = frozenset() if source is None else frozenset({canonical_entity_key(source)})
+    return [AttributedWarning(f"{prefix}: {warning}", keys) for warning in warnings]
+
+
+def unprefixed_warnings(warnings: Iterable[str], source: Any) -> list[AttributedWarning]:
+    """``source``'s warnings as the parser wrote them, attributed to ``source``."""
+
+    keys = frozenset({canonical_entity_key(source)})
+    return [AttributedWarning(warning, keys) for warning in warnings]
+
+
+def summarize_warnings(warnings: list[str]) -> list[str]:
+    nan_fields: Counter[str] = Counter()
+    remaining: list[str] = []
+    for warning in warnings:
+        if "NaN value omitted from numeric summaries" in warning:
+            match = re.search(r"\b([A-Za-z][A-Za-z0-9_]*)\s*:\s*NaN value omitted", warning)
+            field = match.group(1) if match else "metadata"
+            nan_fields[field or "metadata"] += 1
+        else:
+            remaining.append(warning)
+    summarized = [
+        f"Multiple NaN values detected in {field} ({count} occurrences)."
+        if count > 1
+        else f"NaN value detected in {field}."
+        for field, count in sorted(nan_fields.items())
+    ]
+    return summarized + remaining
+
+
+def dashboard_warning_groups(warnings: Sequence[AttributedWarning]) -> list[WarningGroupModel]:
+    """Group raw warning text into compact dashboard rows.
+
+    ``count`` is the number of **affected objects**, not the number of warning
+    strings — the same number the report cover prints. The two surfaces used to
+    disagree by an order of magnitude on real data ("85 tilt series have NaN
+    dose fields" against "2,805 warnings"), which made the dashboard and the
+    PDF look like they were describing different sessions. The raw strings
+    remain in ``items`` for the expanded view.
+
+    Severity comes from the shared classifier for the same reason: a private
+    substring rule here was a third opinion about a finding the report and the
+    ordering had already classified.
+    """
+
+    texts = [warning.text for warning in warnings]
+    raw_by_category = grouped_warnings(texts)
+    members_by_category: dict[str, list[AttributedWarning]] = {}
+    for warning in warnings:
+        members_by_category.setdefault(classify_warning(warning.text).category, []).append(warning)
+    return [
+        WarningGroupModel(
+            label=row.category,
+            count=row.affected_items or row.count,
+            severity=row.severity,
+            items=list(raw_by_category.get(row.category, ())),
+            entity_keys=_group_entity_keys(members_by_category.get(row.category, ())),
+        )
+        # The report's cover table reads the same summary, in the same order.
+        for row in summarise_warnings(texts)
+    ]
+
+
+def _group_entity_keys(members: Iterable[AttributedWarning]) -> frozenset[tuple[str, str]] | None:
+    """The objects a group covers, or ``None`` if any member names none."""
+
+    keys: set[tuple[str, str]] = set()
+    for member in members:
+        if not member.entity_keys:
+            return None
+        keys |= member.entity_keys
+    return frozenset(keys)

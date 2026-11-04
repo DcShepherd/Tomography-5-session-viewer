@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "pillow": "12.2.0",
+  "master_longest_side": 720,
+  "method": "source alpha >=8; alpha crop; straight RGBA BOX; RGB floor 28/37/50; no output alpha cutoff",
+  "sprites": {
+    "marvin": {
+      "source": "exec-242e2ff8-92ca-44c6-8ee5-2f1cb1b9b3eb.png",
+      "source_sha256": "ee8aed26d48c8894920d061f5a9dccb783a6bf2c2b21a78e6e3fe666f298d3d8",
+      "master_sha256": "30cbebd1d1950a98f78c188ec1d41808d4732cf7ff3900e918e70fbf1469ab47"
+    },
+    "towel": {
+      "source": "exec-439a4433-dcd5-40c0-8fb9-ebf8858601a5.png",
+      "source_sha256": "bd96ad53cab3b9c20375fcd49b6f990aee53be6a137d555a8cb595b63cbd09e2",
+      "master_sha256": "1eefbf4051a445c77d1833046449c8e01700d10fbffe3decc5f8a5ffdc4678a1"
+    },
+    "guide": {
+      "source": "exec-a0856405-f1c6-47f4-8876-f4932fe0d101.png",
+      "source_sha256": "796fcefc2062d87da807bbf724dee24e540fb4330414b6f18a0c087741939259",
+      "master_sha256": "47819608700a42adbb250227b65235d951ff4538e00ad6bbab48ff7b5b0f0e99"
+    },
+    "tea": {
+      "source": "exec-62490428-8a6c-4f14-b7e6-fe6c3bf58561.png",
+      "source_sha256": "fa9cbc869518ed87e233dfe447532a57aa5b3fba0daf96b0a181aeea9f81f4cd",
+      "master_sha256": "fd955f40741599df4858e4591a16e1905ce5f1e88826dca9c024ec0d806a3272"
+    },
+    "petunias": {
+      "source": "exec-1f110a7f-370b-4120-b41b-e584b1dcfda6.png",
+      "source_sha256": "b585fa7a2e41e5900090096819bc0e53f2a30c6f91cdab34b64f4eb6ec27ef0d",
+      "master_sha256": "47c2dca19cc59ce363a729d248398565b9d5b223eb11bb1ab69e9c2e06fc6887"
+    },
+    "whale": {
+      "source": "exec-4f10ce34-c6ed-49e3-98b6-503c037533eb.png",
+      "source_sha256": "80204e6b76143ff328e043aba73259979dc2382d5d0e49c8ac16f64656c885af",
+      "master_sha256": "529f1f0ec6bb00e938bb558a0aa0953f07dcb3b936923531609341e8a09cc4b8"
+    }
+  }
+}
