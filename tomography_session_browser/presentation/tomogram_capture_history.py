@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from tomography_session_browser.domain.tomograms import VolumeFingerprint
@@ -12,6 +12,7 @@ from tomography_session_browser.presentation.tomogram_state import TomogramViewS
 from tomography_session_browser.presentation.tomogram_tabs import TomogramRow, restored_sort
 from tomography_session_browser.presentation.tomogram_versions import review_versions
 from tomography_session_browser.services.volume.models import decode_recipe
+from tomography_session_browser.services.volume.pixel_sizes import StatedPixelSize, StoredPixelSizes, read_stated
 from tomography_session_browser.services.volume.render import plane_geometry
 from tomography_session_browser.services.volume.review_repository import MAX_PAGE_SIZE, ReviewRecord, ReviewRepository, record_id
 from tomography_session_browser.services.volume.snapshot import CaptureRecord, SnapshotRequest
@@ -62,6 +63,7 @@ class ScopeHistory:
     ordering_notice: str
     opened: tuple[tuple[str, bool], ...]
     captures: CapturePage
+    pixel_sizes: StoredPixelSizes = field(default_factory=StoredPixelSizes)
 
 
 def restore_refusal(entry: CaptureEntry, rows: tuple[TomogramRow, ...], *, verify_source: bool = False) -> str:
@@ -162,14 +164,22 @@ def capture_page(repository: ReviewRepository, context: HistoryContext, *, befor
 
 def scope_history(repository: ReviewRepository, context: HistoryContext, *, extra: tuple[ReviewRecord, ...] = (),
                   cancelled: Callable[[], bool] = lambda: False) -> ScopeHistory:
+    # Pixel sizes reach every loaded version, so they are read for any scope, also an empty one.
+    stated = read_stated(repository, cancelled=cancelled)
     if not context.identities:
-        return ScopeHistory(None, "", (), CapturePage((), None, 0))
+        return ScopeHistory(None, "", (), CapturePage((), None, 0), stated)
+    # A view saved before pixel sizes had their own records still holds a confirmed
+    # value. It counts until a record speaks for that file, and then the record wins.
+    saved: dict[str, StatedPixelSize] = {}
     rows = {row.tomogram.id: row for row in context.rows}
     candidate: tuple[tuple[int, str], TomogramViewState, str] | None = None
     opened = set()
     for record in repository.iter_records("view", cancelled=cancelled):
         try:
             state = decode_state(record.data["state"])
+            if (state.volume_id and state.volume_signature is not None and state.spacing_override is not None
+                    and state.volume_id not in stated.entries and record_id(state.volume_id) not in stated.rejected):
+                saved[state.volume_id] = StatedPixelSize(state.volume_id, state.volume_signature, state.spacing_override)
             row = rows.get(state.row_key or "")
             volume = next((v for v in review_versions(row.tomogram) if v.id == state.volume_id), None) if row else None
             if row is None or volume is None:
@@ -197,4 +207,5 @@ def scope_history(repository: ReviewRepository, context: HistoryContext, *, extr
     updates = {key: True for key in opened}
     updates.update({key: value[1] for key, value in explicit.items()})
     return ScopeHistory(candidate[1] if candidate else None, candidate[2] if candidate else "",
-                        tuple(updates.items()), capture_page(repository, context, limit=200, extra=extra, cancelled=cancelled))
+                        tuple(updates.items()), capture_page(repository, context, limit=200, extra=extra, cancelled=cancelled),
+                        StoredPixelSizes({**saved, **stated.entries}, stated.rejected))

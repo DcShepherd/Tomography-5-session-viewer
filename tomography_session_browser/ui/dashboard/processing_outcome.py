@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QLabel, QToolButton, QToolTip, QVBoxLayout, QWidge
 from tomography_session_browser.presentation.dashboard.models import StatusTileModel, TILE_STATUS_COMPLETE, TILE_STATUS_NEUTRAL, TILE_STATUS_WARNING
 from tomography_session_browser.presentation.dashboard.summary import ProcessingSummary
 from tomography_session_browser.presentation.tomogram_review_state import review_counts
-from tomography_session_browser.presentation.dashboard.tomogram_summary_input import TomogramSummaryInput
+from tomography_session_browser.presentation.dashboard.tomogram_summary_input import TomogramSummaryInput, attention_keys
 from tomography_session_browser.presentation.dashboard.tomogram_summary_facts import outcome_facts
 from tomography_session_browser.presentation.design_tokens import SPACE_M, SPACE_S, SPACE_XS
 from tomography_session_browser.ui.dashboard.common import CardBox, card_layout
@@ -49,11 +49,11 @@ class ProcessingOutcome(CardBox):
         flow.addWidget(QLabel('tomogram' if summary.tomogram_count == 1 else 'tomograms', headline))
         status = ' · '.join(f'{count} {name}' for name, count in summary.link_status_counts if count)
         flow.addWidget(note(status or 'No tomograms in this selection', headline))
-        if summary.attention_keys:
-            attention = link_button(f'Needs attention · {len(summary.attention_keys)}', headline)
-            attention.setToolTip('Volume or metadata warnings and ambiguous parent links. Opens exactly the counted rows.')
-            attention.clicked.connect(lambda: page.route(summary.attention_keys, 'Tomograms needing attention'))
-            flow.addWidget(attention)
+        # A value stated in the Tomograms tab can change this count while the page stays.
+        self.attention = link_button('', headline)
+        self.attention.setToolTip('Volume or metadata warnings and ambiguous parent links. Opens exactly the counted rows.')
+        self.attention.clicked.connect(lambda: page.route(self.summary.attention_keys, 'Tomograms needing attention'))
+        flow.addWidget(self.attention)
         if summary.name_proposal_count and summary.chart_key is not None:
             review = link_button(f'{summary.name_proposal_count} match by name only · Review', headline)
             source_id = summary.input.sources[0].id if len(summary.input.sources) == 1 else ''
@@ -95,7 +95,10 @@ class ProcessingOutcome(CardBox):
         self.update_review(summary.input)
 
     def update_review(self, payload: TomogramSummaryInput) -> None:
-        self.summary = replace(self.summary, input=payload, review=review_counts(row.review for row in payload.rows))
+        self.summary = replace(self.summary, input=payload, review=review_counts(row.review for row in payload.rows),
+                               attention_keys=attention_keys(payload))
+        self.attention.setText(f'Needs attention · {len(self.summary.attention_keys)}')
+        self.attention.setVisible(bool(self.summary.attention_keys))
         review = self.summary.review
         labels = []
         if review.opened is None:

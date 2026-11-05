@@ -80,12 +80,12 @@ class CaptureLinks:
     def apply(self, target, entry):
         session = target.session
         if self.owner.projects.session_for(target.folder) is not session or not session.editable or session.project is None:
-            return "Snapshot saved; not linked: the project was closed."
+            return "Snapshot saved but not linked. The project was closed."
         try:
             project = link_capture(session.project, target.ref, target.tag_id, freeze_capture(entry.metadata()))
             session.edit(project)
-        except ValueError:
-            return "Snapshot saved; not linked: the tag was removed."
+        except ValueError as exc:
+            return f"Snapshot saved but not linked. {exc}"
         return ""
 
     def published(self, job, entry):
@@ -97,12 +97,27 @@ class CaptureLinks:
         if reason:
             self.owner.tab.status.message.setText(reason)
 
-    def show_menu(self, tag_id):
+    def show_menu(self, tag_id, position, linked):
+        """A tag row's actions (board 7). ``linked`` is the row's link count."""
+
+        editable = self.owner.editable()
         menu = QMenu(self.owner.panel)
-        menu.addAction("Linked captures…", lambda: self.picker(tag_id, linked_only=True))
-        menu.addAction("Link captures…", lambda: self.picker(tag_id)).setEnabled(self.owner.editable())
-        menu.addAction("Snapshot and link", lambda: self.snapshot(tag_id)).setEnabled(self.owner.editable())
-        menu.exec(self.owner.panel.mapToGlobal(self.owner.panel.rect().center()))
+        menu.addAction("Link captures…", lambda: self.picker(tag_id)).setEnabled(editable)
+        menu.addAction("Snapshot and link", lambda: self.snapshot(tag_id)).setEnabled(editable)
+        menu.addSeparator()
+        menu.addAction(f"Show linked captures\t{linked}", lambda: self.picker(tag_id, linked_only=True)).setEnabled(linked > 0)
+        menu.addSeparator()
+        menu.addAction("Remove from this tomogram", lambda: self.owner.remove_assignment(tag_id)).setEnabled(editable)
+        menu.exec(position)
+
+    def camera_clicked(self, tag_id, button, linked):
+        """The camera goes straight to the linked captures. A tag with none has
+        nothing to show, so it offers the ways to link one."""
+
+        if linked:
+            self.picker(tag_id, linked_only=True)
+        else:
+            self.show_menu(tag_id, button.mapToGlobal(button.rect().bottomLeft()), linked)
 
     def picker(self, tag_id, *, linked_only=False):
         from tomography_session_browser.ui.tomograms.tags.capture_picker import CapturePicker

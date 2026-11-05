@@ -113,6 +113,8 @@ class WindowShell(QObject):
         return max(0, bottom - top)
 
     def build_toolbar(self) -> None:
+        # Qt's default right-click menu hides toolbars and docks, and nothing here shows them again.
+        self.window.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         toolbar = QToolBar("Main")
         toolbar.setObjectName("mainToolbar")
         toolbar.setMovable(False)
@@ -510,7 +512,9 @@ class WindowShell(QObject):
             self.parts.context.on_empty_state_action))
         self.ui.tabs.setObjectName("mainTabs")
         # Before any tab is added: the bar paints the sliding underline (F5.3).
-        self.ui.tabs.setTabBar(SlidingTabBar(self.ui.tabs))
+        tab_bar = SlidingTabBar(self.ui.tabs)
+        tab_bar.focus_fallback = lambda: self.parts.chrome.give_focus_to_page()
+        self.ui.tabs.setTabBar(tab_bar)
         self.ui.tabs.setIconSize(QSize(16, 16))
         for spec in TAB_SPECS:
             label = spec.key
@@ -531,6 +535,9 @@ class WindowShell(QObject):
                 self.ui.connections.append(lambda signal=viewer_tab.query_changed: signal.connect(lambda _query: self.parts.context.refresh_context_header()))
                 self.ui.connections.append(lambda signal=viewer_tab.empty_state_action_requested: signal.connect(self.parts.context.on_empty_state_action))
             layout.addWidget(content, stretch=1)
+            # Focus given to the page belongs to what it shows: Tomograms
+            # commands act only within their tab (ShellChrome.hand_focus_to_page).
+            tab.setFocusProxy(content)
             index = self.ui.tabs.addTab(tab, spec.label)
             self.ui.tabs.setTabIcon(index, themed_icon(TAB_ICONS[label], size=16))
             # Restyled at a theme switch only if on screen, else when next

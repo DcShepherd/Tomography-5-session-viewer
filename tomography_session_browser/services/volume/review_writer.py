@@ -8,12 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Condition, Lock, Thread
 from collections.abc import Callable
-from typing import TypeVar
+from typing import TypeVar, cast
 
 from tomography_session_browser.services.volume.review_repository import MAX_RECORD_BYTES, ReviewRepository
 
 STATE_CAPACITY = 256
 DURABLE_CAPACITY = 16
+BATCH_RECORD_CAPACITY = 4096
 T = TypeVar("T")
 
 
@@ -40,6 +41,37 @@ class ReviewWrite:
             self.repository.write(self.kind, self.identity, self.state, **self.extra)
 
 
+class ReviewWriteFailure(Exception):
+    def __init__(self, request: ReviewWrite, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.request = request
+        self.__cause__ = cause
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewBatchResult:
+    failed: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewBatch:
+    """One user action's independent records, queued as one operation.
+
+    A record that cannot be written does not stop the others. ``failed`` names
+    the identities that were not saved, for the owner to report.
+    """
+    writes: tuple[ReviewWrite, ...]
+
+    def perform(self) -> ReviewBatchResult:
+        failed = []
+        for write in self.writes:
+            try:
+                write.perform()
+            except (OSError, ValueError, TypeError, RecursionError):
+                failed.append(write.identity)
+        return ReviewBatchResult(tuple(failed))
+
+
 def metadata_size(value: object) -> int:
     """Conservative payload bound without serialising JSON on the submitting thread."""
     if isinstance(value, str):
@@ -49,6 +81,16 @@ def metadata_size(value: object) -> int:
     if isinstance(value, dict):
         return 2 + sum(metadata_size(key) + metadata_size(item) + 2 for key, item in value.items())
     return 32
+
+
+def _freeze(request: ReviewWrite) -> ReviewWrite:
+    try:
+        if metadata_size((request.state, request.extra)) <= MAX_RECORD_BYTES:
+            return ReviewWrite(request.repository, request.kind, request.identity,
+                               deepcopy(request.state), deepcopy(request.extra), request.remove)
+    except RecursionError as exc:
+        raise ValueError("Review metadata exceeds the nesting limit.") from exc
+    raise ValueError("Review metadata exceeds the size limit.")
 
 
 class ReviewWriter:
@@ -63,18 +105,17 @@ class ReviewWriter:
         self.state_capacity, self.durable_capacity = state_capacity, durable_capacity
         self.condition = Condition()
         self.operation = Lock()
-        self.pending: OrderedDict[StateIdentity | int, tuple[ReviewWrite, Future[None]]] = OrderedDict()
+        self.pending: OrderedDict[StateIdentity | int, tuple[
+            ReviewWrite | ReviewBatch, Future[None] | Future[ReviewBatchResult]
+        ]] = OrderedDict()
         self.running = False
         self.closed = False
         self.thread: Thread | None = None
         self.revision = 0
 
     def submit(self, request: ReviewWrite) -> Future[None]:
-        if metadata_size((request.state, request.extra)) > MAX_RECORD_BYTES:
-            raise ValueError("Review metadata exceeds the size limit.")
-        request = ReviewWrite(request.repository, request.kind, request.identity,
-                              deepcopy(request.state), deepcopy(request.extra), request.remove)
-        state = request.kind in ("view", "opened") and not request.remove
+        request = _freeze(request)
+        state = request.kind in ("view", "opened", "pixel_size") and not request.remove
         with self.condition:
             if self.closed:
                 raise ValueError("Review storage is closing.")
@@ -86,14 +127,38 @@ class ReviewWriter:
                 count = sum(isinstance(value, StateIdentity) == state for value in self.pending)
                 if count >= (self.state_capacity if state else self.durable_capacity):
                     raise ValueError("Review storage is busy. Retry after pending records finish.")
-            future: Future[None] = previous[1] if previous else Future()
+            future = cast(Future[None], previous[1]) if previous else Future()
             self.pending[key] = request, future
             self.pending.move_to_end(key)
-            if not self.running:
-                self.running = True
-                self.thread = Thread(target=self.run, name="tomogram-review-writer", daemon=True)
-                self.thread.start()
+            self.start_worker()
             return future
+
+    def submit_batch(self, batch: ReviewBatch) -> Future[ReviewBatchResult]:
+        """A batch occupies one durable place and a bounded number of records."""
+        count = len(batch.writes)
+        busy = "Review storage is busy. Retry after pending records finish."
+        if count > BATCH_RECORD_CAPACITY:
+            raise ValueError(busy)
+        batch = ReviewBatch(tuple(_freeze(write) for write in batch.writes))
+        with self.condition:
+            if self.closed:
+                raise ValueError("Review storage is closing.")
+            queued = sum(len(request.writes) for request, _ in self.pending.values()
+                         if isinstance(request, ReviewBatch))
+            if (queued + count > BATCH_RECORD_CAPACITY
+                    or sum(not isinstance(value, StateIdentity) for value in self.pending) >= self.durable_capacity):
+                raise ValueError(busy)
+            self.revision += 1
+            future: Future[ReviewBatchResult] = Future()
+            self.pending[self.revision] = batch, future
+            self.start_worker()
+            return future
+
+    def start_worker(self) -> None:
+        if not self.running:
+            self.running = True
+            self.thread = Thread(target=self.run, name="tomogram-review-writer", daemon=True)
+            self.thread.start()
 
     def run(self) -> None:
         while True:
@@ -105,11 +170,14 @@ class ReviewWriter:
                 _, (request, future) = self.pending.popitem(last=False)
             try:
                 with self.operation:
-                    request.perform()
+                    result = request.perform()
             except Exception as exc:
-                future.set_exception(exc)
+                future.set_exception(ReviewWriteFailure(request, exc) if isinstance(request, ReviewWrite) else exc)
             else:
-                future.set_result(None)
+                if isinstance(result, ReviewBatchResult):
+                    cast(Future[ReviewBatchResult], future).set_result(result)
+                else:
+                    cast(Future[None], future).set_result(None)
 
     def flush(self) -> None:
         """Worker/read-side barrier. Never call from an interactive GUI handler."""

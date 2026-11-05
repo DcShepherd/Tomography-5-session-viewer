@@ -50,8 +50,13 @@ class ReviewRepository:
         except OSError:
             return []
 
-    def iter_records(self, kind: str, *, cancelled: Callable[[], bool] = lambda: False) -> Iterator[ReviewRecord]:
-        """Stream bounded app-owned JSON files; never inspect a saved source path."""
+    def iter_records(self, kind: str, *, cancelled: Callable[[], bool] = lambda: False,
+                     rejected: Callable[[str], None] = lambda _: None) -> Iterator[ReviewRecord]:
+        """Stream bounded app-owned JSON files; never inspect a saved source path.
+
+        ``rejected`` hears of each record of this kind that could not be used, for
+        a caller that must warn about it. The stream itself skips such a record.
+        """
         if cancelled():
             raise InterruptedError("Obsolete history query")
         pattern = re.compile(re.escape(kind) + r"-([a-f0-9]{64})\.json\Z")
@@ -68,13 +73,16 @@ class ReviewRepository:
                     continue
                 try:
                     if not entry.is_file(follow_symlinks=False) or entry.is_symlink():
+                        rejected(match[1])
                         continue
                     stat = entry.stat(follow_symlinks=False)
                     if stat.st_size > MAX_RECORD_BYTES:
+                        rejected(match[1])
                         continue
                     with open(entry.path, "rb") as handle:
                         content = handle.read(MAX_RECORD_BYTES + 1)
                     if len(content) > MAX_RECORD_BYTES:
+                        rejected(match[1])
                         continue
                     data = json.loads(content)
                     if isinstance(data, dict) and data.get("schema") == 1 and data.get("kind") == kind:
@@ -82,7 +90,10 @@ class ReviewRepository:
                         if type(created) is not int or created < 0:
                             created = stat.st_mtime_ns
                         yield ReviewRecord(match[1], (created, match[1]), data)
+                    else:
+                        rejected(match[1])
                 except (OSError, ValueError, TypeError, RecursionError):
+                    rejected(match[1])
                     continue
 
     def page(self, kind: str, identities: frozenset[tuple[str, str]], *, before: tuple[int, str] | None = None,

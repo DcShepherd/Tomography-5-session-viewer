@@ -786,6 +786,10 @@ def _project_search_map_marker_to_tile(
     metadata["coordinate_source"] = "search_map_overlay_projected_to_search_tile"
     metadata["search_map_marker_id"] = marker.id
     metadata["search_map_tile_bounds"] = tile_bounds
+    # Projection renames every marker, so a camera field's pointer follows its area.
+    exposure_marker_id = metadata.get("exposure_marker_id")
+    if exposure_marker_id:
+        metadata["exposure_marker_id"] = f"{search_tile_id}:projected:{exposure_marker_id}"
     return ImageMarker(
         id=f"{search_tile_id}:projected:{marker.id}",
         marker_type=marker.marker_type,

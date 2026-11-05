@@ -14,6 +14,7 @@ from tomography_session_browser.parsers.acquisition_evidence import evidence_fil
 from tomography_session_browser.domain.acquisition import AcquisitionEvidence
 from tomography_session_browser.parsers.mrc_parser import read_mrc_metadata
 from tomography_session_browser.parsers.path_utils import natural_key, safe_id, sorted_paths
+from tomography_session_browser.parsers.volume_header import file_records_volume
 from tomography_session_browser.services.acquisition_metadata import (
     ACQUISITION_SPOT_LABEL,
     LEGACY_SPOT_LABEL,
@@ -52,6 +53,10 @@ def parse_tilt_series_in_folder(path: Path, warnings: list[str] | None = None) -
                 )
             continue
         try:
+            if stem not in mdoc_paths and file_records_volume(mrc_path):
+                if warnings is not None:
+                    warnings.append(f"{mrc_path.name}: the header records a volume, not a tilt stack. It was not loaded as a tilt series.")
+                continue
             series.append(parse_tilt_series(mrc_path, mdoc_paths.get(stem)))
         except Exception as exc:  # pragma: no cover - defensive boundary for malformed user data
             message = f"{mrc_path.name} could not be parsed and was skipped: {exc}"

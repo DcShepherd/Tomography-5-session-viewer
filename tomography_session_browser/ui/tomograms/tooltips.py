@@ -4,6 +4,8 @@ from PySide6.QtCore import QEvent, QObject, QPoint, Qt, Slot, QTimer
 from PySide6.QtWidgets import QApplication, QAbstractButton, QAbstractSpinBox, QComboBox, QFrame, QLabel, QVBoxLayout, QWidget
 from shiboken6 import isValid
 
+WATCHED_EVENTS = (QEvent.Type.FocusIn, QEvent.Type.FocusOut, QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress)
+
 
 class KeyboardTooltips(QObject):
     def __init__(self, tab) -> None:
@@ -24,18 +26,21 @@ class KeyboardTooltips(QObject):
         self.label.setWordWrap(True)
         self.label.setMaximumWidth(360)
         layout.addWidget(self.label)
+        tab.destroyed.connect(self.detach)
+
+    def attach(self) -> None:
+        """Watch focus while the tab shows: on the application, this runs on every event."""
         app = QApplication.instance()
         assert app is not None
         app.installEventFilter(self)
-        tab.destroyed.connect(self.detach)
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if event.type() not in WATCHED_EVENTS:
+            return False
         # QWidget destruction can send focus events after the tab wrapper has
         # become invalid but before Qt destroys this child filter. Never call
         # back into that partially retired widget tree.
         if not isValid(self.tab) or not isValid(self.popup) or not isValid(self.tab.image_settings):
-            return False
-        if event.type() not in (QEvent.Type.FocusIn, QEvent.Type.FocusOut, QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress):
             return False
         if not isinstance(watched, QWidget):
             return super().eventFilter(watched, event)
@@ -85,6 +90,7 @@ class KeyboardTooltips(QObject):
 
     def dispose(self) -> None:
         self.detach()
+        self.cancel_traversal()
         if self.current is not None:
             self.popup.hide()
             self.current = None

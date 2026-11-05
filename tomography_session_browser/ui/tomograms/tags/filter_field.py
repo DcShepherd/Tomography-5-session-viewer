@@ -3,18 +3,42 @@ from tomography_session_browser.presentation.help_content import LocalBinding, I
 from dataclasses import replace
 
 from PySide6.QtCore import QEvent, QPoint, Qt, QSignalBlocker
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPushButton,
-                               QScrollArea, QVBoxLayout, QWidget, QSizePolicy)
+                               QScrollArea, QStyledItemDelegate, QVBoxLayout, QWidget, QSizePolicy)
+from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.domain.identity import path_identity_key
 
-from tomography_session_browser.presentation.design_tokens import SPACE_XS
+from tomography_session_browser.presentation.design_tokens import SPACE_M, SPACE_S, SPACE_XS
 from tomography_session_browser.presentation.tomogram_tag_filters import TagFilter, CompletionFilter
 from tomography_session_browser.presentation.tomogram_tag_entry import matching_tags
 from tomography_session_browser.services.tomogram_tags.binding import bind_row, ProjectKey
+from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.ui.widgets.literal_text import literal_mnemonic
 
 CHOICE_ROWS = 8
 CHOICE_HINT = "Enter adds the highlighted filter · Esc closes"
+COUNT_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
+class ChoiceCountDelegate(QStyledItemDelegate):
+    """A filter's tomogram count, right-aligned. A long name elides before it."""
+
+    def initStyleOption(self, option, index) -> None:  # noqa: N802 - Qt API
+        super().initStyleOption(option, index)
+        count = index.data(COUNT_ROLE)
+        if count:
+            room = option.rect.width() - option.fontMetrics.horizontalAdvance(count) - SPACE_M - SPACE_S
+            option.text = option.fontMetrics.elidedText(option.text, Qt.TextElideMode.ElideRight, room)
+
+    def paint(self, painter, option, index) -> None:
+        super().paint(painter, option, index)
+        count = index.data(COUNT_ROLE)
+        if count:
+            painter.save()
+            painter.setPen(QColor(current_palette().text_muted))
+            painter.drawText(option.rect.adjusted(0, 0, -SPACE_S, 0), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, count)
+            painter.restore()
 
 
 class TagFilterChoices(QFrame):
@@ -35,6 +59,7 @@ class TagFilterChoices(QFrame):
         self.choices.setAccessibleName("Matching tag filters")
         self.choices.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.choices.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.choices.setItemDelegate(ChoiceCountDelegate(self.choices))
         self.hint = QLabel(CHOICE_HINT, self)
         self.hint.setObjectName("viewerStatus")
         self.hint.setWordWrap(True)
@@ -66,9 +91,16 @@ class TagFilterChoices(QFrame):
             self.close_choices()
             return
         self.choices.clear()
-        for label, value in self.field.options(text):
+        options = self.field.options(text)
+        tag_rows = tuple(self.field.tag_rows().values()) if options else ()
+        for index, (label, value) in enumerate(options):
             item = QListWidgetItem(label, self.choices)
             item.setData(Qt.ItemDataRole.UserRole, value)
+            # What adding this filter would leave, before text or segment filters.
+            matching = sum(value.accepts(key, row) for key, row in tag_rows)
+            phrase = count_phrase(matching, "tomogram")
+            item.setData(COUNT_ROLE, phrase if index == 0 else str(matching))
+            item.setData(Qt.ItemDataRole.AccessibleTextRole, f"{label}, {phrase}")
         count = self.choices.count()
         if count:
             self.choices.setCurrentRow(0)
@@ -198,7 +230,7 @@ class TagFilterField(QScrollArea):
             return ()
         key = ProjectKey.at(session.store.path, session.project)
         folded = text.strip().lstrip("#").strip().casefold()
-        completions = tuple((c.value, replace(current, project=key, completion=c)) for c in (CompletionFilter.COMPLETE, CompletionFilter.INCOMPLETE)
+        completions = tuple((c.value, replace(current, project=key, completion=c)) for c in (CompletionFilter.INCOMPLETE, CompletionFilter.COMPLETE)
                             if c != current.completion and c.value.casefold().startswith(folded))
         return completions + tuple(("#" + t.name, replace(current, project=key, tag_ids=current.tag_ids | {t.id}))
                                    for t in matching_tags(text, session.project.catalogue) if t.id not in current.tag_ids)

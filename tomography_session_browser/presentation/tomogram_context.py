@@ -10,6 +10,7 @@ from tomography_session_browser.domain.models import TiltSeries
 from tomography_session_browser.domain.recorded_metrics import RecordedMetric
 from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogram, Volume
 from tomography_session_browser.presentation.recorded_metrics import metric_number
+from tomography_session_browser.presentation.tomogram_calibration import open_warnings
 from tomography_session_browser.presentation.volume_formatting import file_size, mode_text, triple
 from tomography_session_browser.services.tomogram_links import TomogramLink
 from tomography_session_browser.services.volume.render import calibrated_spacing
@@ -193,6 +194,6 @@ def tomogram_context(item: Tomogram, volume: Volume | None, link: TomogramLink |
             if not any(existing.path == file.path for existing in files):
                 files.append(file)
     warnings = tuple(dict.fromkeys((*item.warnings, *item.processing.warnings, *(link.warnings if link else ()),
-                                   *(volume.warnings if volume else ()))))
+                                   *(open_warnings(volume, override) if volume else ()))))
     return TomogramContext(item.id, item.name, volume.version if volume else 'Absent', parent, tuple(tiles),
                            tuple(fields), tuple(files), item.processing.alignment, other, tuple(header), warnings)

@@ -79,9 +79,10 @@ def decode_preview(key: PreviewKey, *, thumbnail: bool = False) -> PreviewResult
         source = MrcPreviewSource(path)
         preview = source.get_frame_preview(index, max_size=size)
         image = QImage()
-        if preview.image is not None:
-            gray = preview.image.convert("L")
-            image = QImage(gray.tobytes(), gray.width, gray.height, gray.width,
+        if preview.pixels is not None:
+            # One copy, in Qt. Through PIL this was four, on every first view.
+            height, width = preview.pixels.shape
+            image = QImage(preview.pixels.data, width, height, width,
                            QImage.Format.Format_Grayscale8).copy()
         result = CachedPreview(image, preview.slice_count, preview.warnings, image.sizeInBytes(), max(source.inspection.nx, source.inspection.ny))
     else:

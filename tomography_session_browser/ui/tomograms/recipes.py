@@ -1,10 +1,13 @@
 """Window display recipe, source-specific levels and bounded recipe Undo."""
 from collections import OrderedDict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
+from tomography_session_browser.domain.tomograms import Volume
+from tomography_session_browser.presentation.tomogram_state import TomogramViewState
+from tomography_session_browser.services.volume.pixel_sizes import Signature, signature_of
 from tomography_session_browser.services.volume.scale_bar import ScaleBarStyle
 
-DISPLAY_FIELDS = ("black", "white", "lowpass", "highpass", "slices", "invert", "brightness", "contrast", "smooth", "show_bar", "scale_bar", "levels_mode", "levels_anchor", "spacing_override")
+DISPLAY_FIELDS = ("black", "white", "lowpass", "highpass", "slices", "invert", "brightness", "contrast", "smooth", "show_bar", "scale_bar", "levels_mode", "levels_anchor")
 #: What Reset restores. A confirmed pixel size is a scientific choice, not an
 #: image setting, so Reset keeps it.
 DEFAULTS = {"lowpass": 0., "highpass": 0., "slices": 1, "invert": False, "brightness": 0., "contrast": 1.,
@@ -13,10 +16,17 @@ DEFAULTS = {"lowpass": 0., "highpass": 0., "slices": 1, "invert": False, "bright
 DEFAULT_FILTERS = (.1, 0.)
 
 
+@dataclass(frozen=True, slots=True)
+class CalibrationStep:
+    volume_id: str
+    volume_signature: Signature
+    previous: float | None
+
+
 class ImageRecipes:
     def __init__(self, tab) -> None:
         self.tab = tab
-        self.history = []
+        self.history: list[TomogramViewState | CalibrationStep] = []
         self.levels = OrderedDict()
         self.last_filters = DEFAULT_FILTERS
         self.window_recipe = None
@@ -56,8 +66,7 @@ class ImageRecipes:
             state = replace(state, levels_anchor=None)
         if state == old:
             return  # Nothing changed: no Undo step that would do nothing.
-        self.history.append(old)
-        del self.history[:-32]
+        self.remember_step(old)
         self.tab.state = state
         if state.lowpass or state.highpass:
             self.last_filters = state.lowpass, state.highpass
@@ -66,8 +75,21 @@ class ImageRecipes:
         self.tab.image_settings.sync_levels(state.black, state.white)
         self.tab.sync_slices()
         self.tab.request_render()
-        if state.spacing_override != old.spacing_override:
-            self.tab.metadata_changed.emit()
+
+    def remember_step(self, step: TomogramViewState | CalibrationStep) -> None:
+        self.history.append(step)
+        del self.history[:-32]
+
+    def remember_calibration(self, volume: Volume, previous: float | None) -> None:
+        self.remember_step(CalibrationStep(volume.id, signature_of(volume), previous))
+
+    def forget_version(self, volume_id: str, signature: Signature) -> None:
+        self.history[:] = [step for step in self.history
+                           if (step.volume_id, step.volume_signature) != (volume_id, signature)]
+
+    def forget_statements(self, volume_ids: set[str]) -> None:
+        self.history[:] = [step for step in self.history
+                           if not isinstance(step, CalibrationStep) or step.volume_id not in volume_ids]
 
     @staticmethod
     def display(state) -> tuple:
@@ -76,10 +98,19 @@ class ImageRecipes:
     def undo_index(self) -> int | None:
         """The latest step for this source version that changes what is shown."""
         current = self.tab.state
-        return next((index for index in range(len(self.history)-1, -1, -1)
-                     if (self.history[index].volume_id, self.history[index].volume_signature)
-                     == (current.volume_id, current.volume_signature)
-                     and self.display(self.history[index]) != self.display(current)), None)
+        volume = self.tab.volume()
+        if volume is None:
+            return None
+        stored = self.tab.pixel_sizes.values.value_for(volume)
+        display = self.display(current)
+        for index in range(len(self.history) - 1, -1, -1):
+            step = self.history[index]
+            if (step.volume_id, step.volume_signature) != (current.volume_id, current.volume_signature):
+                continue
+            changes = step.previous != stored if isinstance(step, CalibrationStep) else self.display(step) != display
+            if changes:
+                return index
+        return None
 
     def can_undo(self) -> bool:
         return self.undo_index() is not None
@@ -100,14 +131,17 @@ class ImageRecipes:
         self.history[index:] = [step for step in self.history[index:]
                                 if (step.volume_id, step.volume_signature) != version]
         self.tab.playback.stop()
+        if isinstance(previous, CalibrationStep):
+            volume = self.tab.volume()
+            if volume is not None:
+                self.tab.pixel_sizes.write_value(volume, previous.previous)
+                self.tab.pixel_sizes.show_calibration(volume)
+            return
         self.tab.state = replace(current, **{name: getattr(previous, name) for name in DISPLAY_FIELDS})
         self.tab.image_settings.sync_state()
         self.tab.image_settings.sync_levels(previous.black, previous.white)
         self.tab.sync_slices()
         self.tab.request_render()
-
-        if previous.spacing_override != current.spacing_override:
-            self.tab.metadata_changed.emit()
 
     def reset(self) -> None:
         self.last_filters = DEFAULT_FILTERS

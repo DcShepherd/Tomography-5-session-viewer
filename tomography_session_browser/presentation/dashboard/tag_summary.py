@@ -6,6 +6,14 @@ from tomography_session_browser.presentation.dashboard.index_chart import IndexS
 from tomography_session_browser.services.tomogram_tags.binding import ProjectKey
 
 
+def number_text(value: int | float | None) -> str:
+    """A count, total or median without a stray ``.0``; ``–`` when there is none."""
+
+    if value is None:
+        return "–"
+    return str(int(value)) if value == int(value) else str(value)
+
+
 @dataclass(frozen=True, slots=True)
 class TagValue:
     id: str

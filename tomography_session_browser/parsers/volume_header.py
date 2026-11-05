@@ -8,7 +8,8 @@ import numpy as np
 
 from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.domain.models import MrcMetadata
-from tomography_session_browser.domain.tomograms import Volume, VolumeFingerprint, VolumeGrid
+from tomography_session_browser.domain.tomograms import (SUSPICIOUS_SPACING_WARNING, UNRESOLVED_SPACING_WARNING, Volume,
+                                                         VolumeFingerprint, VolumeGrid)
 
 
 def fingerprint(path: Path) -> VolumeFingerprint:
@@ -19,6 +20,22 @@ def fingerprint(path: Path) -> VolumeFingerprint:
 def is_cloud_placeholder(path: Path) -> bool:
     # Attribute queries do not open/dehydrate the file's contents.
     return bool(getattr(path.stat(), "st_file_attributes", 0) & (0x1000 | 0x40000 | 0x400000))
+
+
+def records_volume(header: bytes) -> bool:
+    """The MRC format's own record of one volume: space group 1, not 0 for an image
+    stack, with every section in the one map and no tilt-stack extended header."""
+    endian = ">" if header[212:214] == b"\x11\x11" else "<"
+    nz = struct.unpack_from(endian + "i", header, 8)[0]
+    sections = struct.unpack_from(endian + "i", header, 36)[0]
+    space_group, extended = struct.unpack_from(endian + "2i", header, 88)
+    return space_group == 1 and extended == 0 and nz > 1 and sections == nz
+
+
+def file_records_volume(path: Path) -> bool:
+    with path.open("rb") as handle:
+        header = handle.read(1024)
+    return len(header) == 1024 and records_volume(header)
 
 
 def read_volume(path: Path, version: str) -> Volume:
@@ -69,9 +86,9 @@ def read_volume(path: Path, version: str) -> Volume:
         grid = VolumeGrid((nz, ny, nx), mapping, metadata.voxel_size, origin, starts)
         warnings: list[str] = []
         if any(value is None or not math.isfinite(value) or value <= 0 for value in grid.spacing_xyz):
-            warnings.append("Voxel spacing is unresolved. Voxel navigation is available; no physical scale bar is shown.")
+            warnings.append(UNRESOLVED_SPACING_WARNING)
         elif any(abs(float(value) - 1) < 1e-6 for value in grid.spacing_xyz if value is not None):
-            warnings.append("Header spacing includes 1 Å. Confirm calibration in Image settings before using a scale bar.")
+            warnings.append(SUSPICIOUS_SPACING_WARNING)
         if metadata.data_complete is not True:
             raise ValueError("The reconstruction data block is incomplete.")
         if fingerprint(path) != stamp:

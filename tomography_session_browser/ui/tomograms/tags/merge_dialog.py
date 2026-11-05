@@ -47,7 +47,7 @@ class ObservationCard(QFrame):
 
 
 class MergeSheet(MessageSheet[str]):
-    def __init__(self, parent, session: TagSession, removed_id: str):
+    def __init__(self, parent, session: TagSession, removed_id: str, surviving_id: str | None = None):
         super().__init__(parent, ActionPrompt(MessageContent("Merge tags",
             "Choose the name to keep and review the recorded counts. Images and capture history are kept."),
             (MessageAction("cancel", "Cancel"), MessageAction("merge", "Merge tags", ActionRole.PRIMARY)), "cancel", "cancel"))
@@ -80,7 +80,7 @@ class MergeSheet(MessageSheet[str]):
         self.inputs.addWidget(self.remaining)
         self.sync_catalogue()
         self.removed.setCurrentIndex(self.removed.findData(removed_id))
-        self.surviving.setCurrentIndex(-1)
+        self.surviving.setCurrentIndex(self.surviving.findData(surviving_id) if surviving_id is not None else -1)
         self.removed.currentIndexChanged.connect(self.rebuild)
         self.surviving.currentIndexChanged.connect(self.rebuild)
         self.swap_button.clicked.connect(self.swap)
@@ -224,8 +224,8 @@ class MergeSheet(MessageSheet[str]):
         super().choose(identity)
 
 
-def review_merge(parent, session: TagSession, removed_id: str) -> MergeCommitted | Cancelled:
-    sheet = MergeSheet(parent, session, removed_id)
+def review_merge(parent, session: TagSession, removed_id: str, surviving_id: str | None = None) -> MergeCommitted | Cancelled:
+    sheet = MergeSheet(parent, session, removed_id, surviving_id)
     try:
         sheet.exec()
         return sheet.committed if sheet.committed is not None else Cancelled()

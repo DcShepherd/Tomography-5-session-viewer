@@ -8,7 +8,7 @@ The application is read-only. It does not edit, repair, rename, move or change f
 
 Save PDF reports, images, snapshots and movies in a folder that is not in a loaded source folder. This rule applies to all loaded folders, also when they are not in the selected scope.
 
-This is version 1.0.0. The [change log](CHANGELOG.md) lists the new functions.
+This is version 1.0.1. The [change log](CHANGELOG.md) lists the changes in each release.
 
 ## Supported platforms
 
@@ -301,7 +301,7 @@ Select **Load sessions** (Ctrl+O), or drag the folder onto the project panel. Se
 | Warp | `warp_tiltseries.settings`, or the `warp_tiltseries` and `tomostar` folders |
 | IMOD | `tilt.com`, `tilta.com` or `tiltb.com`, with an output path in the folder |
 | AreTomo3 | `MdocDone.txt` and `*_Vol.mrc` files |
-| Reconstruction folder | `.mrc`, `.rec` or `.map` files with the IMOD `TILT: Tomographic reconstruction` header label |
+| Reconstruction folder | `.mrc`, `.rec` or `.map` files with the IMOD `TILT: Tomographic reconstruction` header label, or with MRC space group 1 |
 
 A reconstruction folder can hold the files directly, or one folder for each tomogram. The application does not search other folders near the root folder. It shows a warning for each file that it cannot identify.
 
@@ -332,6 +332,8 @@ Select the Ortho button to show three planes. Select the Single button to show o
 - Select **Image** to open the image settings. These settings change only the display.
 
 The image settings have filters, contrast, a histogram, a calibration, snapshot settings and scale-bar settings. **Memory** sets the limit for the RAM that tomogram views and exports share.
+
+If a version has no usable pixel size, the application asks you for a value and does not show a scale bar until you give one. When two or more versions need a value, **Apply to several…** shows a list of these versions so that you can give them one value. The application cannot check that these versions have the same voxel size, so make sure that they do. The value is kept after a restart, and **Undo** removes it. If a file changes, the application asks again. The application does not change the MRC files.
 
 ### 4. Save snapshots and tags
 
@@ -440,7 +442,7 @@ python -m pip install -e .
 
 The public repository has a minimal release suite. This suite uses only synthetic data:
 
-- `test_release_smoke.py` starts the application in the two themes and examines the loader assets.
+- `test_release_smoke.py` starts the application in the two themes, examines the loader assets and release version, and checks that volume headers and acquisition records keep tomograms separate from tilt stacks.
 - `test_hardening_regression.py` makes sure that damaged input causes warnings, not crashes. It also makes sure that the dashboard and the reports show the same number of warnings.
 - `test_project_model.py` examines session links, project groups and report generation.
 - `conftest.py` keeps the tests away from your own settings.

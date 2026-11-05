@@ -3,7 +3,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 import uuid
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFileDialog, QMenu, QWidget
 
 from tomography_session_browser.domain.identity import path_identity_key
@@ -34,6 +34,9 @@ class TagEditTarget:
 
 
 class TagOwner(QWidget):
+    #: A CSV export's result, for a dialog that covers the panel's own notice.
+    export_reported = Signal()
+
     def __init__(self, tab, projects: TagProjects | None = None):
         super().__init__(tab)
         self.hide()
@@ -399,7 +402,7 @@ class TagOwner(QWidget):
             finally:
                 dialog.deleteLater()
 
-    def export(self) -> None:
+    def export(self, *, parent: QWidget | None = None) -> None:
         from tomography_session_browser.services.tomogram_tags.csv_export import export_csv
         target = self.target()
         if not target or not target.session or target.session.project is None:
@@ -408,7 +411,7 @@ class TagOwner(QWidget):
         project_path = target.session.store.path
         project_key = ProjectKey.at(project_path, project)
         unsaved = target.session.dirty
-        path, _ = QFileDialog.getSaveFileName(self.tab, "Export tags as CSV", "tags.csv", "CSV files (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(parent or self.tab, "Export tags as CSV", "tags.csv", "CSV files (*.csv)")
         if not path:
             return
         states = {}
@@ -426,7 +429,10 @@ class TagOwner(QWidget):
                 content = MessageContent("CSV saved", future.result(), (str(path), str(project_path)))
             self.export_feedback[project_key] = content
             self.render()
+            if project_key not in self.export_feedback:
+                return
             self.panel.reveal_notice(self.panel.export_notice, project_key)
+            self.export_reported.emit()
         self.projects.submit(lambda: export_csv(project, Path(path), roots, binding_status=states, unsaved=unsaved), finished)
 
     def dismiss_export(self) -> None:
@@ -435,6 +441,9 @@ class TagOwner(QWidget):
             self.export_feedback.pop(ProjectKey.at(target.session.store.path, target.session.project), None)
         self.panel.export_notice.hide()
 
-    def capture_menu(self, tag_id: str) -> None:
+    def capture_menu(self, tag_id: str, position, linked: int) -> None:
         # Installed by T7 on the same owner; no second panel or capture pipeline.
-        self.capture_links.show_menu(tag_id)
+        self.capture_links.show_menu(tag_id, position, linked)
+
+    def camera_clicked(self, tag_id: str, button: QWidget, linked: int) -> None:
+        self.capture_links.camera_clicked(tag_id, button, linked)

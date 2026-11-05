@@ -123,13 +123,34 @@ def marker_id_for_search_map_navigation(
     return marker.id if marker is not None else None
 
 
-def _single_exposure(candidates: list[ImageMarker]) -> str | None:
+def single_exposure(candidates: list[ImageMarker]) -> str | None:
     """The first candidate when every candidate draws one exposure (its area
     and camera field of view, say); ``None`` when they draw several."""
 
     if candidates and len({exposure_area_id(marker) for marker in candidates}) == 1:
         return candidates[0].id
     return None
+
+
+def search_tile_named_exposures(
+    search_tile: SearchTile,
+    markers: Iterable[ImageMarker],
+    *,
+    exposure_area_available: bool = True,
+) -> list[ImageMarker]:
+    """The markers drawing the exposure the tile is named for, areas first.
+
+    A tile with no such marker has nothing to say about its default highlight.
+    Several exposures sharing the name are a tie for ``single_exposure`` to
+    refuse. A camera field stands in for its area when the area's type is off.
+    """
+
+    area_name = str(search_tile.metadata.get("ExposureAreaName") or "").strip().casefold()
+    if not area_name:
+        return []
+    named = [marker for marker in markers if str(marker.metadata.get("area_name") or "").strip().casefold() == area_name]
+    areas = [marker for marker in named if marker.marker_type == MarkerType.EXPOSURE_AREA] if exposure_area_available else []
+    return [*areas, *(marker for marker in named if marker.marker_type == MarkerType.CAMERA_FOV)]
 
 
 def marker_id_for_exposure_search_navigation(
@@ -156,10 +177,10 @@ def marker_id_for_exposure_search_navigation(
     if marker_key:
         exact = [marker for marker in exposures if marker_exposure_match_key(marker) == marker_key]
         if exact:
-            return _single_exposure(exact)
+            return single_exposure(exact)
     area_name = str(target.metadata.get("ExposureAreaName") or "").strip().casefold()
     if area_name:
-        return _single_exposure(
+        return single_exposure(
             [marker for marker in exposures if str(marker.metadata.get("area_name") or "").strip().casefold() == area_name]
         )
     return None

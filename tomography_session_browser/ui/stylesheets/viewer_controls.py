@@ -53,6 +53,7 @@ QCheckBox:hover {{
 }}
 
 QCheckBox::indicator,
+QTableView#bulkPixelTable::indicator,
 QListWidget#contactSheetCaptures::indicator {{
     width: 14px;
     height: 14px;
@@ -65,13 +66,15 @@ QListWidget#contactSheetCaptures::indicator {{
    and "unchecked" differing only in lightness, which is indistinguishable in
    grayscale and unreliable for colour-vision deficiency. */
 QCheckBox::indicator:checked,
+QTableView#bulkPixelTable::indicator:checked,
 QListWidget#contactSheetCaptures::indicator:checked {{
     background: {accent};
     border-color: {accent};
     image: url("{check_icon}");
 }}
 
-QCheckBox::indicator:disabled {{
+QCheckBox::indicator:disabled,
+QTableView#bulkPixelTable::indicator:disabled {{
     background: {surface_alt};
     border-color: {border};
 }}

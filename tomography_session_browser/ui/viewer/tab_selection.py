@@ -1,10 +1,12 @@
 """Tab selection for the image viewer."""
 from __future__ import annotations
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any
 from PySide6.QtCore import QSignalBlocker, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QAbstractItemView, QTreeWidgetItem
+from tomography_session_browser.services.navigation.arrival import search_tile_named_exposures, single_exposure
 from tomography_session_browser.services.preview_sources import PreviewSources
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.domain.identity import entity_key_text
@@ -59,6 +61,9 @@ class TabSelection:
         # Set when a hidden tab is rebuilt: applied on first show so lazy tabs
         # stay lazy without losing the selection they should return to.
         self.pending_view_state: ViewerViewState | None = None
+        # The item a caller selects right after showing this tab. A first-visit
+        # default other than this one would be decoded only to be replaced.
+        self.arriving_value: Any | None = None
         # (provider, item, its markers): see ``markers_of``.
         self.marker_memo: tuple[Callable[[Any], list[ImageMarker]], Any, list[ImageMarker]] | None = None
         self.label_for: Callable[[Any], str] = title_for_item
@@ -405,6 +410,8 @@ class TabSelection:
             if self.loader.source_for_value(row.data(0, VIEWER_OBJECT_ROLE)).primary is not None:
                 initial = row
                 break
+        if self.arrival_replaces(initial):
+            return
         value = initial.data(0, VIEWER_OBJECT_ROLE)
         if self.view.list.isVisible():
             previous = self.view.list.blockSignals(True)
@@ -415,6 +422,24 @@ class TabSelection:
         self.loader.load_value(value, 0)
         if notify_selection and self.on_item_selected is not None:
             self.on_item_selected(value)
+
+    @contextmanager
+    def arriving(self, value: Any) -> Iterator[None]:
+        """While this tab comes up for a caller about to select ``value``."""
+
+        self.arriving_value = value
+        try:
+            yield
+        finally:
+            self.arriving_value = None
+
+    def arrival_replaces(self, row: QTreeWidgetItem) -> bool:
+        """Whether the item arriving on this tab has another row, so ``row`` would only be replaced."""
+
+        if self.arriving_value is None:
+            return False
+        arriving = self.view.parts.list_pane.rows.row_for_value(self.arriving_value)
+        return arriving is not None and arriving is not row
 
     def select_object(self, value: Any) -> bool:
         """Select ``value`` in the list.
@@ -457,6 +482,9 @@ class TabSelection:
         value = current.data(0, VIEWER_OBJECT_ROLE)
         if value is None:
             return  # a row that shows no object (a group's header)
+        # Focus moving from the old page into this list makes its first row current.
+        if self.arrival_replaces(current):
+            return
         self.retained_list_selection_key = None
         self.loader.load_value(value, 0)
         if self.on_item_selected is not None:
@@ -484,17 +512,14 @@ class TabSelection:
         if self.marker_selection_explicitly_cleared:
             return None
         if isinstance(value, SearchTile):
-            area_name = str(value.metadata.get("ExposureAreaName") or "").strip().casefold()
-            if area_name:
-                if MarkerType.EXPOSURE_AREA not in self.view.parts.overlay_panel.unavailable_marker_types:
-                    for marker in markers:
-                        marker_area = str(marker.metadata.get("area_name") or "").strip().casefold()
-                        if marker.marker_type == MarkerType.EXPOSURE_AREA and marker_area == area_name:
-                            return marker.id
-                for marker in markers:
-                    marker_area = str(marker.metadata.get("area_name") or "").strip().casefold()
-                    if marker.marker_type == MarkerType.CAMERA_FOV and marker_area == area_name:
-                        return marker.id
+            named = search_tile_named_exposures(
+                value,
+                markers,
+                exposure_area_available=MarkerType.EXPOSURE_AREA not in self.view.parts.overlay_panel.unavailable_marker_types,
+            )
+            if named:
+                # A tie highlights nothing; the linked marker below must not stand in for it.
+                return single_exposure(named)
         object_id = getattr(value, "id", None)
         if object_id is None:
             return None

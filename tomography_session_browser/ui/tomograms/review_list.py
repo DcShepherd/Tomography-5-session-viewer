@@ -1,6 +1,9 @@
 """One ordered key list drives rows, compact selection and Previous/Next."""
 from __future__ import annotations
 
+from collections.abc import Callable
+
+from tomography_session_browser.domain.tomograms import Volume
 from tomography_session_browser.ui.widgets.link_button import link_button
 from PySide6.QtCore import QRectF, QSize, Qt, Signal, QSignalBlocker, QModelIndex
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
@@ -9,12 +12,14 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QLineEdit, QStyle,
 from tomography_session_browser.presentation.tomogram_tabs import (SORTS, PreparedTomogramTab, TomogramRow,
                                                                    needs_attention, restored_sort, sort_metric, sorted_within_groups)
 from tomography_session_browser.services.volume.render import calibrated_spacing
+from tomography_session_browser.presentation.tomogram_calibration import tomogram_warnings
 from tomography_session_browser.presentation.recorded_metrics import metric_number
 from tomography_session_browser.presentation.tomogram_tag_filters import TagFilter
 from tomography_session_browser.presentation.tomogram_list_filter import ListFilter, list_membership, keep_not_opened_membership
 from tomography_session_browser.presentation.design_tokens import (RADIUS_CONTROL, SPACE_M, SPACE_S, STATUS_TONE_COLOURS,
                                                                    TYPE_BODY, TYPE_CAPTION, readable_tone)
 from tomography_session_browser.presentation.tomogram_state import ReviewSegment, TomogramViewState
+from tomography_session_browser.presentation.tomogram_versions import review_versions
 from tomography_session_browser.presentation.viewer_entries import GroupHeader
 from tomography_session_browser.ui.motion import ItemHoverAnimator, blend, veil
 from tomography_session_browser.ui.motion.selection import SelectionGlide
@@ -33,15 +38,18 @@ class SelectorDelegate(QStyledItemDelegate):
         option.textElideMode = Qt.TextElideMode.ElideMiddle
 
 
-def row_tag(row: TomogramRow) -> tuple[str, str] | None:
-    """The one exception a row shows inline, named; the row tooltip has the full text."""
+def row_tag(row: TomogramRow, stated_for: Callable[[Volume], float | None] = lambda _volume: None) -> tuple[str, str] | None:
+    """The one exception a row shows inline, named; the row tooltip has the full text.
+
+    A half set is not a review choice and cannot take a value, so it cannot ask for one.
+    """
     if row.link.status == "ambiguous":
         return "Ambiguous link", "bad"
-    if any(calibrated_spacing(volume, None) is None for volume in row.tomogram.volumes if volume.grid is not None):
+    if any(calibrated_spacing(volume, stated_for(volume)) is None
+           for volume in review_versions(row.tomogram) if volume.grid is not None):
         return "No pixel size", "warn"
-    if needs_attention(row):
-        count = len({*row.link.warnings, *row.tomogram.warnings,
-                     *(warning for volume in row.tomogram.volumes for warning in volume.warnings)})
+    if needs_attention(row, stated_for):
+        count = len({*row.link.warnings, *row.tomogram.warnings, *tomogram_warnings(row.tomogram, stated_for)})
         return (f"{count} warnings" if count > 1 else "Warning"), "warn"
     return None
 
@@ -105,7 +113,7 @@ class ReviewRowDelegate(QStyledItemDelegate):
             painter.drawText(QRectF(right - width, rect.top(), width, rect.height()),
                              Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, value)
             right -= width + SPACE_S
-        tag = row_tag(row)
+        tag = row_tag(row, self.owner.stated_for)
         if tag is not None:
             right = self.paint_tag(painter, option, rect, right, *tag) - SPACE_S
         font = QFont(option.font)
@@ -162,6 +170,7 @@ class TomogramList(QWidget):
         self.setObjectName("tomogramList")
         self.rows: dict[str, TomogramRow] = {}
         self.opened: set[str] = set()
+        self.stated_for: Callable[[Volume], float | None] = lambda _volume: None
         self.ordered_keys: tuple[str, ...] = ()
         self.membership: frozenset[str] | None = None
         self.tag_filter = TagFilter()
@@ -286,7 +295,8 @@ class TomogramList(QWidget):
     def restrict(self, keys: frozenset[str], label: str) -> None:
         self.route_keys = keys.intersection(self.rows)
         self.scope_label = label or "Summary"
-        self.membership = self.route_keys
+        self.membership = self.route_keys if self.segment_key() != ReviewSegment.ATTENTION else frozenset(
+            key for key in self.route_keys if self.needs_attention(self.rows[key]))
         self.rebuild()
 
     def sort_changed(self) -> None:
@@ -321,16 +331,30 @@ class TomogramList(QWidget):
     def set_segment(self, key: ReviewSegment) -> None:
         self.segment.setCurrentIndex(self.segment.findData(key))
 
-    @staticmethod
-    def needs_attention(row: TomogramRow) -> bool:
-        return needs_attention(row)
+    def needs_attention(self, row: TomogramRow) -> bool:
+        return needs_attention(row, self.stated_for)
+
+    def row_tooltip(self, row: TomogramRow) -> str:
+        return "\n".join((row.tomogram.name, row.link.explanation, *row.link.warnings, *row.tomogram.warnings,
+                          *tomogram_warnings(row.tomogram, self.stated_for)))
+
+    def stated_values_changed(self) -> None:
+        """A stated value answers a calibration warning, so tags and counts follow it.
+
+        The rows stay: the row being corrected must not leave the list that Next walks.
+        """
+        for key, item in self.items_by_key.items():
+            item.setToolTip(0, self.row_tooltip(self.rows[key]))
+        self.refresh_counts()
+        self.tree.viewport().update()
 
     def filter_value(self) -> ListFilter:
         return ListFilter(self.query.text(), self.segment_key(), self.sort.currentText(), self.route_keys, self.scope_label, self.tag_filter)
 
     def rebuild(self) -> None:
         result = list_membership(self.rows, self.filter_value(), self.membership, self.opened,
-                                 tag_rows=self.tag_rows() if self.membership is None and self.tag_filter.active else None)
+                                 tag_rows=self.tag_rows() if self.membership is None and self.tag_filter.active else None,
+                                 stated_for=self.stated_for)
         self.membership, keys = result.working_set, result.ordered_keys
         self.ordered_keys = keys
         shown: dict[str, int] = {}
@@ -352,8 +376,7 @@ class TomogramList(QWidget):
                     self.tree.addTopLevelItem(heading)
                 item = QTreeWidgetItem([row.tomogram.name])
                 item.setData(0, Qt.ItemDataRole.UserRole, key)
-                item.setToolTip(0, "\n".join((row.tomogram.name, row.link.explanation, *row.link.warnings, *row.tomogram.warnings,
-                                              *(warning for volume in row.tomogram.volumes for warning in volume.warnings))))
+                item.setToolTip(0, self.row_tooltip(row))
                 font = item.font(0)
                 font.setWeight(QFont.Weight.DemiBold if key not in self.opened else QFont.Weight.Normal)
                 item.setFont(0, font)
@@ -387,7 +410,8 @@ class TomogramList(QWidget):
         self.segment.setItemText(2, f"Needs attention · {sum(self.needs_attention(row) for row in self.rows.values())}")
         self.segment.setItemData(0, f"Show all {len(self.rows)} tomograms. Bold names are tomograms that you did not open.", Qt.ItemDataRole.ToolTipRole)
         self.segment.setItemData(2, f"Show the {sum(self.needs_attention(row) for row in self.rows.values())} tomograms "
-                                 "with warnings", Qt.ItemDataRole.ToolTipRole)
+                                 "with warnings. A tomogram that you correct stays until you change the filter.",
+                                 Qt.ItemDataRole.ToolTipRole)
         self.segment.setItemData(1, f"Show the {not_opened} tomograms that you did not open. A tomogram that you open "
                                  "stays until you change the filter.", Qt.ItemDataRole.ToolTipRole)
         self.segment.setToolTip(self.segment.currentData(Qt.ItemDataRole.ToolTipRole))

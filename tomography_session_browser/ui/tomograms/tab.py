@@ -40,7 +40,8 @@ from tomography_session_browser.ui.tomograms.residency import ResidentSource
 from tomography_session_browser.ui.tomograms.tooltips import KeyboardTooltips
 from tomography_session_browser.services.volume.memory import VOLUME_MEMORY
 from tomography_session_browser.ui.tomograms.captures import Captures, CaptureJob, CaptureOutcome
-from tomography_session_browser.ui.tomograms.pixel_prompt import PixelSizePrompt
+from tomography_session_browser.ui.tomograms.pixel_prompt import PixelSizeApplied, PixelSizePrompt
+from tomography_session_browser.ui.tomograms.pixel_sizes import PixelSizeOwner
 
 #: Below this viewer width the plane band has no room for the cursor coordinates.
 CURSOR_IN_BAND_WIDTH = 640
@@ -132,6 +133,11 @@ class TomogramTab(QWidget):
         self.warning = QLabel(self)
         self.warning.setObjectName("viewerReason")
         self.warning.setWordWrap(True)
+        # What the file asks for: it can end while the notes above stay, so it has its own line.
+        self.volume_warning = QLabel(self)
+        self.volume_warning.setObjectName("viewerReason")
+        self.volume_warning.setWordWrap(True)
+        self.volume_warning.hide()
         # Preview text must not change the splitter minimum and trigger another render.
         self.readout = PlaneReadout(self)
         self.readout.setObjectName("tomogramReadout")
@@ -163,6 +169,7 @@ class TomogramTab(QWidget):
         title_row.addWidget(self.linked_header.menu_button)
         canvas_layout.addWidget(self.title_band)
         canvas_layout.addWidget(self.linked_header)
+        canvas_layout.addWidget(self.volume_warning)
         canvas_layout.addWidget(self.warning)
         version_row = self.version_row = QHBoxLayout()
         version_row.setSpacing(SPACE_S)
@@ -198,8 +205,12 @@ class TomogramTab(QWidget):
         self.playback = Playback(self)
         self.movie = MovieExport(self)
         self.recipes = ImageRecipes(self)
+        self.pixel_sizes = PixelSizeOwner(self)
+        self.review_list.stated_for = self.pixel_sizes.values.value_for
         self.pixel_prompt = PixelSizePrompt(self)
         frame_layout.addWidget(self.pixel_prompt)
+        self.pixel_applied = PixelSizeApplied(self)
+        frame_layout.addWidget(self.pixel_applied)
         plane_band = QWidget(self)
         self.plane_band = plane_band
         plane_band.setObjectName("tomogramPlaneBand")
@@ -241,7 +252,8 @@ class TomogramTab(QWidget):
         self.status.tag_save.clicked.connect(self.tags.show_recovery)
         self.linked_header.changed.connect(self.refresh_adaptive)
         self.workers = TomogramWorkers((self.residency.pool, self.image_settings.next_file.pool, self.prefetch.pool,
-                                        self.rendering.pool, self.captures.pool, self.movie.pool, self.movie.preview_pool),
+                                        self.rendering.pool, self.captures.pool, self.movie.pool, self.movie.preview_pool,
+                                        self.pixel_sizes.pool),
                                        self.persistence.writer, self.history.pool)
         self.destroyed.connect(self.workers.close)
         self.status.resume.clicked.connect(self.persistence.resume)
@@ -352,22 +364,24 @@ class TomogramTab(QWidget):
         self.persistence.bind_payload(payload)
         self.payload = payload
         self.initialised = True
+        self.pixel_sizes.restored = None
         self.state = TomogramViewState()
         self.review_list.install(payload)
         self.restore_view_state(restore_state or TomogramViewState())
         self.persistence.offer()
         self.scope_changed.emit()
 
-    def restore_view_state(self, state: TomogramViewState, *, ordering_notice: str = "") -> None:
+    def restore_view_state(self, state: TomogramViewState, *, ordering_notice: str = "", captured: bool = False) -> None:
         self.playback.stop()
         sort = self.review_list.restore_filters(state, ordering_notice)
         state = replace(state, sort=sort)
         key = state.row_key if state.row_key in self.review_list.rows else next(iter(self.review_list.ordered_keys), None)
         self.state = state
         if key is not None:
-            self.select_key(key, restore=state if state.row_key == key else None)
+            self.select_key(key, restore=state if state.row_key == key else None, captured=captured)
         else:
-            self.state = replace(state, row_key=None, volume_id=None, plane=None)
+            self.pixel_sizes.restored = None
+            self.state = replace(state, row_key=None, volume_id=None, plane=None, spacing_override=None)
             self.show_volume()
             with QSignalBlocker(self.versions):
                 self.versions.clear()
@@ -381,10 +395,11 @@ class TomogramTab(QWidget):
             self.title.setText("No tomograms in this scope")
             self.warning.setText("Load a supported processing folder to inspect reconstructed volumes.")
             self.warning.show()
+            self.pixel_sizes.sync_warnings()
             self.update_commands()
 
-    def select_key(self, key: str, *, restore: TomogramViewState | None = None) -> None:
-        self.version_selection.select_key(key, restore=restore)
+    def select_key(self, key: str, *, restore: TomogramViewState | None = None, captured: bool = False) -> None:
+        self.version_selection.select_key(key, restore=restore, captured=captured)
 
     def version_changed(self, index: int) -> None:
         self.version_selection.version_changed(index)
@@ -408,6 +423,7 @@ class TomogramTab(QWidget):
         if volume is None:
             self.warning.setText("No full reconstruction is available. Load a full reconstruction to inspect this tomogram.")
             self.warning.setVisible(row is not None)
+            self.pixel_sizes.sync_warnings()
             self.update_commands()
             self.metadata_changed.emit()
             return
@@ -416,16 +432,17 @@ class TomogramTab(QWidget):
             ViewerNavigationAction("tilt_series", "Tilt series", enabled=bool(link and link.status == "resolved"),
                                    tooltip=link.explanation if link else "No linked acquisition")]
         self.linked_header.update_actions(actions, link.explanation if link else "No linked acquisition")
-        self.warning.setText(" · ".join((*volume.warnings, *((link.explanation,) if link and link.status == "ambiguous" else ()))))
-        self.image_settings.calibration_note.setText(" · ".join(volume.warnings) or "Calibration from the MRC header.")
+        self.warning.setText(link.explanation if link and link.status == "ambiguous" else "")
         signature = (volume.fingerprint.size, volume.fingerprint.mtime_ns)
         if self.state.volume_signature not in (None, signature):
-            self.state = TomogramViewState(self.state.row_key, volume.id, query=self.query(),
-                                          segment=self.review_list.segment_key(), sort=self.review_list.sort.currentText())
-            self.warning.setText(self.warning.text() + " Source fingerprint changed; using fresh geometry and levels.")
+            self.pixel_sizes.restored = None
+            self.state = TomogramViewState(self.state.row_key, volume.id, spacing_override=self.pixel_sizes.displayed(volume),
+                                          query=self.query(), segment=self.review_list.segment_key(), sort=self.review_list.sort.currentText())
+            self.warning.setText(" ".join(filter(None, (self.warning.text(), "Source fingerprint changed; using fresh geometry and levels."))))
         self.version_selection.show_notice()
         self.warning.setVisible(bool(self.warning.text()))
         self.state = replace(self.state, volume_signature=signature)
+        self.pixel_sizes.sync_warnings()
         if volume.grid is not None:
             if self.state.layout == "Single" and self.state.axis != "XY":
                 self.state = replace(self.state, axis="XY", plane=None)
@@ -450,8 +467,7 @@ class TomogramTab(QWidget):
             with QSignalBlocker(self.slider):
                 self.slider.setRange(0, nz - 1)
                 self.slider.setValue(plane)
-            value = self.state.spacing_override or volume.grid.spacing_xyz[0] or 1.
-            self.image_settings.spacing.setValue(value)
+            self.pixel_sizes.sync_field(volume)
             self.request_render(immediate=True)
         self.update_commands()
         self.metadata_changed.emit()
@@ -527,6 +543,7 @@ class TomogramTab(QWidget):
         self.update_capture_command()
         self.movie.refresh()
         self.pixel_prompt.sync()
+        self.pixel_sizes.sync_entries()
         # The count appears once there is something to count.
         counts = self.history.count_snapshot
         self.review_list.capture_column.set_counts(counts.rows if counts else {},
@@ -886,10 +903,14 @@ class TomogramTab(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         if self.constructed and not self.retired:
+            self.stage_transition.attach()
+            self.keyboard_tooltips.attach()
             self.activate()
 
     def hideEvent(self, event) -> None:  # noqa: N802
         if self.constructed and not self.retired:
+            self.stage_transition.detach()
+            self.keyboard_tooltips.dispose()
             self.slider.cancel_marks()
             self.focus_button.setChecked(False)
             self.playback.stop()

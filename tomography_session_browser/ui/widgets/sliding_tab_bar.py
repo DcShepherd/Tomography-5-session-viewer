@@ -17,9 +17,12 @@ Only presentation moves: which tab is current, and when, is unchanged.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QStyle, QStyleOptionTab, QTabBar, QWidget
+from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionTab, QTabBar, QWidget
+import shiboken6
 
 from tomography_session_browser.ui.motion import MOTION_MICRO, MOTION_SMALL, Spring, SpringSpec, blend, motion_enabled
 from tomography_session_browser.ui.motion.colors import css_colour
@@ -51,6 +54,12 @@ class SlidingTabBar(QTabBar):
         self._hover_index = -1
         self._last_index = -1
         self.currentChanged.connect(self._on_current_changed)
+        #: Called when Qt, not the keyboard, gives this bar focus.
+        self.focus_fallback: Callable[[], None] | None = None
+        self._focus_from_keyboard = False
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            app.focusChanged.connect(self._focus_changed)
 
         # The shared ticker must never step a bar destroyed mid-animation.
         def _stop(*_args, edges=(self._left, self._right), maps=(self._selected, self._hovered)) -> None:
@@ -120,6 +129,35 @@ class SlidingTabBar(QTabBar):
             spring.set_target(1.0 if tab == index else 0.0, animate=animate)
         self.update()
 
+    # -- keyboard focus -------------------------------------------------------
+
+    def _focus_changed(self, old: QWidget | None, new: QWidget | None) -> None:
+        """Hold focus, and so its outline, only when the keyboard brought it.
+
+        With no side panel showing, this bar is first in the Tab order, so Qt
+        also picks it by itself: when a window activates with nothing to
+        restore, and when what held focus hides or is disabled. Tab and
+        Shift+Tab come from a widget that still shows in this window. Coming
+        back to the window finds the bar still holding what the keyboard gave.
+        """
+
+        if new is not self:
+            if new is not None and new.window() is self.window():
+                self._focus_from_keyboard = False
+            return
+        if self.focus_fallback is None or self._focus_from_keyboard:
+            return
+        if (
+            old is not None
+            and shiboken6.isValid(old)
+            and old.window() is self.window()
+            and old.isVisible()
+            and old.isEnabled()
+        ):
+            self._focus_from_keyboard = True
+        else:
+            self.focus_fallback()
+
     # -- hover --------------------------------------------------------------
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
@@ -186,6 +224,9 @@ class SlidingTabBar(QTabBar):
                 painter.restore()
             option = QStyleOptionTab()
             self.initStyleOption(option, index)
+            # The outline above shows focus. After a real key press the style
+            # would also draw its own focus rectangle over the label.
+            option.state &= ~QStyle.StateFlag.State_HasFocus
             painter.setOpacity(1.0 if self.isTabEnabled(index) else 0.45)
             style.drawControl(QStyle.ControlElement.CE_TabBarTabLabel, option, painter, self)
             painter.setOpacity(1.0)

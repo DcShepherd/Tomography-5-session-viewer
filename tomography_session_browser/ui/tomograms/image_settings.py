@@ -428,6 +428,17 @@ class ImageSettings(QWidget):
         buttons.addWidget(undo)
         buttons.addStretch()
         calibration.addLayout(buttons)
+        self.several_button = QPushButton("Apply to several…", self)
+        self.several_button.setObjectName("secondaryAction")
+        self.several_button.setToolTip("Use this voxel size for other versions that need one. You review the list "
+                                       "before the app changes a value. The MRC files do not change.")
+        self.several_button.clicked.connect(self.open_review)
+        self.several_button.hide()
+        several = QHBoxLayout()
+        several.setContentsMargins(LABEL_WIDTH + SPACE_S, 0, 0, 0)
+        several.addWidget(self.several_button)
+        several.addStretch()
+        calibration.addLayout(several)
         self.calibration_scope_note = note(self, CALIBRATION_SCOPE_NOTE)
         calibration.addWidget(self.calibration_scope_note)
         layout.addWidget(self.calibration_section)
@@ -517,8 +528,9 @@ class ImageSettings(QWidget):
 
     def refresh_actions(self, *_args) -> None:
         """A button with nothing to do is off, and its tooltip says why."""
-        tab, state = self.tab, self.tab.state
-        loaded = tab.volume() is not None
+        tab = self.tab
+        volume = tab.volume()
+        loaded = volume is not None
         default = tab.recipes.is_default()
         self.reset_button.setEnabled(loaded and not default)
         self.reset_button.setToolTip("All values are at their defaults" if default else
@@ -527,11 +539,14 @@ class ImageSettings(QWidget):
         self.undo_button.setEnabled(undo)
         self.undo_button.setToolTip("Undo the last image change (Ctrl+Z)" if undo else "There is no image change to undo")
         self.refresh_relevel()
-        override = state.spacing_override
-        self.header_button.setEnabled(loaded and override is not None)
-        self.header_button.setToolTip("Use the voxel size from the MRC header" if override is not None
+        shown = tab.pixel_sizes.displayed(volume) if volume is not None else None
+        stored = tab.pixel_sizes.values.value_for(volume) if volume is not None else None
+        can_use_header = shown is not None or stored is not None
+        self.header_button.setEnabled(loaded and can_use_header)
+        self.header_button.setToolTip("Use the voxel size from the MRC header" if can_use_header
                                       else "The app uses the voxel size from the MRC header")
-        self.confirm_button.setEnabled(loaded and self.spacing.value() != override)
+        value = self.spacing.value()
+        self.confirm_button.setEnabled(loaded and (value != shown or value != stored))
 
     def refresh_relevel(self) -> None:
         state = self.tab.state
@@ -698,16 +713,14 @@ class ImageSettings(QWidget):
         self.update_memory()
 
     def confirm_spacing(self) -> None:
-        self.tab.recipes.change(spacing_override=self.spacing.value(), linked_scale=None)
-        self.update_filter_units()
-        self.refresh_actions()
-        self.tab.request_render()
+        self.tab.pixel_sizes.confirm(self.spacing.value())
 
     def use_header(self) -> None:
-        self.tab.recipes.change(spacing_override=None, linked_scale=None)
-        self.update_filter_units()
-        self.refresh_actions()
-        self.tab.request_render()
+        self.tab.pixel_sizes.confirm(None)
+
+    def open_review(self) -> None:
+        self.spacing.interpretText()
+        self.tab.pixel_sizes.open_review(self.spacing.value())
 
 
 # Contextual keys handled by this module; consumed by the shared Help sheet.

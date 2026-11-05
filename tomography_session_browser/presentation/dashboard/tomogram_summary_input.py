@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogram, Volume
 from tomography_session_browser.presentation.scope_identity import scope_key
 from tomography_session_browser.presentation.tomogram_selection import AllTomograms, FolderTomograms
-from tomography_session_browser.presentation.tomogram_tabs import prepare_tomogram_tab, sorted_within_groups
+from tomography_session_browser.presentation.tomogram_tabs import TomogramRow, needs_attention, prepare_tomogram_tab, sorted_within_groups
 from tomography_session_browser.presentation.tomogram_versions import review_versions
 from tomography_session_browser.presentation.workspace import Scope, Workspace
 from tomography_session_browser.services.tomogram_links import TomogramLink
@@ -36,6 +36,14 @@ class TomogramSummaryInput:
     title: str = 'Tomograms'
     folder_projects: tuple[ProjectKey | None, ...] = ()
     tags_unsaved: bool = False
+    #: Volume id and the value the user stated, for the versions in these rows.
+    stated: tuple[tuple[str, float], ...] = ()
+
+
+def attention_keys(payload: TomogramSummaryInput) -> frozenset[str]:
+    stated = dict(payload.stated)
+    return frozenset(row.tomogram.id for row in payload.rows
+                     if needs_attention(TomogramRow(row.tomogram, row.group, row.link), lambda volume: stated.get(volume.id)))
 
 
 def summary_input(workspace: Workspace, scope: Scope, sort: str = 'Name',
@@ -63,7 +71,9 @@ def with_review(payload: TomogramSummaryInput, state: TomogramReviewState) -> To
     from dataclasses import replace
     sources = {source.id: source for source in payload.sources}
     return replace(payload, rows=tuple(replace(row, review=state.row(row.tomogram, sources[row.tomogram.source_id]))
-                                       for row in payload.rows))
+                                       for row in payload.rows),
+                   stated=tuple((volume.id, value) for row in payload.rows for volume in row.tomogram.volumes
+                                if (value := state.stated_for(volume)) is not None))
 
 
 def tomogram_dashboard_model(workspace: Workspace, selection: AllTomograms | FolderTomograms):

@@ -2,6 +2,7 @@
 from dataclasses import asdict, replace
 from concurrent.futures import Future
 import logging
+from weakref import WeakSet
 
 from PySide6.QtCore import QTimer, Qt
 from tomography_session_browser.ui.loading.tasks import TaskSignals
@@ -9,7 +10,8 @@ from tomography_session_browser.presentation.tomogram_state import TomogramViewS
 from tomography_session_browser.presentation.tomogram_versions import review_versions
 from tomography_session_browser.parsers.volume_header import fingerprint
 from tomography_session_browser.services.volume.review_repository import ReviewRepository
-from tomography_session_browser.services.volume.review_writer import ReviewWrite, ReviewWriter
+from tomography_session_browser.services.volume.pixel_sizes import KIND as PIXEL_SIZE_KIND
+from tomography_session_browser.services.volume.review_writer import ReviewBatch, ReviewBatchResult, ReviewWrite, ReviewWriteFailure, ReviewWriter
 from tomography_session_browser.presentation.tomogram_capture_history import CaptureEntry
 
 
@@ -22,7 +24,7 @@ class ReviewPersistence:
         self.signals.finished.connect(tab._review_written)
         self.signals.failed.connect(tab._review_write_failed)
         self.local_opened: dict[str, bool] = {}
-        self.watched: set[Future] = set()
+        self.watched: WeakSet[Future] = WeakSet()
         self.offered_state: TomogramViewState | None = None
         self.resume_reason = ""
         self.resume_label = "Resume saved view"
@@ -53,35 +55,35 @@ class ReviewPersistence:
         self.timer.start()
 
     def write(self, kind, identity, state, **extra) -> None:
+        request = ReviewWrite(self.repository, kind, identity, asdict(state), extra)
         try:
-            request = ReviewWrite(self.repository, kind, identity, asdict(state), extra)
             self.watch(self.writer.submit(request), request)
         except (OSError, ValueError) as exc:
-            logging.getLogger(__name__).warning("Could not save tomogram review state: %s", exc)
-            self.tab.status.message.setText("Review state could not be saved; the current view remains usable.")
+            self.failed(request, str(exc))
 
     def watch(self, future: Future, context) -> None:
         if future in self.watched:
             return
         self.watched.add(future)
         signals = self.signals
-        watched = self.watched
 
         def done(result):
             try:
-                result.result()
+                outcome = result.result()
             except Exception as exc:
-                signals.failed.emit(context, str(exc))
+                actual = exc.request if isinstance(context, ReviewWrite) and isinstance(exc, ReviewWriteFailure) else context
+                signals.failed.emit(actual, str(exc))
             else:
-                signals.finished.emit(context, None)
-            finally:
-                watched.discard(result)
+                signals.finished.emit(context, outcome)
 
         future.add_done_callback(done)
 
-    def finished(self, context, _result) -> None:
+    def finished(self, context, result) -> None:
         if isinstance(context, CaptureEntry):
             self.tab.captures.forgotten(context)
+        elif isinstance(context, ReviewBatch) and isinstance(result, ReviewBatchResult) and result.failed:
+            failed = set(result.failed)
+            self.tab.pixel_sizes.not_saved(tuple(write for write in context.writes if write.identity in failed))
 
     def failed(self, context, message: str) -> None:
         if isinstance(context, CaptureEntry):
@@ -89,16 +91,22 @@ class ReviewPersistence:
             detail = f"Could not remove capture history: {message}"
             self.tab.status.message.setText(detail)
             self.tab.history.removal_failed(context.id, detail)
+        elif isinstance(context, ReviewBatch) or (isinstance(context, ReviewWrite) and context.kind == PIXEL_SIZE_KIND):
+            logging.getLogger(__name__).warning("Could not save a pixel size: %s", message)
+            self.tab.pixel_sizes.not_saved(context.writes if isinstance(context, ReviewBatch) else (context,))
         else:
             logging.getLogger(__name__).warning("Could not save tomogram review state: %s", message)
             self.tab.status.message.setText("Review state could not be saved; the current view remains usable.")
 
     def save_view(self) -> None:
         self.timer.stop()
-        if self.offered_state is not None or self.history_loading or self.history_error:
+        if self.offered_state is not None or self.history_loading or self.history_error or not self.tab.pixel_sizes.loaded:
             return
         state = self.tab.capture_view_state()
-        if state.row_key and state.volume_id:
+        volume = self.tab.volume()
+        if state.row_key and state.volume_id and volume is not None:
+            sizes = self.tab.pixel_sizes
+            state = sizes.with_value(state, sizes.values.value_for(volume))
             self.write("view", state.volume_id, state, opened=state.row_key in self.tab.review_list.opened)
 
     def save_opened(self, key: str, opened: bool) -> None:
@@ -119,6 +127,7 @@ class ReviewPersistence:
         self.tab.history.load_scope()
 
     def apply_history(self, snapshot, revisions: dict[str, int], choice: int) -> None:
+        self.tab.pixel_sizes.arrived(snapshot.pixel_sizes)
         if choice == self.choice_revision:
             self.offered_state = snapshot.offered_state
             self.resume_ordering_notice = snapshot.ordering_notice

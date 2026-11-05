@@ -1,6 +1,21 @@
 # Change log
 
-This file lists the new functions of each release. It does not list error corrections.
+This file lists the fixes and new functions in each release.
+
+## 1.0.1 (6 November 2026)
+
+### Fixes
+
+- **Tomogram import:** Reconstruction folders can now be recognised from MRC volume headers without an IMOD reconstruction label. A valid volume record uses space group 1, includes every section in one volume and has no tilt-stack extended header. Files with their own acquisition MDOC or known stack names remain protected from this fallback. In acquisition folders, an unaccompanied MRC volume is skipped with a warning instead of being listed as a tilt series.
+- **Calibration and saved review state:** Pixel sizes supplied for a version survive a restart and remain separate from the value recorded in the file. Restoring a snapshot's calibration does not silently apply it to other views. Save failures and pending changes now keep accurate feedback, including CSV export results.
+- **Navigation and controls:** Search-tile highlights follow the verified exposure, including its camera field. Keyboard focus is handed back to the visible page when a side panel closes. The main toolbar can no longer be hidden through Qt's default context menu.
+- **Responsiveness:** Preview preparation avoids unnecessary image copies, and review-state writes remain bounded during repeated edits.
+
+### Tomograms tab
+
+- **One pixel size for several versions:** When two or more versions have no usable pixel size, **Apply to several…** lets you give them one value. You review the list first. The application uses your statement. It cannot check that the versions have the same voxel size. A file name that records a different value shows a warning. **Undo** removes the value from these versions. The application does not change the MRC files.
+- **Pixel sizes after a restart:** The application keeps each pixel size that you give and shows it when you select that version again. If the file changes, the application asks again.
+- **Pixel size warnings:** When you give a pixel size, the application stops the warning about the MRC header for that version, and **Needs attention** does not count it. **Undo**, **Use header** or a changed file shows the warning again. **Context** continues to show the value in the header.
 
 ## 1.0.0 (4 November 2026)
 

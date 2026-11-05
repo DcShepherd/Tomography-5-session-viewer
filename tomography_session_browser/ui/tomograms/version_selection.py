@@ -17,7 +17,7 @@ class VersionSelection:
         self.tab = tab
         self.request_version: Callable[[str, TomogramViewState], None] | None = None
 
-    def select_key(self, key: str, *, restore: TomogramViewState | None = None) -> None:
+    def select_key(self, key: str, *, restore: TomogramViewState | None = None, captured: bool = False) -> None:
         tab = self.tab
         playing = tab.playback.timer.isActive()
         tab.playback.stop()
@@ -39,6 +39,11 @@ class VersionSelection:
         state = tab.recipes.source_entry(state, restore is not None)
         state = replace(state, row_key=key, volume_id=volume.id if volume else None,
                         sort=tab.review_list.sort.currentText())
+        tab.pixel_sizes.restored = None
+        if (captured and restore is not None and volume is not None and restore.volume_id == volume.id
+                and restore.volume_signature == (volume.fingerprint.size, volume.fingerprint.mtime_ns)):
+            tab.pixel_sizes.restore(restore, volume)
+        state = tab.pixel_sizes.seeded(state, volume)
         tab.stage_transition.prepare(row.tomogram, volume, state, allow=not playing)
         tab.state = state
         tab.review_list.select(key)
@@ -79,6 +84,8 @@ class VersionSelection:
         if volume is None:
             return
         state = tab.view_memory.get((row.id, volume_id), TomogramViewState(row.id, volume_id))
+        # Before share_geometry, whose checks compare what each version now states.
+        state = tab.pixel_sizes.seeded(state, volume)
         geometry = share_geometry(row, previous, volume, tab.state, state)
         reason = '' if isinstance(geometry, SharedGeometry) else geometry.reason
         if isinstance(geometry, SharedGeometry):
@@ -88,10 +95,11 @@ class VersionSelection:
         if self.request_version is not None and not tab.payload.processing_only:
             self.request_version(volume.version, state)
             return
-        tab.state = state
+        tab.pixel_sizes.restored = None
+        tab.state = tab.pixel_sizes.seeded(state, volume)
         tab.show_volume()
         if reason:
-            tab.warning.setText(tab.warning.text() + " Independent view: " + reason)
+            tab.warning.setText(" ".join(filter(None, (tab.warning.text(), "Independent view: " + reason))))
             tab.warning.show()
 
     def show_notice(self) -> None:

@@ -379,7 +379,7 @@ class Captures:
             self.tab.status.message.setText(reason)
             return False
         self.tab.restore_view_state(replace(entry.state, capture_region=request.recipe.region),
-                                    ordering_notice=entry.ordering_notice)
+                                    ordering_notice=entry.ordering_notice, captured=True)
         self.tab.image_settings.export_format.setCurrentText(request.format)
         self.tab.image_settings.sampling.setCurrentIndex(1 if request.recipe.native_sampling else 0)
         self.tab.status.message.setText("Restoring captured source and view, including its list filters…"

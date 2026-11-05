@@ -260,6 +260,7 @@ QLabel#searchMapSummaryChip {{
 
 QTableView#dashboardSearchMapTable,
 QTableView#recordedMetricsTable,
+QTableView#bulkPixelTable,
 QListWidget#contactSheetCaptures {{
     background: {surface};
     alternate-background-color: {surface_alt};
@@ -272,8 +273,20 @@ QListWidget#contactSheetCaptures {{
 }}
 
 QTableView#dashboardSearchMapTable::item,
-QTableView#recordedMetricsTable::item {{
+QTableView#recordedMetricsTable::item,
+QTableView#bulkPixelTable::item {{
     padding: 5px 8px;
+}}
+
+/* Ticks choose the rows here, so there is no selection. Focus marks the tick the
+   keyboard reaches. Without these two rules the Windows 11 style fills one cell;
+   :hover does not match a disabled item, so :disabled needs its own rule. */
+QTableView#bulkPixelTable::item:hover,
+QTableView#bulkPixelTable::item:disabled {{
+    background: transparent;
+}}
+QTableView#bulkPixelTable::item:focus {{
+    background: {accent_soft};
 }}
 
 /* Capture widgets own their padding and size hints. Delegate padding would

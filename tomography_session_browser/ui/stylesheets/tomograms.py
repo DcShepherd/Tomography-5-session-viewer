@@ -31,7 +31,7 @@ QFrame#captureRow QToolButton:focus {{ border: 1px solid {accent}; }}
 QFrame#captureRecovery {{ background: {surface}; border-left: 2px solid {chart_amber}; }}
 QFrame#captureRecovery QPushButton {{ background: transparent; border: none; color: {link_text}; }}
 QFrame#captureRecovery QPushButton:focus {{ border: 1px solid {accent}; }}
-QComboBox#tomogramSort {{
+QComboBox#tomogramSort, QComboBox#tagCountSelector {{
     background: {surface};
     color: {text};
     border: 1px solid {border};
@@ -39,8 +39,8 @@ QComboBox#tomogramSort {{
     padding: 6px 10px;
     min-height: 24px;
 }}
-QComboBox#tomogramSort:focus {{ border-color: {accent}; }}
-QComboBox#tomogramSort::drop-down {{ border: none; background: transparent; width: 20px; }}
+QComboBox#tomogramSort:focus, QComboBox#tagCountSelector:focus {{ border-color: {accent}; }}
+QComboBox#tomogramSort::drop-down, QComboBox#tagCountSelector::drop-down {{ border: none; background: transparent; width: 20px; }}
 /* ---------------------------------------------------------------------
    The title and Linked strip share viewer styles. At compact widths the
    selector replaces the title; Snapshot lives in Image settings.
@@ -307,11 +307,80 @@ QFrame#tomogramPixelPrompt QPushButton#tomogramPromptPrimary {{
     color: {canvas_background};
     font-weight: 600;
 }}
+QFrame#tomogramPixelPrompt QPushButton#tomogramPromptOutline {{
+    border-color: {canvas_accent};
+}}
 QFrame#tomogramPixelPrompt QPushButton:focus,
 QFrame#tomogramPixelPrompt QPushButton#tomogramPromptSuggestion:focus,
+QFrame#tomogramPixelPrompt QPushButton#tomogramPromptOutline:focus,
 QFrame#tomogramPixelPrompt QPushButton#tomogramPromptPrimary:focus,
 QFrame#tomogramPixelPrompt QDoubleSpinBox:focus {{
     border: 1px solid {canvas_text_strong};
+}}
+/* After a bulk Apply: one canvas-chrome line with the value, the count and Undo. */
+QFrame#tomogramPixelApplied {{
+    background: {canvas_surface};
+    border-top: 1px solid {canvas_border};
+    border-bottom: 1px solid {canvas_border};
+}}
+QFrame#tomogramPixelApplied QLabel {{
+    color: {canvas_text};
+}}
+QFrame#tomogramPixelApplied QLabel[tone="warn"] {{
+    color: {canvas_chart_amber};
+}}
+QPushButton#tomogramAppliedUndo {{
+    background: transparent;
+    color: {canvas_accent};
+    border: 1px solid transparent;
+    border-radius: {radius_control}px;
+    padding: 2px 8px;
+}}
+QPushButton#tomogramAppliedUndo:hover {{
+    background: {canvas_surface_alt};
+}}
+QPushButton#tomogramAppliedUndo:focus {{
+    border-color: {canvas_text_strong};
+}}
+/* The review list of one pixel size for several versions. */
+QDialog#bulkPixelDialog {{
+    background: {panel};
+}}
+QDialog#bulkPixelDialog QFrame#inlineNotice {{
+    border-color: {chart_amber};
+}}
+QDialog#bulkPixelDialog QDoubleSpinBox {{
+    background: {surface};
+    border: 1px solid {border_strong};
+    border-radius: {radius_control}px;
+    color: {text_strong};
+    padding: 2px 6px;
+    selection-background-color: {accent_soft};
+    selection-color: {text_strong};
+}}
+QDialog#bulkPixelDialog QDoubleSpinBox:focus {{
+    border-color: {accent};
+}}
+QDialog#bulkPixelDialog QDoubleSpinBox:disabled {{
+    background: transparent;
+    border-color: {border};
+    color: {text_muted};
+}}
+QPushButton#bulkPixelOutline {{
+    background: transparent;
+    border: 1px solid {accent};
+    color: {text};
+}}
+QPushButton#bulkPixelOutline:hover {{
+    background: {surface_hi};
+}}
+QPushButton#bulkPixelOutline:focus {{
+    border: 2px solid {accent};
+}}
+QPushButton#bulkPixelOutline:disabled {{
+    background: transparent;
+    border-color: {border};
+    color: {text_muted};
 }}
 QToolButton#tomogramInsetClose {{
     background: {canvas_surface};

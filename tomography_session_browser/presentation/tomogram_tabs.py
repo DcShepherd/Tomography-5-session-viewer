@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from collections import Counter
+from collections.abc import Callable
 
 from tomography_session_browser.domain.recorded_metrics import RecordedMetric
-from tomography_session_browser.domain.tomograms import Tomogram, ProcessingSource
+from tomography_session_browser.domain.tomograms import Tomogram, ProcessingSource, Volume
+from tomography_session_browser.presentation.tomogram_calibration import tomogram_warnings
 from tomography_session_browser.presentation.tomogram_selection import AllTomograms, FolderTomograms, selection_note, versions_in
 from tomography_session_browser.parsers.path_utils import natural_key
 from tomography_session_browser.presentation.workspace import Scope, Workspace
@@ -41,6 +43,8 @@ class PreparedTomogramTab:
     sources: tuple[ProcessingSource, ...] = ()
     notice: str = ''
     processing_only: bool = False
+    #: Every loaded processing source, also outside this scope: one pixel size may reach them all.
+    loaded_sources: tuple[ProcessingSource, ...] = ()
 
 
 #: List sorts. A value sort uses one recorded definition and its usual unit, so
@@ -79,10 +83,10 @@ def sorted_within_groups(rows: list[TomogramRow], sort: str) -> list[TomogramRow
     return sorted(rows, key=key)
 
 
-def needs_attention(row: TomogramRow) -> bool:
+def needs_attention(row: TomogramRow, stated_for: Callable[[Volume], float | None] = lambda _volume: None) -> bool:
     """One predicate for both the Summary route and the review segment."""
-    return row.link.status == "ambiguous" or bool(row.link.warnings) or bool(row.tomogram.warnings) or any(
-        volume.warnings for volume in row.tomogram.volumes)
+    return row.link.status == "ambiguous" or bool(row.link.warnings) or bool(row.tomogram.warnings) or bool(
+        tomogram_warnings(row.tomogram, stated_for))
 
 
 def prepare_tomogram_tab(workspace: Workspace, scope: Scope) -> PreparedTomogramTab:
@@ -125,4 +129,4 @@ def prepare_tomogram_tab(workspace: Workspace, scope: Scope) -> PreparedTomogram
             explanations += (f'{len(all_items) - MAX_EMPTY_LINK_EXPLANATIONS} more tomograms. Open a processing folder to inspect their links.',)
     processing_only = isinstance(scope, ProjectTreeGroup) and scope.processing_source is not None
     return PreparedTomogramTab(tuple(rows), bool(workspace.processing_sources), choices, explanations,
-                               selection, tuple(sources), notice, processing_only)
+                               selection, tuple(sources), notice, processing_only, tuple(workspace.processing_sources))

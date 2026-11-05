@@ -140,14 +140,17 @@ class BindingIndex:
         validate_target(self.path, self.protected_roots)
         validate_target(lock, self.protected_roots)
         with exclusive(lock):
-            values = self.read()
+            saved = self.read()
+            values = dict(saved)
             for folder in folders:
                 if project_path is None:
                     values.pop(path_identity_key(folder), None)
                 else:
                     values[path_identity_key(folder)] = str(project_path)
-            atomic_write(self.path, json.dumps({"schema": 1, "bindings": values}, allow_nan=False).encode("utf-8"),
-                         protected_roots=self.protected_roots)
+            # Every project open rebinds its folder, and the answer rarely changes.
+            if values != saved or not self.path.exists():
+                atomic_write(self.path, json.dumps({"schema": 1, "bindings": values}, allow_nan=False).encode("utf-8"),
+                             protected_roots=self.protected_roots)
 
     def resolve(self, folder: Path, path: Path, loaded: LoadedProject) -> tuple[ProjectKey | None, str]:
         if self.read().get(path_identity_key(folder)) != str(path.resolve()):

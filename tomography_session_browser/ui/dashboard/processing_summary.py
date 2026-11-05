@@ -137,8 +137,9 @@ class ProcessingSummaryPage(QWidget):
                 label, row_keys=keys, scope_label=label))
 
     def update_review(self, payload: TomogramSummaryInput) -> None:
-        self.summary = replace(self.summary, input=payload, review=review_counts(row.review for row in payload.rows))
         self.outcome_card.update_review(payload)
+        self.summary = replace(self.summary, input=payload, review=self.outcome_card.summary.review,
+                               attention_keys=self.outcome_card.summary.attention_keys)
         self.tag_cards.update_payload(payload)
 
     def show_readout(self) -> None:

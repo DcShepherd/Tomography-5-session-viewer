@@ -84,6 +84,8 @@ class MrcSlicePreview:
     load_seconds: float = 0.0
     normalise_seconds: float = 0.0
     total_seconds: float = 0.0
+    #: The 8-bit pixels ``image`` wraps, for a caller that needs no PIL copy of them.
+    pixels: np.ndarray | None = None
 
 
 class MrcPreviewSource:
@@ -128,6 +130,7 @@ class MrcPreviewSource:
             load_seconds=load_seconds,
             normalise_seconds=normalise_seconds,
             total_seconds=total_seconds,
+            pixels=contiguous,
         )
         LOGGER.debug(
             "MRC preview path=%s kind=%s dims=%s mapc/mapr/maps=%s/%s/%s frame=%s raw_frame_shape=%s "
@@ -419,8 +422,7 @@ def _display_window(frame: np.ndarray) -> tuple[float, float] | None:
     above it.
     """
 
-    numeric = np.asarray(frame)
-    finite = numeric[np.isfinite(numeric)]
+    finite = _finite_values(np.asarray(frame))
     if finite.size == 0:
         return None
     if finite.size > 1_000_000:
@@ -442,9 +444,21 @@ def _display_window(frame: np.ndarray) -> tuple[float, float] | None:
     return float(low), float(high)
 
 
+def _finite_values(numeric: np.ndarray) -> np.ndarray:
+    """A frame's finite values in row order, read only and copied only if some are not."""
+
+    if numeric.dtype.kind in "iu":
+        return numeric.ravel()
+    mask = np.isfinite(numeric)
+    return numeric.ravel() if mask.all() else numeric[mask]
+
+
 def _apply_display_window(frame: np.ndarray, low: float, high: float) -> np.ndarray:
-    scaled = (np.asarray(frame).astype(np.float32, copy=False) - low) * (255.0 / (high - low))
-    return np.ascontiguousarray(np.clip(scaled, 0, 255).astype(np.uint8))
+    # In place from the subtraction on: each further array is a full image of new memory.
+    scaled = np.asarray(frame).astype(np.float32, copy=False) - low
+    scaled *= 255.0 / (high - low)
+    np.clip(scaled, 0, 255, out=scaled)
+    return np.ascontiguousarray(scaled.astype(np.uint8))
 
 
 _DISPLAY_WINDOW_CACHE: dict[tuple, tuple[float, float] | None] = {}

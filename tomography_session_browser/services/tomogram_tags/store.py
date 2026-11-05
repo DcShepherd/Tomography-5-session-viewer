@@ -75,6 +75,14 @@ class TagProjectStore:
         # decode on every save. An outside change still refuses before this cache.
         self.validated_header: tuple[str, str, int] | None = None
 
+    def last_saved(self) -> datetime | None:
+        """When the project file last changed on disk, in local time, for display."""
+
+        try:
+            return datetime.fromtimestamp(self.path.stat().st_mtime)
+        except OSError:
+            return None
+
     def validate_paths(self) -> None:
         for path in (self.path, self.backup):
             validate_target(path, self.protected_roots)

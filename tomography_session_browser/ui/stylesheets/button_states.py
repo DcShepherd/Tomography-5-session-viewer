@@ -7,7 +7,7 @@ _BUTTONS = (
     "QPushButton", "QToolButton", "QToolBar QToolButton",
     *("QPushButton#" + name for name in (
         "primaryButton", "tomogramQuiet", "secondaryAction", "contextClearFilter", "dashboardFilterButton",
-        "movieStepButton", "movieOutlineButton", "movieHoldHere")),
+        "movieStepButton", "movieOutlineButton", "movieHoldHere", "bulkPixelOutline")),
     *("QToolButton#" + name for name in (
         "segmentButton", "inlineLink", "tableLink", "sectionHeader", "emptyStateCopy",
         "tomogramInsetClose", "tomogramKeyHint", "tomogramFeedbackLink", "dashboardFilterButton",

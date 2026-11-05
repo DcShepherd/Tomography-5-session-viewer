@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from PySide6.QtCore import QRect, QSize, Qt, QSignalBlocker
 from PySide6.QtGui import QAction, QColor
-from PySide6.QtWidgets import QDockWidget, QMainWindow, QTabWidget, QToolBar, QToolButton, QWidget
+from PySide6.QtWidgets import QApplication, QDockWidget, QMainWindow, QTabWidget, QToolBar, QToolButton, QWidget
 import shiboken6
 from tomography_session_browser.presentation.context_stack import ENTITY_DISPLAY_LABELS
 from tomography_session_browser.services.settings_service import Settings
@@ -197,6 +197,7 @@ class ShellChrome:
                 slide.dismiss()
             except RuntimeError:
                 pass
+        self.hand_focus_to_page(self.context_dock)
         self.context_dock.hide()
         self.drawer.hold(self.context_shell)
         self.place_context_drawer()
@@ -274,6 +275,7 @@ class ShellChrome:
                 slide = self.panel_slides.pop(self.project_dock, None)
                 if slide is not None and shiboken6.isValid(slide):
                     slide.dismiss()
+                self.hand_focus_to_page(self.project_dock)
                 self.project_dock.hide()
                 self.project_drawer.hold(self.project_shell)
                 self.show_project_action_checked(False)
@@ -658,7 +660,10 @@ class ShellChrome:
 
     def toggle_context_panel(self) -> None:
         visible = self.actions.context.isChecked()
-        self.context_shell.context.setVisible(visible or self.image_panel is None)
+        context_shown = visible or self.image_panel is None
+        if not context_shown:
+            self.hand_focus_to_page(self.context_shell.context)
+        self.context_shell.context.setVisible(context_shown)
         if self.drawer_mode:
             # A visible Image panel shares this drawer; Context can close independently.
             self.open_context_drawer(visible or self.image_panel is not None)
@@ -667,6 +672,30 @@ class ShellChrome:
         if not self.transient_focus:
             self.settings.context_panel_visible = visible
             self.save_settings(self.settings)
+
+    def hand_focus_to_page(self, leaving: QWidget) -> None:
+        """Before ``leaving`` hides, move any focus it holds to the current page.
+
+        Left to Qt, focus goes to the next widget in the Tab order, which can
+        be another panel: the page is where the reviewer's keys belong.
+        """
+
+        focus = QApplication.focusWidget()
+        if focus is not None and leaving.isAncestorOf(focus):
+            self.give_focus_to_page()
+
+    def give_focus_to_page(self) -> None:
+        """Focus what the current page last focused, or else its content.
+
+        The content shows no focus border, so this adds no outline of its own.
+        """
+
+        page = self.tabs.currentWidget()
+        if page is None:
+            return
+        last = page.focusWidget()
+        target = last if last is not None and last.isVisible() and last.isEnabled() else page
+        target.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def set_side_panel_visible(self, dock: QDockWidget, visible: bool, *, animate: bool = True) -> None:
         """Show or hide a side panel, sliding it from its own edge (plan F5.2).
@@ -677,6 +706,8 @@ class ShellChrome:
         dock's real width re-laid out the whole window on every frame.
         """
 
+        if not visible:
+            self.hand_focus_to_page(dock)
         previous = self.panel_slides.pop(dock, None)
         if previous is not None and (not shiboken6.isValid(previous) or previous.isHidden()):
             previous = None  # it had already settled

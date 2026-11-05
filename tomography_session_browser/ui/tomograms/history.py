@@ -193,6 +193,7 @@ class CaptureHistory:
             return
         self.tab.persistence.history_loading = False
         self.tab.persistence.history_error = message or "History is unavailable"
+        self.tab.pixel_sizes.read_failed()
         self.fail_counts(job, message)
         self.tab.persistence.resume_label = "History unavailable"
         self.tab.persistence.resume_reason = self.tab.persistence.history_error

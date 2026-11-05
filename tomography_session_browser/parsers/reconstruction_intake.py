@@ -1,4 +1,4 @@
-"""One-level reconstruction discovery, proved by the supplied IMOD header label."""
+"""One-level reconstruction discovery, proved by what the header records."""
 from pathlib import Path
 import struct
 
@@ -8,9 +8,10 @@ from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogr
 from tomography_session_browser.parsers.acquisition_evidence import reconstruction_evidence
 from tomography_session_browser.parsers.path_utils import natural_key
 from tomography_session_browser.parsers.recorded_metrics import read_imod_processing_evidence
-from tomography_session_browser.parsers.volume_header import fingerprint, is_cloud_placeholder, read_volume
+from tomography_session_browser.parsers.volume_header import fingerprint, is_cloud_placeholder, read_volume, records_volume
 
 SUFFIXES = ('.mrc', '.rec', '.map')
+ACQUISITION_FOLDERS = ('Batch', 'SearchMaps')
 
 
 def discover_files(root: Path) -> tuple[tuple[Path, ...], tuple[str, ...]]:
@@ -27,8 +28,22 @@ def discover_files(root: Path) -> tuple[tuple[Path, ...], tuple[str, ...]]:
     return tuple(path for path in paths if path.resolve().is_relative_to(root.resolve())), tuple(issues)
 
 
-def is_reconstruction(path: Path) -> bool:
-    """Header labels are proof; a filename or a 3-D shape alone is not."""
+def has_own_mdoc(path: Path) -> bool:
+    """An MDOC named for this exact file records it as the acquired stack."""
+    return path.with_name(path.name + '.mdoc').exists() or path.with_suffix('.mdoc').exists()
+
+
+def accepts_space_group(root: Path) -> bool:
+    """A volume left in a Tomography 5 folder does not make the folder processing output."""
+    return not any((root / name).exists() for name in ACQUISITION_FOLDERS)
+
+
+def is_reconstruction(path: Path, *, space_group: bool = True) -> bool:
+    """What the header records is proof; a filename or a 3-D shape alone is not.
+
+    The record is IMOD's label or, when ``space_group`` allows it, the MRC
+    format's own space group, because other producers do not write that label.
+    """
     if is_cloud_placeholder(path):
         return False
     if path.stem.casefold().endswith(('_ali', '_preali', '_st', '_aligned', '_fractions', '_projections')):
@@ -41,18 +56,20 @@ def is_reconstruction(path: Path) -> bool:
     endian = '>' if header[212:214] == b'\x11\x11' else '<'
     count = struct.unpack_from(endian + 'i', header, 220)[0]
     extended = struct.unpack_from(endian + 'i', header, 92)[0]
-    if not 1 <= count <= 10 or extended != 0:
+    if extended != 0:
         return False
-    labels = header[224:224 + 80 * count].decode('ascii', errors='replace')
-    return 'TILT: Tomographic reconstruction' in labels
+    if 1 <= count <= 10 and 'TILT: Tomographic reconstruction' in header[224:224 + 80 * count].decode('ascii', errors='replace'):
+        return True
+    return space_group and records_volume(header) and not has_own_mdoc(path)
 
 
 def has_reconstructions(root: Path) -> bool:
     try:
         paths, _ = discover_files(root)
+        space_group = accepts_space_group(root)
         for path in paths:
             try:
-                if is_reconstruction(path):
+                if is_reconstruction(path, space_group=space_group):
                     return True
             except OSError:
                 continue
@@ -67,10 +84,11 @@ def load_reconstructions(root: Path) -> ProcessingSource:
     paths, discovery_issues = discover_files(root)
     items, issues = [], list(discovery_issues)
     proofs = {}
+    space_group = accepts_space_group(root)
     for path in paths:
         try:
             stamp = fingerprint(path)
-            if is_reconstruction(path) and fingerprint(path) == stamp:
+            if is_reconstruction(path, space_group=space_group) and fingerprint(path) == stamp:
                 proofs[path] = stamp
         except OSError as exc:
             issues.append(f'{path.relative_to(root)}: {exc}')

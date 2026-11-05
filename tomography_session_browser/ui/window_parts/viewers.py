@@ -511,8 +511,10 @@ class ViewerCoordinator(QObject):
         filter_cleared = False
         try:
             if label is not None:
-                self.ui.tabs.setCurrentIndex(TAB_LABELS.index(label))
-                filter_cleared = self.ui.viewer_tabs[label].select_object(value)
+                tab = self.ui.viewer_tabs[label]
+                with tab.parts.tab_selection.arriving(value):
+                    self.ui.tabs.setCurrentIndex(TAB_LABELS.index(label))
+                filter_cleared = tab.select_object(value)
         finally:
             self.state.review.suppress_viewer_context = previous
         if label is None:

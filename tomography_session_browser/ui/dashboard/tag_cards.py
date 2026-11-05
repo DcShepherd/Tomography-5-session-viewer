@@ -1,12 +1,28 @@
 """Content-based tag cards on the existing processing Summary page."""
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QComboBox, QLabel, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QSizePolicy
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import (QComboBox, QHeaderView, QLabel, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
+                               QVBoxLayout, QWidget, QSizePolicy)
 
-from tomography_session_browser.presentation.dashboard.tag_summary import tag_summary
+from tomography_session_browser.domain.display_names import count_phrase
+from tomography_session_browser.presentation.dashboard.tag_summary import number_text, tag_summary
 from tomography_session_browser.presentation.dashboard.index_chart import chart_model
 from tomography_session_browser.ui.dashboard.common import CardBox, card_header, card_layout
+from tomography_session_browser.ui.theme import TIER_SUPPORTING, apply_tier, current_palette
 from tomography_session_browser.ui.widgets.chart_selection import ChartSelection
 from tomography_session_browser.ui.widgets.index_chart import IndexChart
+from tomography_session_browser.ui.widgets.link_button import link_button
+
+NUMBER_ALIGNMENT = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+TABLE_HELP = "Tomograms: tagged. Counted: with a number. Zero: looked, none seen. Click a tag to list its tomograms."
+
+
+class TagNameDelegate(QStyledItemDelegate):
+    """Tag names read as the links they are, in the theme painted now."""
+
+    def initStyleOption(self, option, index) -> None:  # noqa: N802 - Qt API
+        super().initStyleOption(option, index)
+        option.palette.setColor(QPalette.ColorRole.Text, QColor(current_palette().link_text))
 
 
 class TagCards(QWidget):
@@ -39,12 +55,16 @@ class TagCards(QWidget):
         self.content = content
         keys, names, rows, folders = content
         summary = tag_summary(keys, rows, folder_projects=folders)
-        self.status_text = (f"Manual tag counts · Counting complete in {summary.completed} of {len(summary.row_keys)} tomograms"
-                            if summary.project else "Manual tag counts")
+        self.status_text = (f"Your manual counts · {count_phrase(len(summary.rows), 'tag')} · "
+                            f"counting complete in {summary.completed} of {len(summary.row_keys)} tomograms"
+                            if summary.project else "Your manual counts")
         self.status.setText(self.status_text + (" · not saved yet" if payload.tags_unsaved else ""))
         names_by_key = dict(zip(keys, names, strict=True))
         plot_keys = summary.row_keys
         plot_names = tuple(names_by_key[key] for key in plot_keys)
+        # Out of the old card's header before that card goes.
+        self.layout_.insertWidget(0, self.status)
+        self.status.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         while self.body_layout.count():
             item = self.body_layout.takeAt(0)
             if item.widget():
@@ -61,42 +81,62 @@ class TagCards(QWidget):
         table_card = CardBox(self.body)
         body = card_layout(table_card)
         header, _ = card_header("Tags and counts")
+        self.status.setAlignment(NUMBER_ALIGNMENT)
+        # The status takes the row's spare width from the header's own spacer.
+        header.setStretch(1, 0)
+        header.addWidget(self.status, 1)
         body.addLayout(header)
+        help_line = apply_tier(QLabel(TABLE_HELP, table_card), TIER_SUPPORTING)
+        help_line.setWordWrap(True)
+        body.addWidget(help_line)
         self.table = QTableWidget(0, 6, table_card)
         self.table.setHorizontalHeaderLabels(("Tag", "Tomograms", "Counted", "Zero", "Total", "Median, counted"))
         self.table.setAccessibleName("Manual tags and counts")
+        self.table.verticalHeader().hide()
+        columns = self.table.horizontalHeader()
+        columns.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in range(1, self.table.columnCount()):
+            columns.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+            self.table.horizontalHeaderItem(column).setTextAlignment(NUMBER_ALIGNMENT)
+        self.table.horizontalHeaderItem(0).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.table.setItemDelegateForColumn(0, TagNameDelegate(self.table))
         self.summary_rows = summary.rows
         def fill_table(all_rows=False):
             shown = self.summary_rows if all_rows else self.summary_rows[:8]
             self.table.setRowCount(len(shown))
             for index, row in enumerate(shown):
-                values = (row.name, row.tomograms, row.counted, row.zero if row.counted else None, row.total, row.median)
+                values = (row.name, str(row.tomograms), str(row.counted), number_text(row.zero if row.counted else None),
+                          number_text(row.total), number_text(row.median))
                 for column, value in enumerate(values):
-                    item = QTableWidgetItem("–" if value is None else str(value))
+                    item = QTableWidgetItem(value)
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    if column:
+                        item.setTextAlignment(NUMBER_ALIGNMENT)
                     self.table.setItem(index, column, item)
-            self.table.resizeColumnsToContents()
-            self.table.setMinimumHeight(self.table.horizontalHeader().sizeHint().height() +
-                sum(self.table.rowHeight(i) for i in range(min(8, len(shown)))) + 2 * self.table.frameWidth())
+            self.table.setMinimumHeight(columns.sizeHint().height() +
+                sum(self.table.rowHeight(i) for i in range(len(shown))) + 2 * self.table.frameWidth())
         fill_table()
         self.table.cellClicked.connect(lambda row, col: self.page.route(frozenset(self.summary_rows[row].row_keys), "Summary · " + self.summary_rows[row].name))
         body.addWidget(self.table)
         if len(summary.rows) > 8:
-            more = QPushButton(f"Show all {len(summary.rows)} tags", table_card)
+            more = link_button(f"Show all {len(summary.rows)} tags", table_card)
             more.clicked.connect(lambda: (fill_table(True), more.hide()))
-            body.addWidget(more)
+            body.addWidget(more, alignment=Qt.AlignmentFlag.AlignLeft)
         if summary.notice:
             body.addWidget(QLabel(summary.notice, table_card))
         self.body_layout.addWidget(table_card)
         chart_card = CardBox(self.body)
         chart_body = card_layout(chart_card)
         selector = QComboBox(chart_card)
+        selector.setObjectName("tagCountSelector")
         selector.setAccessibleName("Tag for count chart")
         for row in summary.rows:
             selector.addItem(row.name, row.tag_id)
         if self.selected_tag:
             selector.setCurrentIndex(max(0, selector.findData(self.selected_tag)))
-        chart_body.addWidget(selector)
+        chart_header, _ = card_header("Count per tomogram")
+        chart_header.insertWidget(1, selector)
+        chart_body.addLayout(chart_header)
         hover = QLabel("Point to a tomogram to see its name and count", chart_card)
         hover.setTextFormat(Qt.TextFormat.PlainText)
         hover.setWordWrap(True)

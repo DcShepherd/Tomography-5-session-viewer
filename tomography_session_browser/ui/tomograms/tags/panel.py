@@ -302,9 +302,12 @@ class TagsPanel(QFrame):
             camera.setText(str(total) if total else "")
             camera.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon if total
                                       else Qt.ToolButtonStyle.ToolButtonIconOnly)
-            camera.setToolTip("Show and link captures for this tag")
+            camera.setToolTip("Show the captures linked to this tag" if total else "Link captures to this tag")
             camera.setAccessibleName(f"Captures for {catalogue[assignment.tag_id].name}")
-            camera.clicked.connect(lambda _, i=assignment.tag_id: self.owner.capture_menu(i))
+            camera.clicked.connect(lambda _, i=assignment.tag_id, b=camera, n=total: self.owner.camera_clicked(i, b, n))
+            widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            widget.customContextMenuRequested.connect(
+                lambda point, i=assignment.tag_id, w=widget, n=total: self.owner.capture_menu(i, w.mapToGlobal(point), n))
             remove = QToolButton(widget)
             remove.setText("×")
             remove.setAutoRaise(True)
@@ -412,6 +415,7 @@ class TagsPanel(QFrame):
 
 
 LOCAL_KEYS = (
+    LocalBinding('tag-row.menu', 'Tag row', InteractionKind.MOUSE, ('Right-click',), 'Link captures to the tag, show its linked captures or remove it from this tomogram'),
     LocalBinding('note.cancel', 'Tomogram note', InteractionKind.KEYBOARD, ('Esc',), 'Restore the note from when editing began, then close the editor'),
     LocalBinding('note.finish', 'Tomogram note', InteractionKind.KEYBOARD, ('Ctrl+Enter', 'Ctrl+Return'), 'Close the note editor and return to tag entry'),
 )

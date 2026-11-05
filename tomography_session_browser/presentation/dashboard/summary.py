@@ -113,7 +113,8 @@ def processing_summary(source: ProcessingSource, workspace: Workspace, sort: str
 
 def summary_from_input(payload: TomogramSummaryInput) -> ProcessingSummary:
     from collections import Counter
-    from tomography_session_browser.presentation.tomogram_tabs import TomogramRow, needs_attention
+    from tomography_session_browser.presentation.dashboard.tomogram_summary_input import attention_keys
+    from tomography_session_browser.presentation.tomogram_tabs import TomogramRow
     from tomography_session_browser.services.tomogram_links import link_step_counts
     rows = tuple(TomogramRow(row.tomogram, row.group, row.link) for row in payload.rows)
     items = tuple(row.tomogram for row in rows)
@@ -125,7 +126,7 @@ def summary_from_input(payload: TomogramSummaryInput) -> ProcessingSummary:
     key = ProcessingChartKey(payload.key, tuple(item.id for item in items), payload.sort, sources, payload.version, tuple(row.link for row in rows))
     return ProcessingSummary(
         input=payload, tomogram_count=len(rows), row_keys=frozenset(item.id for item in items),
-        attention_keys=frozenset(row.tomogram.id for row in rows if needs_attention(row)),
+        attention_keys=attention_keys(payload),
         usable_count=sum(any(volume.grid is not None for volume in item.volumes) for item in volume_items),
         version_count=sum(versions.values()), warnings=tuple(warning for source in sources for warning in source.warnings),
         metric_rows=tuple(metric_row(item) for item in items), pipeline=', '.join(dict.fromkeys(source.pipeline for source in sources)),

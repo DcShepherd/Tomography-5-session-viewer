@@ -8,6 +8,11 @@ from tomography_session_browser.domain.models import MrcMetadata
 from tomography_session_browser.domain.recorded_metrics import ProcessingEvidence
 from tomography_session_browser.domain.acquisition import AcquisitionEvidence
 
+UNRESOLVED_SPACING_WARNING = "Voxel spacing is unresolved. Voxel navigation is available; no physical scale bar is shown."
+SUSPICIOUS_SPACING_WARNING = "Header spacing includes 1 Å. Confirm calibration in Image settings before using a scale bar."
+#: What a header without a usable spacing asks for. A value the user states answers both.
+CALIBRATION_WARNINGS = frozenset((UNRESOLVED_SPACING_WARNING, SUSPICIOUS_SPACING_WARNING))
+
 
 @dataclass(frozen=True, slots=True)
 class VolumeFingerprint:

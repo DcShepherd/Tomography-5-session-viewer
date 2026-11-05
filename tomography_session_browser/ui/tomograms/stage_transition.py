@@ -49,7 +49,14 @@ class StageTransition(QObject):
         self.focus: FocusTransition | None = None
         self._changing_layout = False
         self.content.ended.connect(self._ended)
+
+    def attach(self) -> None:
+        """Watch keys while the tab shows: on the application, this runs on every event."""
         QApplication.instance().installEventFilter(self)
+
+    def detach(self) -> None:
+        QApplication.instance().removeEventFilter(self)
+        self.auto_repeat = False  # Its key release may now go unseen.
 
     def _ended(self, reason: str) -> None:
         if self.focus is not None and reason != "finished":
@@ -188,7 +195,7 @@ class StageTransition(QObject):
 
     def dispose(self) -> None:
         self.content.end("closed")
-        QApplication.instance().removeEventFilter(self)
+        self.detach()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         kind = event.type()

@@ -34,6 +34,12 @@ _PROFILE_CASES = count(1)
 # tests that exercise reduced motion set the variable or app property.
 os.environ["TOMOAPP_REDUCE_MOTION"] = "0"
 
+# Many modules set this at import, so a full run is offscreen from collection on.
+# Without a default here, a module that does not set it runs natively when run
+# alone, and its result then differs from the suite's. Native runs stay available:
+# set the variable (for example QT_QPA_PLATFORM=windows) before starting pytest.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 
 @pytest.fixture(autouse=True)
 def _isolate_profile_between_tests():
@@ -94,6 +100,16 @@ def _theme_state() -> tuple:
 
 
 def _restore_theme_state(state: tuple) -> None:
+    """Put back what ``_theme_state`` recorded.
+
+    A ``None`` means nothing existed to record: the test started Qt or first
+    imported the module. Its themed values must still be undone, or every later
+    test in the process inherits them (a pytest-xdist worker can begin with such
+    a test). So restore the pristine values instead: the platform's general
+    font, which is a new application's font, and the dark palette and icon
+    colour that ``ui.theme`` and ``ui.icons`` set at import.
+    """
+
     sheet, font, palette, colour = state
     widgets = sys.modules.get("PySide6.QtWidgets")
     app = widgets.QApplication.instance() if widgets else None
@@ -101,22 +117,45 @@ def _restore_theme_state(state: tuple) -> None:
         if app.styleSheet() != sheet:
             app.setStyleSheet(sheet)
         if font is None:
-            # A test may create the worker's first QApplication and theme it.
-            # Restore its platform default, rather than seeding later tests
-            # with that first test's font after its stylesheet has been cleared.
             from PySide6.QtGui import QFontDatabase
+
             font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
         if app.font() != font:
             app.setFont(font)
-    if palette is not None:
-        sys.modules[_THEME_MODULE]._active_palette = palette
-    if colour is not None:
-        sys.modules[_ICONS_MODULE]._DEFAULT_COLOR = colour
+    theme, icons = sys.modules.get(_THEME_MODULE), sys.modules.get(_ICONS_MODULE)
+    if theme is not None or icons is not None:
+        from tomography_session_browser.presentation.design_tokens import DARK_PALETTE
+
+        if theme is not None:
+            theme._active_palette = palette if palette is not None else DARK_PALETTE
+        if icons is not None:
+            icons._DEFAULT_COLOR = colour if colour is not None else DARK_PALETTE.icon
+
+
+def _clear_held_keys() -> None:
+    """Forget a modifier key that a simulated input left recorded as held.
+
+    ``QTest`` input updates Qt's record of the held keys, and a click or key press
+    with a modifier does not always clear it. A view in ``ExtendedSelection`` reads
+    that record, and with Shift held its ``selectRow`` selects nothing, so a test's
+    result depended on which test ran before it in the process.
+    """
+
+    widgets = sys.modules.get("PySide6.QtWidgets")
+    app = widgets.QApplication.instance() if widgets else None
+    if app is None:
+        return
+    from PySide6.QtCore import Qt
+
+    if app.keyboardModifiers() != Qt.KeyboardModifier.NoModifier:
+        from PySide6.QtTest import QTest
+
+        QTest.keyRelease(widgets.QWidget(), Qt.Key.Key_Shift)
 
 
 @pytest.fixture(autouse=True)
 def _isolate_qt_state_between_tests(_isolate_profile_between_tests):
-    """Delete the windows a test left behind and undo its theme.
+    """Delete the windows a test left behind, undo its theme and release its keys.
 
     Most GUI tests build a window or widget and let it go out of scope, but Qt
     owns a parentless widget until it is deleted, so every one stayed alive:
@@ -141,12 +180,22 @@ def _isolate_qt_state_between_tests(_isolate_profile_between_tests):
     theme_before = _theme_state()
     yield
     left = [window for address, window in _window_addresses().items() if address not in before]
-    if left:
-        from PySide6.QtCore import QCoreApplication, QEvent, QThreadPool
+    try:
+        if left:
+            from PySide6.QtCore import QCoreApplication, QEvent, QThreadPool
+            from shiboken6 import Shiboken
 
-        QThreadPool.globalInstance().waitForDone(10_000)
-        QCoreApplication.processEvents()
-        for window in left:
-            window.deleteLater()
-            QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
-    _restore_theme_state(theme_before)
+            pool = QThreadPool.globalInstance()
+            if not pool.waitForDone(10_000):
+                pytest.fail("The Qt worker pool did not drain within 10 seconds. "
+                            "Test windows were kept alive for the outstanding work.")
+            QCoreApplication.processEvents()
+            for window in left:
+                # The turn above can retire a window itself, such as a pop-up that
+                # deletes itself on close.
+                if Shiboken.isValid(window):
+                    window.deleteLater()
+                    QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+    finally:
+        _restore_theme_state(theme_before)
+        _clear_held_keys()

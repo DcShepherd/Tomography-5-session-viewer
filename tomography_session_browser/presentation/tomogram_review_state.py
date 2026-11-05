@@ -8,7 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from collections.abc import Iterable, Mapping
 
-from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogram
+from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogram, Volume
+from tomography_session_browser.services.volume.pixel_sizes import Signature, signature_of
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +30,15 @@ class ProcessingReviewCounts:
 class TomogramReviewState:
     def __init__(self) -> None:
         self._rows: dict[str, tuple[ProcessingSource, RowReview]] = {}
+        self._stated: Mapping[str, tuple[Signature, float]] = {}
+
+    def set_stated(self, stated: Mapping[str, tuple[Signature, float]]) -> None:
+        """The Summary is built away from the tab that owns these values, so it reads this copy."""
+        self._stated = stated
+
+    def stated_for(self, volume: Volume) -> float | None:
+        saved = self._stated.get(volume.id)
+        return saved[1] if saved is not None and saved[0] == signature_of(volume) else None
 
     def retain_sources(self, sources: Iterable[ProcessingSource]) -> None:
         """Drop removed identities without confusing replacement with a read."""
