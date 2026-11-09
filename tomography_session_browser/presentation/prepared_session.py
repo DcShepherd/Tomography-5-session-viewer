@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from tomography_session_browser.presentation.dashboard.models import DashboardModel
 from tomography_session_browser.presentation.tomogram_tabs import PreparedTomogramTab, prepare_tomogram_tab
 
 from tomography_session_browser.diagnostics.profiling import NULL_PROFILE, LoadingProfiler
 from tomography_session_browser.presentation.dashboard.dashboard import session_dashboard_model
 from tomography_session_browser.presentation.dashboard.scope_value import dashboard_scope_value, timeline_for_scope_value
-from tomography_session_browser.presentation.viewer_tabs import PreparedViewerTab, PreparedViewerTabs, prepare_viewer_tabs
+from tomography_session_browser.presentation.viewer_tabs import PreparedViewerTabs, prepare_viewer_tabs
+from tomography_session_browser.presentation.scope_identity import prepared_tabs_key
 from tomography_session_browser.presentation.workspace import Scope, Workspace
 from tomography_session_browser.presentation.tomogram_selection import acquisition_scope
 from tomography_session_browser.services.timeline_service import SessionTimeline
@@ -19,8 +19,7 @@ from tomography_session_browser.services.timeline_service import SessionTimeline
 class PreparedSessionUi:
     dashboard_model: DashboardModel | None
     timeline: SessionTimeline | None
-    viewer_tabs: dict[str, PreparedViewerTab]
-    availability: dict[Path, bool] = field(default_factory=dict)
+    viewer_tabs: PreparedViewerTabs
     tomograms: PreparedTomogramTab = field(default_factory=PreparedTomogramTab)
 
 
@@ -44,14 +43,15 @@ def prepare_session_ui_payload(
             timeline = timeline_for_scope_value(scope_value)
         else:
             dashboard_model, timeline = cached_dashboard
-    if cached_viewer_tabs is not None and cached_viewer_tabs.files_unchanged():
+    # A cached entry serves only the scope it was prepared for, with the same files.
+    if (cached_viewer_tabs is not None and cached_viewer_tabs.key == prepared_tabs_key(scope)
+            and cached_viewer_tabs.files_unchanged()):
         prepared_tabs = cached_viewer_tabs
     else:
         prepared_tabs = prepare_viewer_tabs(workspace, scope, profile=profile)
     return PreparedSessionUi(
         dashboard_model=dashboard_model,
         timeline=timeline,
-        viewer_tabs=prepared_tabs.tabs,
-        availability=prepared_tabs.availability,
+        viewer_tabs=prepared_tabs,
         tomograms=prepare_tomogram_tab(workspace, review_scope),
     )

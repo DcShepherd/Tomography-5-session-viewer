@@ -11,11 +11,27 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Collection, Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tomography_session_browser.domain.identity import path_identity_key
+
 LOGGER = logging.getLogger(__name__)
+
+
+def _recent_history(value: Any) -> list[str]:
+    """The stored recent folders that are usable, exactly as stored.
+
+    Checks shape only. Two spellings of one folder both stay: readers ask
+    ``recent_session_paths`` for distinct folders, and a save must not lose an
+    entry that a case-sensitive filesystem may hold as a separate folder.
+    """
+
+    if not isinstance(value, list):
+        return []
+    return [path for path in value if isinstance(path, str) and path.strip()]
 
 
 @dataclass
@@ -40,6 +56,10 @@ class Settings:
     window_geometry: str = ""
     # The report dialog's "exposure thumbnails" option, as last chosen.
     report_exposure_thumbnails: bool = False
+    # The report dialog's "linked tomograms" and "central slices" options, as
+    # last chosen explicitly. Off the first time.
+    report_tomograms: bool = False
+    report_tomogram_slices: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Settings":
@@ -55,10 +75,12 @@ class Settings:
             project_panel_visible=bool(data.get("project_panel_visible", defaults.project_panel_visible)),
             context_panel_visible=bool(data.get("context_panel_visible", defaults.context_panel_visible)),
             last_tab=str(data.get("last_tab", defaults.last_tab)) or defaults.last_tab,
-            recent_sessions=[str(p) for p in data.get("recent_sessions", []) if p],
+            recent_sessions=_recent_history(data.get("recent_sessions")),
             last_report_directory=str(report_dir) if report_dir else None,
             window_geometry=geometry if isinstance(geometry, str) else defaults.window_geometry,
             report_exposure_thumbnails=data.get("report_exposure_thumbnails") is True,
+            report_tomograms=data.get("report_tomograms") is True,
+            report_tomogram_slices=data.get("report_tomogram_slices") is True,
             tomogram_snapshot_folder=data.get("tomogram_snapshot_folder") if isinstance(data.get("tomogram_snapshot_folder"), str) else None,
             tomogram_memory_percent=data["tomogram_memory_percent"] if type(data.get("tomogram_memory_percent")) is int and 10 <= data["tomogram_memory_percent"] <= 60 else 40,
             tomogram_navigator_visible=data["tomogram_navigator_visible"] if type(data.get("tomogram_navigator_visible")) is bool else True,
@@ -116,3 +138,27 @@ def add_recent_session(settings: Settings, session_path: str, *, limit: int = 8)
     cleaned.insert(0, session_path)
     settings.recent_sessions = cleaned[:limit]
     return settings
+
+
+def recent_session_paths(
+    recent: Iterable[str],
+    *,
+    excluded_keys: Collection[str] = (),
+) -> tuple[str, ...]:
+    """Distinct non-blank recent folders outside ``excluded_keys``, in input order.
+
+    ``recent`` runs newest first, so each folder keeps its newest spelling. Paths
+    come back as stored. This only compares text: it never looks at the disk, so
+    a folder on an offline share cannot stall the caller.
+    """
+
+    seen = set(excluded_keys)
+    distinct: list[str] = []
+    for path in recent:
+        if not path.strip():
+            continue
+        key = path_identity_key(path)
+        if key not in seen:
+            seen.add(key)
+            distinct.append(path)
+    return tuple(distinct)

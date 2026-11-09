@@ -4,12 +4,37 @@ from __future__ import annotations
 from contextlib import contextmanager
 from collections.abc import Iterator
 from collections.abc import Callable
+from typing import Literal
 import numpy as np
 import mmap
 
 from tomography_session_browser.domain.tomograms import Volume
 from tomography_session_browser.parsers.volume_header import fingerprint, is_cloud_placeholder
 from tomography_session_browser.services.volume.memory import VOLUME_MEMORY, MemoryBudget, BudgetExceeded
+
+
+class SourceUnavailable(ValueError):
+    """The volume file is only in the cloud, or it changed after the app read it."""
+
+    def __init__(self, message: str, reason: Literal["cloud", "changed"]) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class VolumeUnreadable(ValueError):
+    """The file is local and current, but its plane holds no usable image values."""
+
+
+def require_unchanged(volume: Volume, message: str = "The volume changed while reading. Reload the processing folder.") -> None:
+    if fingerprint(volume.path) != volume.fingerprint:
+        raise SourceUnavailable(message, "changed")
+
+
+def require_current(volume: Volume, message: str) -> None:
+    """Refuse a cloud-only or changed volume with a typed reason and the caller's text."""
+    if is_cloud_placeholder(volume.path):
+        raise SourceUnavailable(message, "cloud")
+    require_unchanged(volume, message)
 
 
 def resident_key(volume: Volume) -> tuple:
@@ -30,11 +55,9 @@ class VolumeStore:
         """
         with self.budget.borrow(resident_key(volume)) as resident:
             if resident is not None:
-                if is_cloud_placeholder(volume.path) or fingerprint(volume.path) != volume.fingerprint:
-                    raise ValueError("The volume is unavailable or changed. Reload the processing folder.")
+                require_current(volume, "The volume is unavailable or changed. Reload the processing folder.")
                 yield ReadSession(self, volume, resident)
-                if fingerprint(volume.path) != volume.fingerprint:
-                    raise ValueError("The volume changed while reading. Reload the processing folder.")
+                require_unchanged(volume)
                 return
         reservation = None
         if whole:
@@ -56,14 +79,12 @@ class VolumeStore:
         shared cache, so a long export never evicts the planes the viewer has cached."""
         if cancelled():
             raise InterruptedError("Obsolete native-plane request")
-        if is_cloud_placeholder(volume.path) or fingerprint(volume.path) != volume.fingerprint:
-            raise ValueError("The volume is unavailable or changed. Make it local and reload the processing folder.")
+        require_current(volume, "The volume is unavailable or changed. Make it local and reload the processing folder.")
         key = (volume.fingerprint, volume.grid, volume.dtype, axis, index, slices)
         with self.budget.borrow(key) as cached:
             if cached is not None:
                 yield cached
-                if fingerprint(volume.path) != volume.fingerprint:
-                    raise ValueError("The volume changed while reading. Reload the processing folder.")
+                require_unchanged(volume)
                 return
         assert volume.grid is not None
         x, y, z = volume.grid.shape_xyz
@@ -78,14 +99,12 @@ class VolumeStore:
             if not share:
                 array.setflags(write=False)
                 yield array
-                if fingerprint(volume.path) != volume.fingerprint:
-                    raise ValueError("The volume changed while reading. Reload the processing folder.")
+                require_unchanged(volume)
                 return
             with self.budget.adopt(key, array, reservation) as cached:
                 del array
                 yield cached
-                if fingerprint(volume.path) != volume.fingerprint:
-                    raise ValueError("The volume changed while reading. Reload the processing folder.")
+                require_unchanged(volume)
 
     @contextmanager
     def lease(self, volume: Volume) -> Iterator[np.ndarray]:
@@ -93,9 +112,8 @@ class VolumeStore:
         if grid is None:
             raise ValueError("This volume has no usable grid. " + " ".join(volume.warnings))
         if is_cloud_placeholder(volume.path):
-            raise ValueError("The volume is cloud-only. Make it available locally, then reload.")
-        if fingerprint(volume.path) != volume.fingerprint:
-            raise ValueError("The volume changed or was replaced. Reload the processing folder.")
+            raise SourceUnavailable("The volume is cloud-only. Make it available locally, then reload.", "cloud")
+        require_unchanged(volume, "The volume changed or was replaced. Reload the processing folder.")
         mapped = np.memmap(volume.path, dtype=volume.dtype, mode="r", offset=volume.data_offset,
                            shape=grid.shape_zyx, order="C")
         mapping = mapped.base
@@ -104,8 +122,7 @@ class VolumeStore:
             storage_axes = tuple(reversed(grid.axes_crs))
             native = mapped.transpose(tuple(storage_axes.index(axis) for axis in (3, 2, 1)))
             yield native
-            if fingerprint(volume.path) != volume.fingerprint:
-                raise ValueError("The volume changed while reading. Reload the processing folder.")
+            require_unchanged(volume)
         finally:
             mapping.close()
 
@@ -133,8 +150,7 @@ class VolumeStore:
         grid = volume.grid
         if grid is None or axis not in ("XY", "XZ", "YZ"):
             raise ValueError("A usable axis-aligned volume grid is required.")
-        if is_cloud_placeholder(volume.path) or fingerprint(volume.path) != volume.fingerprint:
-            raise ValueError("The volume is cloud-only or changed. Make it local and reload.")
+        require_current(volume, "The volume is cloud-only or changed. Make it local and reload.")
         if slices < 1 or slices > 101 or slices % 2 != 1:
             raise ValueError("Slice averaging requires an odd count from 1 to 101.")
         horizontal, vertical, normal = {"XY": (1, 2, 3), "XZ": (1, 3, 2), "YZ": (3, 2, 1)}[axis]
@@ -189,8 +205,7 @@ class VolumeStore:
                                 output[:, section_index] = values
         if streamed_slab:
             output /= stop-start
-        if fingerprint(volume.path) != volume.fingerprint:
-            raise ValueError("The volume changed while reading. Reload the processing folder.")
+        require_unchanged(volume)
         return output
 
 

@@ -5,11 +5,13 @@ left; zoom, help, Focus and Image on the right. Extra controls move to More.
 Every control is a 24 px cell inside a bordered 28 px group, so Slices and
 zoom read as matching steppers.
 """
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Generic, TypeVar
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal, QSignalBlocker
 from PySide6.QtGui import QColor, QPainter, QIcon
-from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QMenu,
+from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QMenu,
                                QPushButton, QSizePolicy, QSpinBox, QToolButton, QWidget, QWidgetAction)
 
 from tomography_session_browser.presentation.design_tokens import CANVAS_CHROME, SPACE_S
@@ -25,6 +27,33 @@ TOOL_CELL = 24
 #: row, so its height (and the panes under it) never changes after first layout.
 COMPACTEST = 4
 UNBOUNDED = 16777215
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class ToolbarForm(Generic[T]):
+    """One complete row: where Angles shows, the label level, and More's entries in menu order."""
+    angles: str  # "sliders", "cell" or "more"
+    level: int
+    more: tuple[T, ...]
+
+
+def toolbar_forms(angles: T, further: Sequence[T], zoom: Sequence[T]) -> tuple[ToolbarForm[T], ...]:
+    """Every form of the row, the most complete first; the fitter keeps the first that fits.
+
+    Each form keeps every control of every later form, so no control leaves the
+    row as it widens. The sliders show only with every label; then the Angles
+    cell. Labels return while Angles is the only control in More. Zoom ± leave
+    only at the compactest level, which has no cell form, so they stay while
+    Angles is in the row. ``further`` then leave in their order.
+    """
+    def form(where: str, level: int, hidden: Sequence[T] = ()) -> ToolbarForm[T]:
+        return ToolbarForm(where, level, ((angles,) if where == "more" else ()) + tuple(hidden)
+                           + (tuple(zoom) if level == COMPACTEST else ()))
+    return (form("sliders", 0),
+            *(form("cell", level) for level in range(COMPACTEST)),
+            *(form("more", level) for level in range(COMPACTEST + 1)),
+            *(form("more", COMPACTEST, further[:count]) for count in range(1, len(further) + 1)))
 
 
 def reserved_width(metrics, texts: tuple[str, ...]) -> int:
@@ -233,9 +262,10 @@ class ToolGroup(QFrame):
                 widget.setFixedWidth(TOOL_CELL)
             self.row.addWidget(widget)
 
-    def refresh_visibility(self) -> None:
+    def refresh_visibility(self, allowed: bool = True) -> None:
+        """Show the group while it is allowed and a cell shows; refresh its hint for the next measure."""
         self.row.invalidate()
-        self.setVisible(any(self.row.itemAt(index).widget() is not None
+        self.setVisible(allowed and any(self.row.itemAt(index).widget() is not None
                             and self.row.itemAt(index).widget().objectName() != 'tomogramToolHair'
                             and not self.row.itemAt(index).widget().isHidden()
                             for index in range(self.row.count())))
@@ -270,6 +300,8 @@ class CanvasToolbar(QWidget):
     """A fixed-height row, with one ordered overflow policy for its controls."""
 
     resized = Signal()
+    #: The form that the last fit chose; None before the first fit.
+    form: ToolbarForm[QWidget] | None = None
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -297,51 +329,62 @@ class CanvasToolbar(QWidget):
                   if row.itemAt(index).widget() is not None and not row.itemAt(index).widget().isHidden()]
         return sum(widths) + row.spacing() * max(0, len(widths) - 1) + 16
 
+    def forms(self, tab) -> tuple[ToolbarForm[QWidget], ...]:
+        """This layout's forms of the row (toolbar_forms); Link and Lines exist only in Ortho."""
+        zoom = (tab.zoom_out_button, tab.zoom_in_button)
+        absent = () if tab.state.layout == "Ortho" else (tab.link_button, tab.lines_button)
+        further = [control for control, _label in self.overflow_controls
+                   if control is not tab.oblique.angles and control not in zoom and control not in absent]
+        return toolbar_forms(tab.oblique.angles, further, zoom)
+
+    def apply_form(self, tab, form: ToolbarForm[QWidget]) -> None:
+        """Set every control of the row from the form, and refresh each group's hint for needed_width()."""
+        self.apply_level(tab, form.level)  # Labels, the Slices label or icon, and Zoom ±.
+        tab.oblique.angles.setVisible(form.angles == "cell")
+        tab.oblique.strip.setVisible(form.angles == "sliders")
+        for control, _label in self.overflow_controls:
+            if control not in (tab.oblique.angles, tab.zoom_out_button, tab.zoom_in_button):
+                control.setVisible(control not in form.more)
+        if tab.slices_control in form.more:
+            tab.slices_icon.hide()
+        ortho = tab.state.layout == "Ortho"
+        for group in self.groups:
+            group.refresh_visibility(allowed=ortho or group is not tab.ortho_group)
+        self.more.setVisible(bool(form.more))
+        self.layout().invalidate()
+
     def compact(self, tab) -> None:
-        """Compact labels, then move the least-needed controls into More."""
-        row = self.layout()
+        """Show the first form of the row that fits; when none fits, the last."""
         if not hasattr(self, 'overflow_controls') or self.width() <= 0 or getattr(self, '_fitting', False):
             return
         key = (self.width(), tab.state.layout)
         if key == getattr(self, "fitted", None):
             return
+        holder = QApplication.focusWidget()
+        if holder is not None and not self.isAncestorOf(holder):
+            holder = None
         self.fitted = key
         self._fitting = True
         try:
-            self.more.hide()
-            self.hidden_controls = []
-            for control, _label in self.overflow_controls:
-                control.show()
-            for group in self.groups:
-                group.show()
-            tab.ortho_group.setVisible(tab.state.layout == 'Ortho')
-            for level in range(COMPACTEST + 1):
-                self.apply_level(tab, level)
-                self.more.setVisible(level == COMPACTEST)
-                row.invalidate()
+            forms = self.forms(tab)
+            self.form = forms[-1]  # When no form fits, the last one stays.
+            for form in forms:
+                self.apply_form(tab, form)
                 if self.needed_width() <= self.width():
+                    self.form = form
                     break
-            if self.needed_width() > self.width():
-                self.more.show()
-                for control, label in self.overflow_controls:
-                    if control.isHidden() or (control in (tab.link_button, tab.lines_button) and tab.state.layout != 'Ortho'):
-                        continue
-                    control.hide()
-                    if control is tab.slices_control:
-                        tab.slices_icon.hide()
-                    self.hidden_controls.append((control, label))
-                    for group in self.groups:
-                        if group is not tab.ortho_group or tab.state.layout == 'Ortho':
-                            group.refresh_visibility()
-                    row.invalidate()
-                    if self.needed_width() <= self.width():
-                        break
-            # Level compaction also removes zoom buttons; keep their actions reachable.
-            for control in (tab.zoom_out_button, tab.zoom_in_button):
-                if control.isHidden() and all(item[0] is not control for item in self.hidden_controls):
-                    self.hidden_controls.append((control, control.accessibleName()))
-            self.more.setVisible(bool(self.hidden_controls))
-            row.invalidate()
+            labels = dict(self.overflow_controls)
+            self.hidden_controls = [(control, labels[control]) for control in self.form.more]
+            if holder is not None:
+                target = holder
+                if not holder.isVisibleTo(self):
+                    target = self.more if not self.more.isHidden() else tab.canvas
+                    strip = tab.oblique.strip
+                    if holder is tab.oblique.angles or strip.isAncestorOf(holder):
+                        # Angles keeps focus while it changes form in the row.
+                        target = {"cell": tab.oblique.angles, "sliders": strip.menu_button}.get(self.form.angles, target)
+                if not target.hasFocus():
+                    target.setFocus(Qt.FocusReason.OtherFocusReason)
         finally:
             self._fitting = False
 
@@ -367,6 +410,7 @@ class CanvasToolbar(QWidget):
                 action.setDefaultWidget(editor)
                 menu.addAction(action)
                 continue
+            assert isinstance(control, QAbstractButton)  # More holds the Slices box and buttons only.
             submenu = control.menu() if isinstance(control, QPushButton) else None
             if submenu is not None:
                 submenu.setTitle(label)
@@ -399,7 +443,7 @@ def build_toolbar(tab) -> CanvasToolbar:
     tab.layout_choice.currentTextChanged.connect(tab.change_layout)
     row.addWidget(tab.layout_choice.segments)
     tab.oblique = ObliqueControls(tab, toolbar)
-    row.addWidget(ToolGroup(toolbar, tab.oblique.lock, None, tab.oblique.angles))
+    row.addWidget(ToolGroup(toolbar, tab.oblique.lock, None, tab.oblique.angles, tab.oblique.strip))
     tab.link_button = icon_button(toolbar, "link", "Link Ortho panes",
         "Keep the three planes at the same point and scale. Set to off to move and zoom each plane "
         "independently.", checkable=True)
@@ -409,7 +453,7 @@ def build_toolbar(tab) -> CanvasToolbar:
         "Show the intersection lines of the planes (L). Snapshots do not include these lines.", checkable=True)
     tab.lines_button.setChecked(True)
     tab.lines_button.toggled.connect(tab.toggle_lines)
-    # The stage shows this group only in Ortho.
+    # The toolbar fitter owns visibility after construction.
     tab.ortho_group = ToolGroup(toolbar, tab.link_button, tab.lines_button)
     tab.ortho_group.setVisible(tab.state.layout == "Ortho")
     row.addWidget(tab.ortho_group)
@@ -491,7 +535,8 @@ def build_toolbar(tab) -> CanvasToolbar:
     toolbar.hidden_controls = []
     toolbar.groups = toolbar.findChildren(ToolGroup, options=Qt.FindChildOption.FindDirectChildrenOnly)
     toolbar.overflow_controls = [
-        (tab.fit_button, 'Fit to window'), (tab.oblique.angles, 'Angles'),
+        # Removing the wide Angles cell first can leave room for Fit.
+        (tab.oblique.angles, 'Angles'), (tab.fit_button, 'Fit to window'),
         (fewer, 'Fewer slices'), (more, 'More slices'),
         (tab.zoom_out_button, 'Zoom out'), (tab.zoom_in_button, 'Zoom in'),
         (tab.oblique.lock, 'Lock rotation'), (tab.focus_button, 'Focus'),
@@ -502,5 +547,6 @@ def build_toolbar(tab) -> CanvasToolbar:
     # Reserve the widest numeric/checked forms, so accepting a frame cannot resize a cell.
     tab.oblique.lock.setFixedWidth(TOOL_CELL)
     tab.oblique.angles.setFixedWidth(tab.oblique.angles.fontMetrics().horizontalAdvance('X -180.0°  Y -180.0°  Z -180.0°') + 36)
+    tab.oblique.strip.reserve(TOOL_CELL, reserved_width(tab.oblique.strip.values[0].fontMetrics(), ("-180.0°",)))
     toolbar.apply_level(tab, COMPACTEST)
     return toolbar

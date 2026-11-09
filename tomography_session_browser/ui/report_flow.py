@@ -2,40 +2,47 @@
 from __future__ import annotations
 from collections.abc import Callable, Sequence
 import logging
+import threading
 from pathlib import Path
-from PySide6.QtCore import QObject, QStandardPaths, QThreadPool, QUrl, Slot
+from PySide6.QtCore import QObject, QStandardPaths, QThreadPool, QUrl, Qt, Signal, Slot
 from PySide6.QtGui import QAction, QDesktopServices
 from tomography_session_browser.ui.file_actions import show_in_folder
-from PySide6.QtWidgets import QDialog, QFileDialog, QMainWindow, QProgressBar
+from PySide6.QtWidgets import QDialog, QFileDialog, QMainWindow, QProgressBar, QProgressDialog
 from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.presentation.messages import ActionPrompt, MessageAction, MessageContent
 from tomography_session_browser.ui.widgets import message_sheet
+from tomography_session_browser.presentation.project_folders import UserGroup
 from tomography_session_browser.presentation.project_tree import ProjectTreeGroup
 from tomography_session_browser.presentation.workspace import Scope, Workspace
-from tomography_session_browser.presentation.report_scope import ReportScope, normalise_report_scope
-from tomography_session_browser.reports.report_generator import build_session_report
+from tomography_session_browser.presentation.report_scope import ReportScope, ReportScopeRequest, preset_folders
+from tomography_session_browser.presentation.report_tomograms import ReportTomograms
+from tomography_session_browser.reports.report_generator import SLICES, ReportProgress, build_report
+from tomography_session_browser.reports.tomogram_slices import CANCELLED
 from tomography_session_browser.services.output_boundary import check_output_path
 from tomography_session_browser.services.settings_service import Settings
 from tomography_session_browser.ui.loading.tasks import BackgroundTask, TaskSignals
 from tomography_session_browser.ui.report_scope_dialog import ReportScopeDialog
+from tomography_session_browser.ui.report_tomogram_options import FREEZE_FAILED
 from tomography_session_browser.ui.widgets.toast import TONE_ERROR, TONE_SUCCESS
 LOGGER = logging.getLogger("tomography_session_browser.ui.main_window")
 
+SLICES_STARTING = "Central slices: starting"
+WRITING_PDF = "Writing the PDF"
+CANCELLING = "Cancelling the report…"
+
+class ReportProgressSignals(QObject):
+    """progress(stage, done, total) from the report worker (D4 §5.5)."""
+    progress = Signal(str, int, int)
+
+
 def report_task(scope: ReportScope, output_path: Path, signals: TaskSignals,
-                protected_roots: tuple[Path, ...] = ()) -> BackgroundTask:
+                protected_roots: tuple[Path, ...] = (), *,
+                cancelled: Callable[[], bool] = lambda: False,
+                progress: ReportProgress = lambda stage, done, total: None) -> BackgroundTask:
     """Write ``scope``'s PDF to ``output_path`` on the thread pool."""
 
-    sessions, groups = list(scope.sessions), list(scope.project_groups)
     return BackgroundTask(
-        lambda: build_session_report(
-            sessions,
-            output_path,
-            project_title=scope.project_title,
-            project_groups=groups,
-            atlas_context_sessions=scope.atlas_context_sessions,
-            include_exposure_thumbnails=scope.include_exposure_thumbnails,
-            protected_roots=protected_roots,
-        ),
+        lambda: build_report(scope, output_path, protected_roots, cancelled=cancelled, progress=progress),
         context=output_path,
         signals=signals,
         logger=LOGGER,
@@ -53,9 +60,17 @@ class ReportFlow(QObject):
         schedule_settings_save: Callable[[], None], loading_active: Callable[[], bool],
         thread_pool: QThreadPool, report_action: QAction, loading_progress: QProgressBar,
         show_toast: Callable[..., None],
+        review_scope: Callable[[], object] = lambda: None,
+        freeze_tomograms: Callable[[Workspace], ReportTomograms] | None = None,
+        user_groups: Callable[[], Sequence[UserGroup]] = lambda: (),
     ) -> None:
         super().__init__(window)
+        self.user_groups = user_groups
         self.window, self.workspace = window, workspace
+        # The raw review scope carries a folder's id for the folder preset;
+        # ``default_scope`` has already turned it into its acquisition scope.
+        self.review_scope = review_scope
+        self.freeze_tomograms = freeze_tomograms
         self.project_groups, self.default_scope = project_groups, default_scope
         self.settings, self.save_settings = settings, save_settings
         self.schedule_settings_save, self.loading_active = schedule_settings_save, loading_active
@@ -65,45 +80,86 @@ class ReportFlow(QObject):
         self.signals = TaskSignals(self)
         self.signals.finished.connect(self.on_report_generated)
         self.signals.failed.connect(self.on_report_failed)
+        # Central slices: counted progress with Cancel, then "Writing the PDF".
+        self.cancel_event = threading.Event()
+        self.progress_signals = ReportProgressSignals(self)
+        self.progress_signals.progress.connect(self.on_report_progress)
+        self.progress_dialog: QProgressDialog | None = None
+
+    def available(self) -> bool:
+        """The one rule for the report action (D4 F28): sessions or processing
+        folders loaded, no report running and no loading task. A processing
+        scope opens the dialog with its folder ticked (a folder report)."""
+        workspace = self.workspace()
+        return (bool(workspace.sessions or workspace.processing_sources)
+                and not self.active and not self.loading_active())
+
+    def refresh_action(self) -> None:
+        self.report_action.setEnabled(self.available())
+
+    def snapshot(self, workspace: Workspace) -> tuple[ReportTomograms | None, str | None]:
+        """The tomogram snapshot when the dialog opens, or why there is none.
+
+        Only the freeze is guarded: it reads tag and review state, so it can
+        fail where an acquisition-only report still works.
+        """
+        if self.freeze_tomograms is None or not workspace.processing_sources:
+            return None, None
+        try:
+            return self.freeze_tomograms(workspace), None
+        except Exception:
+            LOGGER.exception("Could not capture tomograms for the report")
+            return None, FREEZE_FAILED
+
+    def remember_options(self, request: ReportScopeRequest) -> None:
+        """Remember the export options; only an explicit checkbox change alters them."""
+        chosen = {"report_exposure_thumbnails": request.include_exposure_thumbnails,
+                  "report_tomograms": request.include_tomograms,
+                  "report_tomogram_slices": request.include_slices}
+        changed = False
+        for name, value in chosen.items():
+            if getattr(self.settings, name) != value:
+                setattr(self.settings, name, value)
+                changed = True
+        if changed:
+            self.schedule_settings_save()
 
     def on_generate_report(self) -> None:
         current = self.default_scope()
-        if isinstance(current, ProjectTreeGroup) and current.processing_source is not None:
-            self.show_toast("PDF reports currently cover acquisition data. Select an acquisition scope to export.")
-            return
-        if not self.workspace().sessions:
+        workspace = self.workspace()
+        if not workspace.sessions and not workspace.processing_sources:
             message_sheet.choose_action(self.window, ActionPrompt(MessageContent("No session loaded", "Load a session before generating a report."),
                 (MessageAction("close", "Close"),), "close", "close"))
             return
 
-        groups = self.project_groups()
+        snapshot, issue = self.snapshot(workspace)
         dialog = ReportScopeDialog(
-            groups,
-            current_scope=self.default_scope(),
+            self.project_groups(),
+            current_scope=current,
             # Passed so the dialog can preview the *normalised* scope, which is
             # what the generator will actually produce.
-            sessions=self.workspace().sessions,
+            sessions=workspace.sessions,
             include_exposure_thumbnails=self.settings.report_exposure_thumbnails,
+            tomograms=snapshot,
+            tomogram_issue=issue,
+            include_tomograms=self.settings.report_tomograms,
+            include_slices=self.settings.report_tomogram_slices,
+            folder_preset=preset_folders(self.review_scope(), current, snapshot),
+            user_groups=self.user_groups(),
             parent=self.window,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        request = dialog.selected_request()
-        # Remembered for the next report.
-        if self.settings.report_exposure_thumbnails != request.include_exposure_thumbnails:
-            self.settings.report_exposure_thumbnails = request.include_exposure_thumbnails
-            self.schedule_settings_save()
-        try:
-            scope = normalise_report_scope(self.workspace().sessions, groups, request)
-        except ValueError as exc:
-            message_sheet.choose_action(self.window, ActionPrompt(MessageContent("Choose a report scope", "No report was generated.", details=str(exc)),
-                (MessageAction("close", "Review selection"),), "close", "close"))
+        # The exact scope of the final preview; no second normalisation, so a
+        # workspace replaced while either dialog is open cannot change it.
+        scope = dialog.accepted_scope()
+        self.remember_options(dialog.selected_request())
+        if scope is None:
             return
 
-        primary = scope.sessions[0]
-        roots = self.workspace().source_roots
         default_dir = allowed_report_directory((self.settings.last_report_directory,
-            str(primary.path.parent), QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)), roots)
+            str(scope.default_directory or ""), QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)),
+            self.workspace().source_roots)
         default_name = scope.default_filename
         default_path = str(default_dir / default_name) if default_dir is not None else default_name
 
@@ -114,6 +170,9 @@ class ReportFlow(QObject):
             if not target.lower().endswith(".pdf"):
                 target += ".pdf"
             output_path = Path(target)
+            # Read the roots after the Save dialog: a folder loaded while it
+            # was open is protected too (F36).
+            roots = self.workspace().source_roots
             try:
                 check_output_path(output_path, roots)
             except (OSError, ValueError, RuntimeError) as exc:
@@ -126,7 +185,51 @@ class ReportFlow(QObject):
         self.report_action.setEnabled(False)
         self.loading_progress.setVisible(True)
         self.window.statusBar().showMessage(f"Generating {output_path.name}…")
-        self.thread_pool.start(report_task(scope, output_path, self.signals, roots))
+        self.cancel_event = event = threading.Event()
+        if scope.prints_slices:
+            self.show_slice_progress()
+        self.thread_pool.start(report_task(scope, output_path, self.signals, roots, cancelled=event.is_set,
+                                           progress=self.progress_signals.progress.emit))
+
+    def show_slice_progress(self) -> None:
+        dialog = QProgressDialog(SLICES_STARTING, "Cancel", 0, 0, self.window)
+        dialog.setWindowTitle("Generating the report")
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumDuration(0)
+        dialog.canceled.connect(self.cancel_report)
+        dialog.show()
+        self.progress_dialog = dialog
+
+    def cancel_report(self) -> None:
+        self.cancel_event.set()
+        if self.progress_dialog is not None:
+            self.progress_dialog.setLabelText(CANCELLING)
+        self.window.statusBar().showMessage(CANCELLING)
+
+    @Slot(str, int, int)
+    def on_report_progress(self, stage: str, done: int, total: int) -> None:
+        dialog = self.progress_dialog
+        if dialog is None or self.cancel_event.is_set():
+            return
+        if stage == SLICES:
+            dialog.setMaximum(max(total, 1))
+            dialog.setValue(done)
+            dialog.setLabelText(f"Central slices: {done} of {total}")
+            return
+        # ReportLab's build cannot stop, so Cancel is no longer offered.
+        dialog.setCancelButton(None)
+        dialog.setRange(0, 0)
+        dialog.setLabelText(WRITING_PDF)
+        self.window.statusBar().showMessage(WRITING_PDF)
+
+    def close_slice_progress(self) -> None:
+        if self.progress_dialog is not None:
+            self.progress_dialog.canceled.disconnect(self.cancel_report)
+            self.progress_dialog.close()
+            self.progress_dialog.deleteLater()
+            self.progress_dialog = None
 
     @Slot(object, object)
     def on_report_generated(self, output_value: object, result: object) -> None:
@@ -159,6 +262,11 @@ class ReportFlow(QObject):
     def on_report_failed(self, output_value: object, message: str) -> None:
         output_path = Path(output_value)
         self.finish_report_task()
+        if self.cancel_event.is_set():
+            # A cancel writes no file: say so once, without a failure sheet.
+            self.window.statusBar().clearMessage()
+            self.show_toast(CANCELLED)
+            return
         message_sheet.choose_action(self.window, ActionPrompt(
             MessageContent("The report was not saved", "Your review is still available. Try again or choose another destination.", (str(output_path),), message),
             (MessageAction("close", "Close"),), "close", "close"))
@@ -166,14 +274,11 @@ class ReportFlow(QObject):
         self.show_toast("Report generation failed", tone=TONE_ERROR)
 
     def finish_report_task(self) -> None:
+        self.close_slice_progress()
         self.active = False
         if not self.loading_active():
             self.loading_progress.setVisible(False)
-        current = self.default_scope()
-        processing = isinstance(current, ProjectTreeGroup) and current.processing_source is not None
-        self.report_action.setEnabled(
-            bool(self.workspace().sessions) and not processing and not self.active and not self.loading_active()
-        )
+        self.refresh_action()
 
 
 def allowed_report_directory(candidates: Sequence[str], roots: tuple[Path, ...]) -> Path | None:

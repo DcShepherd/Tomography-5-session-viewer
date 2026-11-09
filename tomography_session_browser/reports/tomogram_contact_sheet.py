@@ -8,7 +8,7 @@ import uuid
 from xml.sax.saxutils import escape
 
 from PIL import Image
-from reportlab.lib.pagesizes import letter
+from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
@@ -20,6 +20,15 @@ from tomography_session_browser.reports.styles import ensure_fonts, SANS, TEXT, 
 from tomography_session_browser.services.volume.memory import VOLUME_MEMORY, MIB
 from tomography_session_browser.services.volume.render import render_xy
 from tomography_session_browser.services.output_boundary import check_output_path, require_output_directory
+
+PAGE_SIZE = A4
+SIDE_MARGIN = 36
+CELL_W = 252
+
+
+def column_x(slot: int, page_width: float = PAGE_SIZE[0]) -> float:
+    """Left edge of a capture cell: two columns with equal side margins."""
+    return SIDE_MARGIN + (slot % 2) * (page_width - 2 * SIDE_MARGIN - CELL_W)
 
 
 def build_contact_sheet(scope: ContactSheetScope, output: Path, protected_roots: tuple[Path, ...],
@@ -71,9 +80,9 @@ def _compose(scope: ContactSheetScope, temporary: Path, cancelled: Callable[[], 
     ensure_fonts()
     body = SANS
     style = ParagraphStyle("contact-caption", fontName=body, fontSize=8, leading=10, textColor=TEXT)
-    width, height = letter
+    width, height = PAGE_SIZE
     with temporary.open("xb") as stream:
-        pdf = Canvas(stream, pagesize=letter, pageCompression=1)
+        pdf = Canvas(stream, pagesize=PAGE_SIZE, pageCompression=1)
         pdf.setTitle("Tomogram capture contact sheet")
         pdf.setAuthor("Tomography Session Browser")
         pdf.setSubject("Frozen display captures; no acquisition report content")
@@ -90,7 +99,7 @@ def _compose(scope: ContactSheetScope, temporary: Path, cancelled: Callable[[], 
             pdf.setFillColor(TEXT_MUTED)
             pdf.drawString(36, height-59, f"{len(scope.captures)} selected captures | Frozen display recipes")
             for slot, capture in enumerate(scope.captures[page*4:page*4+4]):
-                x = 36 + (slot % 2)*276
+                x = column_x(slot, width)
                 top = height-82-(slot//2)*330
                 result = render_xy(capture.volume, capture.recipe, cancelled=cancelled)
                 image = Image.fromarray(result.pixels)

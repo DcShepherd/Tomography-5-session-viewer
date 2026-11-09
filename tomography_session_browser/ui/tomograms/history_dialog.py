@@ -1,5 +1,6 @@
 """Bounded history pages shared by Browse captures and contact-sheet selection."""
 from __future__ import annotations
+from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.ui.widgets.link_button import link_button
 from collections import Counter
 from math import ceil
@@ -226,12 +227,12 @@ class CaptureHistoryDialog(QDialog):
         for identity in removed:
             self.selected_requests.pop(identity, None)
         if removed:
-            self.selection_notice.setText(f'{len(removed)} removed or unavailable captures were removed from the PDF selection.')
+            self.selection_notice.setText(f'The PDF selection no longer includes {count_phrase(len(removed), "removed or unavailable capture")}.')
             self.selection_notice.show()
         if not self.selecting and self.history is not None:
             self.history.complete_counts(job, page, recent="merge" if self.cursors[-1] is None else "keep")
         self.fill(tuple((entry.id, entry.record.request, entry.record.path.name) for entry in page.entries))
-        self.page_label.setText(f"Page {len(self.cursors)} · {len(page.entries)} shown · {page.total} captures")
+        self.page_label.setText(f"Page {len(self.cursors)} · {len(page.entries)} shown · {count_phrase(page.total, 'capture')}")
         self.page_label.setToolTip('')
         self.previous_button.setEnabled(len(self.cursors) > 1)
         self.next_button.setEnabled(page.next_cursor is not None)
@@ -286,8 +287,9 @@ class CaptureHistoryDialog(QDialog):
             for identity, request, title in values:
                 if group != request.row_key:
                     group = request.row_key
-                    count = self.page_counts.get(group, "total unavailable")
-                    heading = QListWidgetItem(f"{request.name} · {count} captures")
+                    count = self.page_counts.get(group)
+                    heading = QListWidgetItem(f"{request.name} · "
+                                              f"{count_phrase(count, 'capture') if count is not None else 'capture total unavailable'}")
                     heading.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable if self.selecting else Qt.ItemFlag.NoItemFlags)
                     heading.setData(GROUP_ROLE, group)
                     self.list.addItem(heading)

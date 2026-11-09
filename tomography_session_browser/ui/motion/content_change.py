@@ -11,7 +11,7 @@ from PySide6.QtGui import QColor, QPixmap, QRegion
 from PySide6.QtWidgets import QApplication, QWidget
 import shiboken6
 
-from tomography_session_browser.ui.motion.fade import PictureFade
+from tomography_session_browser.ui.motion.fade import PictureFade, flush_pending_layouts
 from tomography_session_browser.ui.motion.gc_pause import GcPause
 from tomography_session_browser.ui.motion.picture_layout import PictureLayout
 from tomography_session_browser.ui.motion.preferences import motion_enabled
@@ -167,14 +167,17 @@ class ContentTransition(QObject):
         for the elements to move over. Nothing live repaints under the picture
         then, so a live change there shows only when the picture retires.
         """
-        if self.state != "holding" or self.fade is None:
+        fade = self.fade
+        if self.state != "holding" or fade is None:
             return
         self._timeout.stop()
         self.state = "moving"
         # The deadline counts from the commit: picturing beneath shortens the end hold.
         self._move_deadline = time.monotonic() + (duration_ms + (self._timeout_ms or 0)) / 1000
-        incoming = self.fade.picture_beneath(*beneath) if beneath is not None else None
-        self.fade.start(incoming, layout=layout, duration_ms=duration_ms)
+        incoming = fade.picture_beneath(*beneath) if beneath is not None else None
+        if self.fade is not fade:
+            return  # the picture runs pending events, and one of them retired this move
+        fade.start(incoming, layout=layout, duration_ms=duration_ms)
 
     def follow(self, move_again: Callable[[], None], *, within_ms: float) -> None:
         """Move again, rather than retire, when the platform places the surface late.
@@ -193,11 +196,22 @@ class ContentTransition(QObject):
                 and self.state in ("moving", "fading") and time.monotonic() < self._follow_until)
 
     def _placed_late(self) -> None:
-        self._changing_geometry = False
-        if self.state in ("moving", "fading") and self._follow is not None and self.fade is not None:
-            self.state = "holding"
-            self.fade.setGeometry(self._surface.rect())
-            self._follow()
+        """Join the late placement to the commit; the event filter began it.
+
+        The placement's nested layouts may still be posted. They run first,
+        with geometry changes still the commit's, so the move starts from the
+        final geometry and its picture finds nothing left to lay out.
+        """
+        try:
+            if self.state in ("moving", "fading") and self._follow is not None and self.fade is not None:
+                flush_pending_layouts()
+                if self.fade is None:
+                    return  # a layout pass interrupted it (a hide, or input)
+                self.state = "holding"
+                self.fade.setGeometry(self._surface.rect())
+                self._follow()
+        finally:
+            self._changing_geometry = False
 
     def _moved(self) -> None:
         if self.state == "moving":

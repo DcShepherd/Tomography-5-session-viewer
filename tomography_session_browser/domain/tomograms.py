@@ -68,3 +68,11 @@ class ProcessingSource:
     tomograms: tuple[Tomogram, ...]
     pipeline: str = "Warp"
     warnings: tuple[str, ...] = ()
+    versions_complete: bool = False
+    #: The recognised Scipion job folder that encloses ``path`` (its ``extra`` folder), set once at intake.
+    job_root: Path | None = None
+
+    @property
+    def protected_roots(self) -> tuple[Path, ...]:
+        """Every folder that is source material: the content root and, for a Scipion job, the whole job."""
+        return (self.path,) if self.job_root is None else (self.path, self.job_root)

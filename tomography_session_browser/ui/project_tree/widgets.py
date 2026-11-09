@@ -1,11 +1,14 @@
 """The project tree's widget and row painter, and the data roles its rows carry."""
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
+from PySide6.QtCore import QEvent, QRect, QRectF, Qt
+from PySide6.QtGui import QColor, QIcon, QPainter
+from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTreeWidgetItem
 
 from tomography_session_browser.presentation.design_tokens import RADIUS_CONTROL, SPACE_S
+from tomography_session_browser.presentation.help_content import InteractionKind, LocalBinding
+from tomography_session_browser.presentation.project_tree import ProjectTreeGroup
+from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.list_decorations import (
     is_project_badge,
     paint_project_badge,
@@ -25,6 +28,17 @@ HIGHLIGHT_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 RECENT_PATH_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 FOLDED_SESSION_ROLE = int(Qt.ItemDataRole.UserRole) + 4
 PROJECT_GROUP_ROLE = int(Qt.ItemDataRole.UserRole) + 5
+#: A project row marked for a new user group (B4); display only, cleared by every rebuild.
+MARK_ROLE = int(Qt.ItemDataRole.UserRole) + 6
+#: The ``UserGroup`` a heading row stands for; the row has no scope, so no ``OBJECT_ROLE``.
+USER_GROUP_ROLE = int(Qt.ItemDataRole.UserRole) + 7
+MARK_MODIFIERS = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+
+
+def is_group_row(item: QTreeWidgetItem | None) -> bool:
+    """A project group's own row: the only rows that can be marked and grouped."""
+
+    return item is not None and isinstance(item.data(0, PROJECT_GROUP_ROLE) or item.data(0, OBJECT_ROLE), ProjectTreeGroup)
 
 
 class ProjectTreeWidget(SmoothScrollTree):
@@ -51,6 +65,96 @@ class ProjectTreeWidget(SmoothScrollTree):
         if event.type() in (QEvent.Type.HoverEnter, QEvent.Type.HoverMove, QEvent.Type.HoverLeave):
             return True
         return super().viewportEvent(event)
+
+    #: A press that marked a row: its release and double-click are not clicks.
+    _marking = False
+
+    # -- marks (B4): Ctrl or Shift + click, Ctrl + Space, Escape ---------------
+    # A mark never reaches Qt's selection, so the current row, the scope and the
+    # narrow window's drawer stay as they were.
+
+    def _mark_target(self, event) -> QTreeWidgetItem | None:
+        if event.button() != Qt.MouseButton.LeftButton or not event.modifiers() & MARK_MODIFIERS:
+            return None
+        position = event.position().toPoint()
+        item = self.itemAt(position)
+        if item is None or not is_group_row(item) or position.x() < self.visualItemRect(item).left():
+            return None
+        return item
+
+    def toggle_mark(self, item: QTreeWidgetItem) -> None:
+        item.setData(0, MARK_ROLE, not item.data(0, MARK_ROLE))
+        self.viewport().update(self.visualItemRect(item).adjusted(-self.indentation(), -2, self.viewport().width(), 2))
+
+    def marked_items(self) -> list[QTreeWidgetItem]:
+        found: list[QTreeWidgetItem] = []
+        pending = [self.topLevelItem(index) for index in range(self.topLevelItemCount())]
+        while pending:
+            item = pending.pop(0)
+            if item is None:
+                continue
+            if item.data(0, MARK_ROLE):
+                found.append(item)
+            pending[:0] = [item.child(index) for index in range(item.childCount())]
+        return found
+
+    def clear_marks(self) -> bool:
+        marked = self.marked_items()
+        for item in marked:
+            item.setData(0, MARK_ROLE, False)
+        if marked:
+            self.viewport().update()
+        return bool(marked)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        item = self._mark_target(event)
+        if item is None:
+            super().mousePressEvent(event)
+            return
+        self._marking = True
+        self.toggle_mark(item)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._marking:
+            self._marking = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt API
+        item = self._mark_target(event)
+        if item is None:
+            super().mouseDoubleClickEvent(event)
+            return
+        # A quick second Ctrl + click arrives as a double-click: it marks again.
+        self._marking = True
+        self.toggle_mark(item)
+        event.accept()
+
+    def _is_mark_key(self, event) -> bool:
+        if event.key() == Qt.Key.Key_Space and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            return True
+        return event.key() == Qt.Key.Key_Escape and bool(self.marked_items())
+
+    def event(self, event) -> bool:  # noqa: A003 - Qt API
+        # Window shortcuts (Escape leaves Focus, for one) must not take a key that marks or clears marks.
+        if event.type() == QEvent.Type.ShortcutOverride and self._is_mark_key(event):
+            event.accept()
+            return True
+        return super().event(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if event.key() == Qt.Key.Key_Space and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            current = self.currentItem()
+            if current is not None and is_group_row(current):
+                self.toggle_mark(current)
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape and self.clear_marks():
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def drawBranches(self, painter, rect, index) -> None:  # noqa: N802 - Qt API
         # The Windows 11 style marks a selected row with its own pill, in the
@@ -84,6 +188,10 @@ class ProjectTreeDelegate(QStyledItemDelegate):
         # item keeps its text for tooltips, filtering and screen readers.
         if index.column() == 1 and is_project_badge(option.text):
             option.text = ""
+        # A marked row shows a ticked box (``_paint_mark``) in place of its
+        # icon; the decoration keeps its space, so the text does not move.
+        if index.column() == 0 and index.data(MARK_ROLE):
+            option.icon = QIcon()
 
     def paint(self, painter, option: QStyleOptionViewItem, index) -> None:  # noqa: N802 - Qt API
         paint_option = QStyleOptionViewItem(option)
@@ -99,6 +207,10 @@ class ProjectTreeDelegate(QStyledItemDelegate):
             elif highlighted and not selected:
                 fill = QColor(palette.accent)
                 fill.setAlpha(34)
+                self._paint_row_fill(painter, paint_option, fill)
+            elif index.data(MARK_ROLE):
+                fill = QColor(palette.accent)
+                fill.setAlpha(22)
                 self._paint_row_fill(painter, paint_option, fill)
             elif not selected:
                 progress = (
@@ -122,6 +234,30 @@ class ProjectTreeDelegate(QStyledItemDelegate):
             paint_selection_marker(
                 painter, paint_option.rect, current_palette(), strong=highlighted
             )
+        if index.column() == 0 and index.data(MARK_ROLE):
+            mark_option = QStyleOptionViewItem(paint_option)
+            self.initStyleOption(mark_option, index)  # Where the style puts the (blank) icon.
+            self._paint_mark(painter, mark_option)
+
+    @staticmethod
+    def _paint_mark(painter, option: QStyleOptionViewItem) -> None:
+        """A ticked box in place of the row's icon: the row is marked for a new group."""
+
+        palette = current_palette()
+        style = option.widget.style() if option.widget is not None else None
+        icon_rect = (style.subElementRect(QStyle.SubElement.SE_ItemViewItemDecoration, option, option.widget)
+                     if style is not None else QRect())
+        if not icon_rect.isValid():
+            icon_rect = QRect(option.rect.left() + 2, option.rect.top(), option.decorationSize.width(), option.rect.height())
+        side = min(16, icon_rect.height(), option.rect.height() - 4)
+        box = QRectF(icon_rect.center().x() - side / 2 + 0.5, option.rect.center().y() - side / 2 + 0.5, side, side)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(palette.primary_fill))
+        painter.drawRoundedRect(box, 3, 3)
+        themed_icon("check", color=palette.primary_text, size=int(side) - 4).paint(painter, box.adjusted(2, 2, -2, -2).toRect())
+        painter.restore()
 
     @staticmethod
     def _row_fill_right(option: QStyleOptionViewItem) -> float:
@@ -156,3 +292,14 @@ class ProjectTreeDelegate(QStyledItemDelegate):
         painter.setBrush(fill)
         painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), RADIUS_CONTROL, RADIUS_CONTROL)
         painter.restore()
+
+
+# Contextual keys handled by this module; consumed by the shared Help sheet.
+LOCAL_KEYS = (
+    LocalBinding('project_tree.mark', 'Project tree', InteractionKind.KEYBOARD, ('Ctrl+Space',),
+                 'Mark or unmark the current top-level row for a new group. The dataset on show does not change'),
+    LocalBinding('project_tree.mark-click', 'Project tree', InteractionKind.MOUSE, ('Ctrl+click', 'Shift+click'),
+                 'Mark or unmark a top-level row for a new group. Right-click a marked row to group the marked rows'),
+    LocalBinding('project_tree.clear-marks', 'Project tree with marked rows', InteractionKind.KEYBOARD, ('Esc',),
+                 'Clear all marks. In the Project drawer, the next Esc closes the drawer'),
+)

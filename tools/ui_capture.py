@@ -51,10 +51,12 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from tomography_session_browser.services.settings_service import Settings  # noqa: E402
 from tomography_session_browser.ui.branding import brand_window_icon  # noqa: E402
+from tomography_session_browser.domain.models import TiltSeries
 from tomography_session_browser.ui.main_window import MainWindow
+from tomography_session_browser.ui.project_tree.widgets import OBJECT_ROLE
 from tomography_session_browser.ui.shell.chrome import TAB_LABELS
 from tomography_session_browser.presentation.design_tokens import palette_for
-from tomography_session_browser.ui.theme import apply_theme
+from tomography_session_browser.ui.theme import style_application
 
 LOAD_TIMEOUT_S = 600
 SETTLE_MS = 1200
@@ -79,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setWindowIcon(brand_window_icon())
-    apply_theme(app, palette_for(args.theme[0]))
+    style_application(app, palette_for(args.theme[0]))
     # Never touch the reviewer's real settings file.
     window = MainWindow(settings=Settings(theme=args.theme[0]), save_settings=lambda _settings: None)
     report: dict = {
@@ -88,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         "loads": [],
         "captures": [],
         "context_mismatches": [],
+        "negative_controls": [],
     }
 
     def apply_size(size: str) -> None:
@@ -109,12 +112,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ui_capture] {path.name} {pixmap.width()}x{pixmap.height()}", flush=True)
 
     def check_context(name: str, viewer_tab) -> None:
-        # The context panel must describe the image on screen.
+        # The context panel must describe the image on screen, with the text the
+        # app itself shows for it (a tilt series adds its displayed frame).
         value = viewer_tab.parts.tab_selection.current_value if viewer_tab is not None else None
-        if value is None or window.ui.context_panel._raw_text == window.parts.context.context_description(value):  # noqa: SLF001
+        if value is None:
             return
-        report["context_mismatches"].append(name)
-        print(f"[ui_capture] MISMATCH {name}: context panel does not describe the displayed item", flush=True)
+        shown = window.ui.context_panel.toPlainText()
+        if shown != window.parts.context.displayed_description(value):
+            report["context_mismatches"].append(name)
+            print(f"[ui_capture] MISMATCH {name}: context panel does not describe the displayed item", flush=True)
+        # Negative controls: a stale panel must not pass. One describes another
+        # item; for a tilt series, one leaves out the displayed frame.
+        stale = {"base description": window.parts.context.context_description(value)} if isinstance(value, TiltSeries) else {}
+        root = window.ui.tree.topLevelItem(0)
+        other = root.data(0, OBJECT_ROLE) if root is not None else None
+        if other is not None and other is not value:
+            stale["other item"] = window.parts.context.displayed_description(other)
+        for control, text in stale.items():
+            report["negative_controls"].append({"capture": name, "control": control, "detected": text != shown})
+            if text == shown:
+                print(f"[ui_capture] CONTROL {name}: a stale panel ({control}) would pass", flush=True)
 
     def tour():
         apply_size(args.size[0])

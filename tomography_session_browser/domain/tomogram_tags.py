@@ -1,5 +1,6 @@
 """User-owned tags: immutable values, separate from scientific source models."""
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import TypeAlias
 
@@ -41,6 +42,18 @@ class VolumeEvidence:
     mtime_ns: int
     grid: VolumeGrid
     dtype: str
+
+
+class ChangeKind(StrEnum):
+    MISSING = "missing"
+    FILE_FACTS = "file-facts"
+    DATE = "date"
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAcceptance:
+    accepted_at: str
+    kind: ChangeKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +99,7 @@ class TomogramTags:
     tags: tuple[TagAssignment, ...] = ()
     captures: tuple[SavedCapture, ...] = ()
     links: tuple[CaptureLink, ...] = ()
+    acceptances: tuple[SourceAcceptance, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,4 +110,3 @@ class TagProject:
     catalogue: tuple[Tag, ...] = ()
     tomograms: tuple[TomogramTags, ...] = ()
     revision: int = 0
-    schema: int = 1

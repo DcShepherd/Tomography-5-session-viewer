@@ -37,12 +37,14 @@ from tomography_session_browser.services.navigation import (
 )
 from tomography_session_browser.presentation.project_tree import (
     ProjectTreeGroup,
+    processing_group_key,
     session_key,
 )
 from tomography_session_browser.ui.project_tree.panel import (
     ProjectTreePanel,
 )
-from tomography_session_browser.ui.project_tree.items import project_group_for_row, session_for_row
+from tomography_session_browser.ui.project_tree.items import project_group_for_row, session_for_row, user_group_for_row
+from tomography_session_browser.ui.window_parts.user_groups import UserGroupActions
 from tomography_session_browser.ui.shell.chrome import TAB_LABELS
 from tomography_session_browser.presentation.scope_identity import scope_key
 from tomography_session_browser.presentation.tomogram_selection import AllTomograms, FolderTomograms
@@ -72,6 +74,7 @@ class ProjectActions(QObject):
     def __init__(self, window: QMainWindow, state: WindowState, ui: WindowUi, parts: WindowParts) -> None:
         super().__init__(window)
         self.window, self.state, self.ui, self.parts = window, state, ui, parts
+        self.user_groups = UserGroupActions(window, state, ui, parts)
 
     def tree_selection_changed(self, current: QTreeWidgetItem | None, previous: QTreeWidgetItem | None) -> None:
         timer = QElapsedTimer()
@@ -80,6 +83,8 @@ class ProjectActions(QObject):
         if current is None:
             return
         value = current.data(0, OBJECT_ROLE)
+        if value is None and self.user_groups.describe(current):
+            return
         if value is None:
             self.ui.context_panel.set_title(current.text(0))
             self.ui.context_panel.set_text("")
@@ -248,7 +253,14 @@ class ProjectActions(QObject):
         value = item.data(0, OBJECT_ROLE)
         group = ProjectTreePanel.group_for_item(item)
         menu = QMenu(self.window)
+        if user_group_for_row(item) is not None:
+            run = self.user_groups.heading_menu(menu, item)
+            chosen = menu.exec(self.ui.tree.viewport().mapToGlobal(position))
+            if chosen in run:
+                run[chosen]()
+            return
         row_group = project_group_for_row(item)
+        run = self.user_groups.leading_items(menu, item) if row_group is not None else {}
         sources = self.sources_for_scope(value)
         if sources:
             for source in sources:
@@ -264,11 +276,14 @@ class ProjectActions(QObject):
             rename_action = menu.addAction("Rename group...")
             revert_action = menu.addAction("Revert group name")
             revert_action.setEnabled(any(key in self.state.review.project_display_names for key in value.name_lookup_keys))
+            run.update(self.user_groups.member_items(menu, item))
             menu.addSeparator()
             remove_action = menu.addAction("Remove processing folder from project" if value.processing_source is not None
                                           else "Remove group from project")
             chosen = menu.exec(self.ui.tree.viewport().mapToGlobal(position))
-            if chosen is rename_action:
+            if chosen in run:
+                run[chosen]()
+            elif chosen is rename_action:
                 self.parts.project.rename_project_group(value)
             elif chosen is revert_action:
                 self.parts.project.revert_project_group_name(value)
@@ -307,7 +322,7 @@ class ProjectActions(QObject):
         sources = [source for source in self.state.review.workspace.processing_sources if source.id == source_id]
         if len(sources) == 1:
             source = sources[0]
-            key = 'processing:' + source.id
+            key = processing_group_key(source.id)
             group = ProjectTreeGroup(key, 'processing', source.name, source.name, [],
                                      name_lookup_keys=(key,), processing_source=source)
             self.remove_project_group(group)
@@ -402,8 +417,7 @@ class ProjectActions(QObject):
             self.parts.context.sync_context_panel_to_active_scope()
             self.parts.chrome.update_tab_counts()
         self.ui.refresh_button.setEnabled(self.state.review.workspace.has_sources)
-        self.ui.report_action.setEnabled(bool(self.state.review.workspace.sessions)
-                                         and not self.parts.chrome.processing_scope() and not self.parts.report.active)
+        self.parts.report.refresh_action()
 
 
     def linked_sample_label(self, samples: list[Sample]) -> str:

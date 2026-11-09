@@ -30,8 +30,7 @@ class LinkReviewController(QWidget):
         tab = window.ui.tomogram_tab
         self.review = link_button('Review name-only links', tab.status)
         self.review.clicked.connect(lambda: self.open(tab.current_object().source_id if tab.current_object() else ''))
-        tab.status.layout().addWidget(self.review)
-        self.review.hide()
+        tab.status.add_action(self.review)
         self.unlink = link_button('Unlink confirmed name', window.parts.context_panel.widget)
         self.unlink.clicked.connect(self.unlink_current)
         window.parts.context_panel.widget.layout().insertWidget(1, self.unlink)
@@ -94,8 +93,6 @@ class LinkReviewController(QWidget):
             state.review.workspace = state.review.workspace.with_link_confirmations(snapshot.records)
             state.review.scope = state.review.workspace.rebind_scope(state.review.scope)
             parts.history.prune_history()
-            parts.viewers.last_prepared = None
-            parts.viewers.applied_tabs.clear()
             parts.dashboard_host.invalidate()
             parts.scopes.populate_tree()
             parts.viewers.render_viewer_tabs()
@@ -138,7 +135,7 @@ class LinkReviewController(QWidget):
             self.failed('write', 'The proposed pairs changed. Reopen Review; no decisions were saved.')
             return
         workspace = self.window.workspace
-        protected = tuple(source.path for source in (*workspace.sessions, *workspace.processing_sources))
+        protected = workspace.source_roots
         snapshot, store = self.snapshot, self.store
         confirmations = tuple(record for record in changes if record.decision == 'confirmed')
         items = tuple(item for source in workspace.processing_sources for item in source.tomograms
@@ -156,7 +153,7 @@ class LinkReviewController(QWidget):
         rows = self.rows(current.source_id) if current is not None else ()
         count = sum(row.decision != 'confirmed' for row in rows)
         self.review.setText(f'{count} match by name only · Review' if count else f'{len(rows)} confirmed name links · Review')
-        self.review.setVisible(bool(rows))
+        ui.tomogram_tab.status.show_action(self.review, bool(rows))
         self.review.setToolTip("Name-link decisions are being saved." if self.busy else "Review name-only parent links")
         self.unlink.setToolTip("Name-link decisions are being saved." if self.busy else "Remove this confirmed name-only parent link")
         self.review.setEnabled(not self.busy)

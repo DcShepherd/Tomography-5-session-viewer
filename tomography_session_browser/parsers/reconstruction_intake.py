@@ -4,10 +4,11 @@ import struct
 
 from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.domain.reconstruction_names import reconstruction_name
-from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogram
+from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogram, Volume
 from tomography_session_browser.parsers.acquisition_evidence import reconstruction_evidence
 from tomography_session_browser.parsers.path_utils import natural_key
 from tomography_session_browser.parsers.recorded_metrics import read_imod_processing_evidence
+from tomography_session_browser.parsers.scipion_jobs import ScipionJob, scipion_job
 from tomography_session_browser.parsers.volume_header import fingerprint, is_cloud_placeholder, read_volume, records_volume
 
 SUFFIXES = ('.mrc', '.rec', '.map')
@@ -78,9 +79,24 @@ def has_reconstructions(root: Path) -> bool:
     return False
 
 
+def folder_tomogram(path: Path, folder: Path, job: ScipionJob | None) -> str | None:
+    """The tomogram name when ``path`` is its folder's reconstruction: same name, or the job's own naming."""
+    if reconstruction_name(path.stem) == reconstruction_name(folder.name):
+        return path.stem
+    return job.tomogram_name(folder.name, path.stem) if job is not None else None
+
+
+def read_proved(path: Path, version: str, stamp) -> Volume:
+    volume = read_volume(path, version)
+    if volume.fingerprint != stamp:
+        raise ValueError('Reconstruction identity changed during intake; reload the folder.')
+    return volume
+
+
 def load_reconstructions(root: Path) -> ProcessingSource:
     root = root.resolve()
     key = path_identity_key(root)
+    job = scipion_job(root)
     paths, discovery_issues = discover_files(root)
     items, issues = [], list(discovery_issues)
     proofs = {}
@@ -92,30 +108,43 @@ def load_reconstructions(root: Path) -> ProcessingSource:
                 proofs[path] = stamp
         except OSError as exc:
             issues.append(f'{path.relative_to(root)}: {exc}')
-    accepted = set()
+    # Folder layout: each folder's one reconstruction, its name and, in a Scipion job, its half sets.
+    accepted: dict[Path, tuple[str, tuple[tuple[Path, str], ...]]] = {}
     for folder in {path.parent for path in paths if path.parent != root}:
-        matches = [path for path in paths if path.parent == folder and
-                   reconstruction_name(path.stem) == reconstruction_name(folder.name) and path in proofs]
-        if len(matches) == 1:
-            accepted.add(matches[0])
-        elif len(matches) > 1:
+        proved = [path for path in paths if path.parent == folder and path in proofs]
+        named = [(path, name) for path in proved if (name := folder_tomogram(path, folder, job)) is not None]
+        if len(named) == 1:
+            main, name = named[0]
+            halves = tuple((path, version) for path in proved
+                           if job is not None and (version := job.half_set(main.stem, path.stem)) is not None)
+            accepted[main] = (name, halves)
+        elif len(named) > 1:
             issues.append(f'{folder.name}: several reconstructions match the folder; none was selected.')
+    half_sets = {path for _name, halves in accepted.values() for path, _version in halves}
     for path in paths:
         relative = path.relative_to(root).as_posix()
+        if path in half_sets:
+            continue
         try:
             if (path.parent != root and path not in accepted) or path not in proofs:
                 issues.append(f'{relative}: reconstruction identity is unverified; file was not loaded.')
                 continue
-            volume = read_volume(path, 'Reconstruction')
-            if volume.fingerprint != proofs[path]:
-                raise ValueError('Reconstruction identity changed during intake; reload the folder.')
+            name, halves = accepted.get(path, (path.stem, ()))
+            volume = read_proved(path, 'Reconstruction', proofs[path])
             if volume.grid is None:
                 issues.append(f'{relative}: ' + '; '.join(volume.warnings))
                 continue
+            volumes = [volume]
+            for half, version in halves:
+                try:
+                    volumes.append(read_proved(half, version, proofs[half]))
+                except (OSError, ValueError) as exc:
+                    issues.append(f'{half.relative_to(root).as_posix()}: {exc}')
             evidence = reconstruction_evidence(path)
             processing = read_imod_processing_evidence(path.parent, path)
-            items.append(Tomogram(f'{key}::{relative}', path.stem, key, (volume,), evidence,
+            items.append(Tomogram(f'{key}::{relative}', name, key, tuple(volumes), evidence,
                                   processing.warnings, processing))
         except (OSError, ValueError) as exc:
             issues.append(f'{relative}: {exc}')
-    return ProcessingSource(key, root.name, root, tuple(items), 'Reconstructions', tuple(issues))
+    return ProcessingSource(key, job.label if job is not None else root.name, root, tuple(items),
+                            'Reconstructions', tuple(issues))

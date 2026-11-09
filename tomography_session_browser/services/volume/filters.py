@@ -5,6 +5,7 @@ import math
 import numpy as np
 
 from tomography_session_browser.services.volume.memory import VOLUME_MEMORY, BudgetExceeded, MIB
+from tomography_session_browser.services.volume.store import VolumeUnreadable
 
 TRANSFER_KIND = "filter-transfer"
 #: Room for one transfer function per Ortho pane at typical plane sizes.
@@ -46,7 +47,7 @@ def filter_plane(plane: np.ndarray, lowpass: float, highpass: float) -> np.ndarr
         return plane
     finite = np.isfinite(plane)
     if not finite.any():
-        raise ValueError("This plane contains no finite image values.")
+        raise VolumeUnreadable("This plane contains no finite image values.")
     values = np.where(finite, plane, np.mean(plane[finite], dtype=np.float64))
     height, width = values.shape
     key = (TRANSFER_KIND, height, width, lowpass, highpass)

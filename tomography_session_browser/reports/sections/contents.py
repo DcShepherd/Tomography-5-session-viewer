@@ -1,7 +1,7 @@
 """Sections contents report components."""
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Sequence
 from reportlab.platypus import Paragraph, Table
 from tomography_session_browser.services.tilt_series_validation import validation_for
 from tomography_session_browser.domain.display_names import count_phrase
@@ -23,7 +23,7 @@ class ContentsEntry:
     outcome: str | None = None  # None for an atlas session (no tilt series column)
 
 
-def contents_entry(section: ReportSection) -> ContentsEntry:
+def contents_entry(section: ReportSection, tomograms: str = "") -> ContentsEntry:
     ctx = section.ctx
     if section.kind == "atlas":
         atlases = len(resolved_sample_atlases(ctx.session))
@@ -35,6 +35,8 @@ def contents_entry(section: ReportSection) -> ContentsEntry:
         if (validation := validation_for(ctx.validations, tilt)) is not None
     )
     detail_bits = [ctx.session.name] if ctx.session.name != sample.name else []
+    if tomograms:
+        detail_bits.append(tomograms)
     detail_bits.append(count_phrase(len(sample.tilt_series), "tilt series", "tilt series"))
     summary = sample_validation_summary(sample, ctx)
     outcome = tilt_outcome_sub_label(summary) if sample.tilt_series else "none"
@@ -89,14 +91,16 @@ def compute_contents_widths(entries: Sequence[ContentsEntry], inner: float) -> l
     return shrink_widths(natural, narrowest, inner)
 
 
-def contents_card(sections: Sequence[ReportSection], *, width: float) -> Table | None:
+def contents_card(sections: Sequence[ReportSection], *, width: float,
+                  tomograms: Mapping[str, str] | None = None) -> Table | None:
     """The sections after the cover with the page each starts on."""
 
     if not sections:
         return None
     inner = width - 2 * styles.CARD_PADDING
     pad = CONTENTS_CELL_PAD
-    entries = [contents_entry(section) for section in sections]
+    tomograms = tomograms or {}
+    entries = [contents_entry(section, tomograms.get(section.key, "")) for section in sections]
     widths = compute_contents_widths(entries, inner)
     has_datasets = len(widths) == 3
     section_w, page_w = widths[0], widths[-1]

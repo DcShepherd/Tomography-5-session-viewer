@@ -13,6 +13,7 @@ from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.presentation.dashboard.tag_summary import number_text
 from tomography_session_browser.presentation.messages import ActionPrompt, ActionRole, MessageAction, MessageContent, TextAccepted
 from tomography_session_browser.presentation.tomogram_tag_catalogue import catalogue_rows, merge_order, saved_text, selection_text
+from tomography_session_browser.presentation.tomogram_tag_changes import review_total, unmatched_count
 from tomography_session_browser.presentation.tomogram_tag_messages import MoveAccepted
 from tomography_session_browser.ui.theme import TIER_SUPPORTING, apply_tier
 from tomography_session_browser.ui.widgets import message_sheet
@@ -32,6 +33,9 @@ class TagManager(QDialog):
         self.rows = ()
         self.setWindowTitle("Manage tags")
         layout = QVBoxLayout(self)
+        self.review_button = link_button("Review tag sources…", self)
+        self.review_button.clicked.connect(self.review_sources)
+        layout.addWidget(self.review_button, alignment=Qt.AlignmentFlag.AlignLeft)
         self.notice = QLabel(self)
         self.notice.setTextFormat(Qt.TextFormat.PlainText)
         self.notice.setWordWrap(True)
@@ -125,10 +129,11 @@ class TagManager(QDialog):
                 if row.tag_id in current:
                     self.table.selectionModel().select(self.table.model().index(index, 0),
                         QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
-        loaded = {s.id for s in self.owner.tab.payload.sources}
-        unmatched = sum(not any(s.id in loaded and any(r.id == s.id + "::" + saved.ref.relative for r in s.tomograms)
-                                 for s in self.owner.tab.payload.sources if any(t.id == saved.ref.source and t.path == s.path for t in project.sources))
-                        for saved in project.tomograms)
+        proposal = self.owner.change_proposal(self.session)
+        review = proposal.rows if proposal else ()
+        self.review_button.setText(review_total(review))
+        self.review_button.setVisible(bool(review))
+        unmatched = unmatched_count(project, self.owner.tab.payload.loaded_sources)
         verb = "is" if unmatched == 1 else "are"
         self.show_notice(f"{count_phrase(unmatched, 'tomogram')} {verb} not in the loaded folders. Find moved folder…" if unmatched else "")
         self.move_button.setVisible(bool(unmatched))
@@ -273,9 +278,10 @@ class TagManager(QDialog):
         project = self.session.project
         if not project:
             return
-        loaded = self.owner.tab.payload.sources
+        loaded = self.owner.tab.payload.loaded_sources
         missing = [s for s in project.sources if not any(s.path == f.path for f in loaded)]
-        available = [f for f in loaded if self.owner.projects.session_for(f.path) is None]
+        available = [f for f in loaded if self.owner.projects.session_for(f.path) is None
+                     and binding.tag_source(project, f.path) is None]
         if not missing or not available:
             self.show_notice("Load the moved folder first. It must not belong to another project.")
             return
@@ -288,3 +294,12 @@ class TagManager(QDialog):
                 self.refresh()
             except ValueError as exc:
                 self.show_notice(str(exc))
+
+    def review_sources(self) -> None:
+        from tomography_session_browser.ui.tomograms.tags.change_review import ChangeReviewDialog
+
+        dialog = ChangeReviewDialog(self)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()

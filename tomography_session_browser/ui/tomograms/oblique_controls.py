@@ -8,14 +8,19 @@ from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.services.volume.oblique import AXES, mapping, view_rotation
 from tomography_session_browser.services.volume.render import calibrated_spacing
 from tomography_session_browser.services.volume.models import RenderResult
+from tomography_session_browser.ui.tomograms.rotation_sliders import ROTATION_INCREMENTS, RotationSliders, degrees, shown_tenths
+
+
+def angles_text(tenths) -> str:
+    """The Angles cell: "X 0.0°  Y 0.0°  Z 0.0°" at zero, as at every other rotation."""
+    return "  ".join(f"{axis} {degrees(value)}" for axis, value in zip("XYZ", tenths))
 
 
 class ObliqueControls:
-    """Owns the padlock and angle controls; the toolbar groups them."""
+    """Owns the padlock, the Angles cell and the rotation sliders; the toolbar shows the cell or the sliders."""
 
     def __init__(self, tab, parent):
         self.tab = tab
-        self.locked_text = ""
         self.shown_locked: bool | None = None
         self.interactive = False
         self.increment = 1.
@@ -32,8 +37,8 @@ class ObliqueControls:
         self.lock.setCheckable(True)
         self.lock.setToolTip("Lock the point that the view turns around (Ctrl+L). When it is not locked, a click moves this point.")
         self.lock.toggled.connect(self.set_lock)
-        # An icon while the view is axis-aligned; the angles themselves once rotated.
-        self.angles = QPushButton(parent)
+        # The icon and the three angles, also at zero; the toolbar reserves the widest text.
+        self.angles = QPushButton(angles_text((0, 0, 0)), parent)
         self.angles.setIcon(themed_icon("rotate-3d", color=CANVAS_CHROME.text, size=16))
         self.angles.setIconSize(QSize(16, 16))
         self.angles.setAccessibleName("Angles")
@@ -52,9 +57,9 @@ class ObliqueControls:
         self.axis_choice.currentIndexChanged.connect(self.select_axis)
         form.addRow("Keypad axis", self.axis_choice)
         self.increment_choice = QComboBox(panel)
-        for value in (.1, .3, 1., 3., 10., 30., 90.):
+        for value in ROTATION_INCREMENTS:
             self.increment_choice.addItem(f"{value:g}°", value)
-        self.increment_choice.setCurrentIndex(2)
+        self.increment_choice.setCurrentIndex(ROTATION_INCREMENTS.index(self.increment))
         self.increment_choice.setAccessibleName("Rotation increment")
         self.increment_choice.currentIndexChanged.connect(lambda _index: self.set_increment(self.increment_choice.currentData()))
         form.addRow("Increment", self.increment_choice)
@@ -76,6 +81,13 @@ class ObliqueControls:
         menu.addAction("Zero rotation", self.reset)
         menu.addAction("Show orientation box", lambda: self.show_box(True))
         self.angles.setMenu(menu)
+        # The same pop-up from the strip's menu button; sync() is the only writer of the sliders.
+        self.strip = RotationSliders(parent, menu)
+        self.strip.changed.connect(lambda axis, value, preview: self.set_angle(axis, value, preview=preview))
+        self.strip.increment_chosen.connect(self.set_increment)
+        self.strip.set_step(round(self.increment * 10))
+        self.strip.display((0, 0, 0), enabled=False)
+        self.strip.hide()  # The toolbar's fitter shows the strip or the cell.
         for axis, pane in tab.stage.panes.items():
             pane.orientation.rotated.connect(lambda x, y, a=axis: self.drag(a, x, y, preview=False))
             pane.orientation.reset_requested.connect(self.reset)
@@ -118,20 +130,15 @@ class ObliqueControls:
             self.lock.setAccessibleName("Unlock the pivot" if state.pivot_locked else "Lock the pivot")
             # Both states occupy the same icon cell; the icon and accessible name change.
             self.lock.setText("")
-        text = "" if not any(state.rotation) else "  ".join(f"{axis} {v:.1f}°" for axis, v in zip("XYZ", state.rotation))
-        if text != self.angles.text() or self.lock.text() != self.locked_text:
-            self.set_angles_text(text)
-            self.locked_text = self.lock.text()
-            if hasattr(self.tab, "canvas_toolbar"):
-                self.tab.canvas_toolbar.compact(self.tab)
+        # The cell and the strip have fixed sizes, so new values make no layout request.
+        tenths = shown_tenths(state.rotation)
+        self.angles.setText(angles_text(tenths))
+        volume = self.tab.volume()
+        self.strip.display(tenths, enabled=volume is not None and volume.grid is not None)
         for spin, value in zip(self.spins, state.rotation):
             with QSignalBlocker(spin):
                 spin.setValue(value)
         self.sync_display()
-
-    def set_angles_text(self, text):
-        """The toolbar reserves the widest angle label before any frame is accepted."""
-        self.angles.setText(text)
 
     def sync_display(self):
         """Update orientation boxes from the displayed frames, without restyling controls."""
@@ -186,7 +193,7 @@ class ObliqueControls:
         self.apply_angles(angles, preview=preview)
 
     def change_increment(self, direction):
-        steps = (.1, .3, 1., 3., 10., 30., 90.)
+        steps = ROTATION_INCREMENTS
         self.set_increment(steps[max(0, min(len(steps)-1, steps.index(self.increment)+direction))])
 
     def set_increment(self, value):
@@ -195,7 +202,15 @@ class ObliqueControls:
             self.increment_choice.setCurrentIndex(self.increment_choice.findData(value))
         for spin in self.spins:
             spin.setSingleStep(self.increment)
+        self.strip.set_step(round(self.increment * 10))
         self.tab.status.message.setText(f"Rotation increment {self.increment:g}°")
+
+    def by_keyboard(self, action):
+        """Run a keyboard rotation, then mark the axes whose shown angle it changed."""
+        before = shown_tenths(self.tab.state.rotation)
+        action()
+        after = shown_tenths(self.tab.state.rotation)
+        self.strip.mark(axis for axis, (old, new) in enumerate(zip(before, after)) if old != new)
 
     def reset(self):
         self.tab.stage.reset_scrubs()

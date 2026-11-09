@@ -158,7 +158,8 @@ class Workspace:
     @property
     def source_roots(self) -> tuple[Path, ...]:
         """All loaded source roots, independent of the current review scope."""
-        return tuple(source.path for source in (*self.sessions, *self.processing_sources))
+        return (*(session.path for session in self.sessions),
+                *(root for source in self.processing_sources for root in source.protected_roots))
 
     def rebind_scope(self, scope: Scope) -> Scope:
         """Rebind typed review scopes without broadening a removed folder."""

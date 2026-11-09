@@ -1,7 +1,6 @@
 """Volume pixels only: viewport input and paint, without marker/raster APIs."""
 from __future__ import annotations
 
-import math
 from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QImage, QPainter, QColor, QPen
 from PySide6.QtWidgets import QWidget
@@ -9,6 +8,7 @@ from tomography_session_browser.presentation.design_tokens import CANVAS_CHROME,
 from tomography_session_browser.services.volume.models import RenderResult
 from tomography_session_browser.ui.tomograms.navigator import INSET as NAVIGATOR_INSET, SliceNavigator
 from tomography_session_browser.ui.tomograms.orientation import SIZE as ORIENTATION_SIZE, OrientationBox
+from tomography_session_browser.ui.widgets.wheel_notches import WheelNotches
 
 
 class VolumeCanvas(QWidget):
@@ -45,8 +45,7 @@ class VolumeCanvas(QWidget):
         self.bar_drag: tuple[QPoint, QRect] | None = None
         self.bar_preview: QRect | None = None
         self.hover_pending = True
-        self.scrub_remainder = 0
-        self.scrub_source = None
+        self.notches = WheelNotches()  # Shift + wheel steps whole planes.
         self.axis = "XY"
         self.active = True
         self.ortho = False
@@ -120,7 +119,7 @@ class VolumeCanvas(QWidget):
     def event(self, event) -> bool:
         result = super().event(event)
         if event.type() == QEvent.Type.DevicePixelRatioChange:
-            self.reset_scrub()
+            self.notches.reset()
             self.viewport_changed.emit()
         return result
 
@@ -145,7 +144,7 @@ class VolumeCanvas(QWidget):
 
     def clear(self) -> None:
         self.hover_pending = True
-        self.reset_scrub()
+        self.notches.reset()
         self.bar_drag = self.bar_preview = None
         self.unsetCursor()
         self.image, self.region = None, None
@@ -212,7 +211,7 @@ class VolumeCanvas(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self.reset_scrub()
+        self.notches.reset()
         self.sync_navigator()
         self.sync_orientation()
         self.viewport_changed.emit()
@@ -222,27 +221,9 @@ class VolumeCanvas(QWidget):
             self.scrub_requested.emit(event)
             event.accept()  # A blocked scrub must not bubble and pause playback or scroll a parent.
             return
-        self.reset_scrub()
+        self.notches.reset()
         self.zoom_requested.emit(1.2 if event.angleDelta().y() > 0 else 1 / 1.2)
         event.accept()
-
-    def reset_scrub(self) -> None:
-        self.scrub_remainder = 0
-        self.scrub_source = None
-
-    def scrub_steps(self, event) -> int:
-        """Angle units only; pixels have no portable plane-distance conversion."""
-        delta = event.angleDelta()
-        source = (event.pointingDevice(), bool(delta.y() == 0 and delta.x()), event.inverted())
-        if source != self.scrub_source or event.phase() == Qt.ScrollPhase.ScrollBegin:
-            self.reset_scrub()
-        self.scrub_source = source
-        self.scrub_remainder += delta.y() or delta.x()
-        steps = math.trunc(self.scrub_remainder / 120)
-        self.scrub_remainder -= steps * 120
-        if event.phase() == Qt.ScrollPhase.ScrollEnd:
-            self.reset_scrub()
-        return steps
 
     def enterEvent(self, event) -> None:  # noqa: N802
         self.hover_pending = True
@@ -250,11 +231,11 @@ class VolumeCanvas(QWidget):
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         self.hover_pending = True
-        self.reset_scrub()
+        self.notches.reset()
         super().leaveEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        self.reset_scrub()
+        self.notches.reset()
         if self.active and event.button() == Qt.MouseButton.LeftButton and not event.modifiers() and self.bar_rect().contains(event.position().toPoint()):
             self.bar_drag = (event.position().toPoint(), self.bar_rect())
             self.setCursor(Qt.CursorShape.ClosedHandCursor)

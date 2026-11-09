@@ -66,6 +66,10 @@ def assign(project: TagProject, ref: TomogramRef, assignment: TagAssignment) -> 
     relative(assignment.version_relative)
     text(assignment.version_label)
     row = find_row(project, ref)
+    if not any(v.relative == assignment.version_relative for v in row.ref.volumes):
+        added = next((v for v in ref.volumes if v.relative == assignment.version_relative), None)
+        if added is not None:
+            row = replace(row, ref=replace(row.ref, volumes=(*row.ref.volumes, added)))
     tags = tuple(t for t in row.tags if t.tag_id != assignment.tag_id)
     return put_row(project, replace(row, tags=(*tags, assignment)))
 

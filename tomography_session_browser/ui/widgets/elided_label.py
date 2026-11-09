@@ -147,7 +147,9 @@ class WrappedElidedLabel(QLabel):
             return []
         layout = QTextLayout(text, self.font())
         option = QTextOption()
-        option.setWrapMode(QTextOption.WrapMode.WordWrap)
+        # A word longer than the line (an underscored dataset name) breaks inside
+        # itself instead of running past the edge without an ellipsis.
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         layout.setTextOption(option)
         layout.beginLayout()
         spans: list[tuple[int, int]] = []

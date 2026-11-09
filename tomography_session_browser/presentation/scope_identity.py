@@ -9,7 +9,7 @@ from tomography_session_browser.domain.models import Atlas, BatchPosition, Overv
 from tomography_session_browser.presentation.dashboard.models import DashboardEntityScope, LinkedAtlasDashboardScope
 from tomography_session_browser.presentation.project_tree import ProjectTreeGroup, session_key
 from tomography_session_browser.presentation.scopes import EntityGroup, LinkedSampleGroup
-from tomography_session_browser.presentation.tomogram_selection import AllTomograms, FolderTomograms
+from tomography_session_browser.presentation.tomogram_selection import AllTomograms, FolderTomograms, acquisition_scope
 
 if TYPE_CHECKING:
     from tomography_session_browser.presentation.workspace import Scope
@@ -41,6 +41,24 @@ def scope_key(value: object) -> str:
     if isinstance(value, Atlas | Overview | SearchMap | SearchTile | BatchPosition | TiltSeries):
         return entity_key_text(value)
     raise TypeError(f'Unsupported navigation scope: {type(value).__name__}')
+
+
+def prepared_tabs_key(scope: Scope | list[Session]) -> str:
+    """What ``prepare_viewer_tabs`` reads for ``scope``, as one string.
+
+    The acquisition scope's ``scope_key``, except that a linked group keeps its
+    samples' order: its atlas is the first in that order, and its rows and their
+    headers follow it. ``scope_key`` sorts them, because navigation treats both
+    orders as one place. The prefix keeps the two kinds of key apart. A list of
+    sessions, which is never a navigation scope but can be prepared, is keyed by
+    its sessions in order.
+    """
+    if isinstance(scope, list):
+        return 'sessions:' + '|'.join(scope_key(session) for session in scope)
+    scope = acquisition_scope(scope)
+    if isinstance(scope, LinkedSampleGroup):
+        return 'linked-in-order:' + '|'.join(_sample_path(sample) for sample in scope.samples)
+    return scope_key(scope)
 
 
 def resolve_scope_key(candidates: Iterable[Scope], key: str) -> Scope:

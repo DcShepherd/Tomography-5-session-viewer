@@ -66,7 +66,7 @@ def test_release_version_matches_package_metadata() -> None:
     from tomography_session_browser import __version__
 
     metadata = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert __version__ == metadata["project"]["version"] == "1.0.1"
+    assert __version__ == metadata["project"]["version"] == "1.1.0"
 
 
 def _synthetic_mrc(path: Path, *, space_group: int = 1) -> None:

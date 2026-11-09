@@ -15,6 +15,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import QTreeWidgetItem
 
+from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.domain.models import (
@@ -38,14 +39,18 @@ from tomography_session_browser.presentation.project_tree import (
     session_key,
     display_samples,
     folds,
+    processing_group_key,
 )
 from tomography_session_browser.presentation.scope_identity import scope_key
 from tomography_session_browser.presentation.tomogram_selection import AllTomograms, FolderTomograms, tree_row_destination, versions_in
 from tomography_session_browser.presentation.scopes import EntityGroup, LinkedSampleGroup
 from tomography_session_browser.presentation.workspace import EntityKind, Workspace, atlas_display_key
+from tomography_session_browser.services.settings_service import recent_session_paths
 from tomography_session_browser.ui.icons import themed_icon
-from tomography_session_browser.ui.navigation_icons import PROJECT_GROUP_ICONS, TAB_ICONS, TREE_ENTITY_GROUP_ICONS
-from tomography_session_browser.ui.project_tree.widgets import EXPANSION_ROLE, OBJECT_ROLE, RECENT_PATH_ROLE, FOLDED_SESSION_ROLE, PROJECT_GROUP_ROLE
+from tomography_session_browser.presentation.project_folders import UserGroup, UserHeading
+from tomography_session_browser.ui.navigation_icons import PROJECT_GROUP_ICONS, TAB_ICONS, TREE_ENTITY_GROUP_ICONS, USER_GROUP_ICON
+from tomography_session_browser.ui.project_tree.widgets import (EXPANSION_ROLE, OBJECT_ROLE, RECENT_PATH_ROLE, FOLDED_SESSION_ROLE,
+                                                              PROJECT_GROUP_ROLE, USER_GROUP_ROLE)
 from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.presentation.tab_keys import TabKey
 
@@ -88,6 +93,24 @@ class ProjectTreeItems:
         style_project_group_item(item, group)
         return item
 
+    def user_group_item(self, heading: UserHeading) -> QTreeWidgetItem:
+        """A user group's heading: no scope and no badge; its members are its children (B4)."""
+
+        name = heading.group.name
+        item = QTreeWidgetItem([name, ""])
+        rows = count_phrase(len(heading.members), "row")
+        item.setToolTip(0, f"{name}\nYour group, {rows}. It is used only in the app, until you close it.")
+        item.setData(0, Qt.ItemDataRole.AccessibleTextRole, f"{name}, your group, {rows}")
+        item.setData(0, USER_GROUP_ROLE, heading.group)
+        item.setData(0, EXPANSION_ROLE, user_group_expansion_id(heading.group))
+        style_tree_item(item)
+        style_user_group_item(item)
+        for group in heading.members:
+            child = self.group_item(group)
+            self.populate_group_item(child, group)
+            item.addChild(child)
+        return item
+
     def populate_group_item(self, group_item: QTreeWidgetItem, group: ProjectTreeGroup) -> None:
         if group.kind == "linked" and group.atlas_session is not None:
             atlas_item = self.item(group.atlas_session.name, group.atlas_session)
@@ -126,11 +149,7 @@ class ProjectTreeItems:
         # Compared as folders, not strings: a loaded session spelled with other
         # case or slashes was still offered here as "closed".
         loaded = {path_identity_key(source.path) for source in (*self._workspace.sessions, *self._workspace.processing_sources)}
-        recent = [
-            path
-            for path in recent_paths
-            if path and path_identity_key(path) not in loaded
-        ][:RECENT_SESSION_ROWS]
+        recent = recent_session_paths(recent_paths, excluded_keys=loaded)[:RECENT_SESSION_ROWS]
         if not recent:
             return None
         section = QTreeWidgetItem(["Recent sessions", ""])
@@ -212,7 +231,7 @@ class ProjectTreeItems:
                 self.scope_aliases[scope_key(AllTomograms(holder, version))] = category
             for source in sources:
                 folder = FolderTomograms(holder, source.id)
-                name = self._workspace.group_names.get('processing:' + source.id, source.name)
+                name = self._workspace.group_names.get(processing_group_key(source.id), source.name)
                 item = self.item(f'{name} \u00b7 {source.pipeline}', folder)
                 item.setToolTip(0, str(source.path))
                 item.setText(1, str(len(self._workspace.tomograms(folder))))
@@ -294,6 +313,23 @@ def style_project_group_item(item: QTreeWidgetItem, group: ProjectTreeGroup) -> 
     item.setBackground(1, QBrush(QColor(palette.surface_alt)))
     icon_name = PROJECT_GROUP_ICONS.get(group.kind, "folder-open")
     item.setIcon(0, themed_icon(icon_name))
+
+
+def user_group_for_row(item: QTreeWidgetItem | None) -> UserGroup | None:
+    value = item.data(0, USER_GROUP_ROLE) if item is not None else None
+    return value if isinstance(value, UserGroup) else None
+
+
+def user_group_expansion_id(group: UserGroup) -> str:
+    return f"user-group:{group.key}"
+
+
+def style_user_group_item(item: QTreeWidgetItem) -> None:
+    font = item.font(0)
+    font.setWeight(QFont.Weight.DemiBold)
+    item.setFont(0, font)
+    item.setForeground(0, QBrush(QColor(current_palette().text_strong)))
+    item.setIcon(0, themed_icon(USER_GROUP_ICON))
 
 
 def style_tree_item(item: QTreeWidgetItem) -> None:

@@ -63,7 +63,7 @@ class VolumeStage(QWidget):
 
     def reset_scrubs(self, *_args) -> None:
         for pane in self.panes.values():
-            pane.reset_scrub()
+            pane.notches.reset()
 
     def viewport_changed(self, axis: str) -> None:
         # Hidden splitter children can deliver deferred resize events while a
@@ -93,9 +93,9 @@ class VolumeStage(QWidget):
             return
         self.select(axis)
         if event.angleDelta().isNull():
-            pane.reset_scrub()  # Consume pixel-only gestures without inventing plane units.
+            pane.notches.reset()  # Consume pixel-only gestures without inventing plane units.
         else:
-            steps = pane.scrub_steps(event)
+            steps = pane.notches.steps(event)
             if steps:
                 self.tab.step_plane(steps)
 
@@ -129,8 +129,6 @@ class VolumeStage(QWidget):
 
     def set_layout(self, mode: str) -> None:
         self.reset_scrubs()
-        if hasattr(self.tab, "ortho_group"):
-            self.tab.ortho_group.setVisible(mode == "Ortho")
         if hasattr(self.tab, "canvas_toolbar"):
             self.tab.canvas_toolbar.compact(self.tab)
         self.panes["XZ"].setVisible(mode == "Ortho")

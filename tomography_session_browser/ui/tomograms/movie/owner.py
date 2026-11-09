@@ -388,6 +388,7 @@ class MovieExport:
         if kind == "export":
             self.tab.settings.tomogram_movie = remembered(running.settings)
             self.tab.save_settings(self.tab.settings)
+            self.tab.history.movie_saved(running.view, payload)
             if self.progress is not None:
                 self.progress.saved(payload)
         elif payload.kind != "cancelled" and not running.cancelled.is_set():

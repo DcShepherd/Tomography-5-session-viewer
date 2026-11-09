@@ -109,6 +109,12 @@ class ProjectTreeGroup:
         return self.name_lookup_keys[1] if len(self.name_lookup_keys) > 1 else self.key
 
 
+def processing_group_key(source_id: str) -> str:
+    """The key of a processing folder's own group: its names and user-group membership use it."""
+
+    return "processing:" + source_id
+
+
 def _naming_collection(collections: Sequence[Session]) -> Session | None:
     return collections[0] if len(collections) == 1 else None
 

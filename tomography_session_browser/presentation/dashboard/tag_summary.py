@@ -1,5 +1,5 @@
 """Content-only tag summaries reuse the shared indexed chart model."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from statistics import median
 
 from tomography_session_browser.presentation.dashboard.index_chart import IndexSeries
@@ -27,6 +27,9 @@ class TagContent:
     project_name: str
     tags: tuple[TagValue, ...] = ()
     counting_complete: bool = False
+    #: The reviewer's annotation note (``TomogramTags.note``), never review-status text.
+    #: Outside equality: a note does not change counts, so a note save keeps the chart.
+    note: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True, slots=True)

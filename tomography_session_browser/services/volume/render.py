@@ -9,7 +9,7 @@ from PIL import Image
 
 from tomography_session_browser.domain.tomograms import Volume
 from tomography_session_browser.services.volume.models import RenderRecipe, RenderResult, Histogram
-from tomography_session_browser.services.volume.store import VolumeStore
+from tomography_session_browser.services.volume.store import VolumeStore, VolumeUnreadable
 from tomography_session_browser.services.volume.memory import VOLUME_MEMORY
 from tomography_session_browser.services.volume.filters import filter_plane
 from tomography_session_browser.services.volume.resample import resize_axis
@@ -145,7 +145,7 @@ def finish_render(volume: Volume, recipe: RenderRecipe, plane: np.ndarray,
         plane = plane[::-1]
     finite = np.isfinite(plane)
     if not finite.any():
-        raise ValueError("This plane contains no finite image values.")
+        raise VolumeUnreadable("This plane contains no finite image values.")
     black, white = recipe.black, recipe.white
     anchor = recipe.levels_anchor
     histogram = None

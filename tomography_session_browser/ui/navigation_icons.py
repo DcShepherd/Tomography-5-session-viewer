@@ -24,6 +24,9 @@ TAB_ICONS: Final[dict[str, str]] = {
     TabKey.TILT_SERIES: "tilt-series",
 }
 
+#: A user group heading (B4): a closed folder, so it is not read as a source folder.
+USER_GROUP_ICON: Final = "folder"
+
 PROJECT_GROUP_ICONS: Final[dict[ProjectGroupKind, str]] = {
     "processing": "folder-open",
     "linked": "layers",

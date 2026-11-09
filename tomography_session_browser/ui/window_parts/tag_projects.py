@@ -133,7 +133,32 @@ class TagProjects(QWidget):
 
     def key_for(self, folder: Path) -> ProjectKey | None:
         session = self.session_for(folder)
-        return ProjectKey.at(session.store.path, session.project) if session and session.project else None
+        return ProjectKey.of(session.store, session.project) if session and session.project else None
+
+    def source_tags(self, sources):
+        """Each folder's tag state for a report snapshot, without a filesystem call."""
+        from tomography_session_browser.presentation.report_tomograms import SourceTags
+        result = {}
+        for source in sources:
+            key = path_identity_key(source.path)
+            session = self.session_for(source.path)
+            if key in self.loading:
+                result[source.id] = SourceTags(None, ProjectStatus.LOADING, False)
+            elif session is not None:
+                result[source.id] = SourceTags(ProjectKey.of(session.store, session.project) if session.project else None,
+                                               session.status, session.dirty)
+            elif key in self.issues:
+                result[source.id] = SourceTags(None, ProjectStatus.UNAVAILABLE, False)
+            else:
+                result[source.id] = SourceTags(None, None, False)
+        return result
+
+    def report_snapshot(self, workspace, review_state):
+        """The report dialog's frozen tomogram snapshot: every loaded row with its tag content."""
+        from tomography_session_browser.presentation.dashboard.tomogram_summary_input import summary_input
+        from tomography_session_browser.presentation.report_tomograms import freeze_report_tomograms
+        payload = self.summary_input(summary_input(workspace, None, review_state=review_state))
+        return freeze_report_tomograms(workspace, payload, self.source_tags(workspace.processing_sources))
 
     def summary_input(self, payload):
         from tomography_session_browser.presentation.dashboard.tag_summary import TagContent, TagValue
@@ -149,9 +174,9 @@ class TagProjects(QWidget):
                 if binding.ref:
                     saved = binding.saved
                     names = {t.id: t.name for t in session.project.catalogue}
-                    content = TagContent(ProjectKey.at(session.store.path, session.project), session.store.path.stem,
+                    content = TagContent(ProjectKey.of(session.store, session.project), session.store.path.stem,
                         tuple(sorted((TagValue(a.tag_id, names[a.tag_id], a.count) for a in saved.tags), key=lambda t: t.id)) if saved else (),
-                        saved.counting_complete if saved else False)
+                        saved.counting_complete if saved else False, saved.note if saved else "")
             rows.append(replace(row, tags=content))
         return replace(payload, rows=tuple(rows), folder_projects=tuple(self.key_for(s.path) for s in payload.sources),
                        tags_unsaved=any(s.dirty for source in payload.sources if (s := self.session_for(source.path)) is not None))

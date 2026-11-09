@@ -1,4 +1,4 @@
-"""Strict schema-one boundary. Unknown fields must never be lost on save."""
+"""Strict tag project schema boundary. Unknown fields must never be lost on save."""
 from dataclasses import asdict
 from datetime import datetime
 import json
@@ -9,7 +9,7 @@ from typing import Any
 
 from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.domain.tomogram_tags import (
-    CaptureKey, CaptureLink, JsonObject, JsonValue, SavedCapture, Tag, TagAssignment,
+    CaptureKey, CaptureLink, ChangeKind, JsonObject, JsonValue, SavedCapture, SourceAcceptance, Tag, TagAssignment,
     TagProject, TagSource, TomogramRef, TomogramTags, VolumeEvidence,
 )
 from tomography_session_browser.domain.tomograms import VolumeGrid
@@ -20,6 +20,10 @@ MAX_COUNT = 999_999_999
 MAX_NAME = 120
 MAX_ROWS = 100_000
 MAX_TAGS = 10_000
+SCHEMA_PLAIN = 1
+SCHEMA_ACCEPTANCES = 2
+NEWEST_SCHEMA = SCHEMA_ACCEPTANCES
+MAX_ACCEPTANCES = 10_000
 
 
 def name(value: str) -> str:
@@ -163,7 +167,8 @@ def decode_project(content: bytes) -> TagProject:
 
 def project_from_data(value: object) -> TagProject:
     data = fields(value, "schema kind project_id revision created sources catalogue tomograms")
-    if type(data["schema"]) is not int or data["schema"] != 1 or data["kind"] != "tomogram-tags":
+    schema = data["schema"]
+    if type(schema) is not int or schema not in (SCHEMA_PLAIN, SCHEMA_ACCEPTANCES) or data["kind"] != "tomogram-tags":
         raise ValueError("Unsupported tag project schema.")
     sources = []
     for value in array(data["sources"], 1000):
@@ -186,7 +191,8 @@ def project_from_data(value: object) -> TagProject:
     source_ids, tag_ids = {s.id for s in sources}, {t.id for t in tags}
     tomograms = []
     for value in array(data["tomograms"]):
-        row = fields(value, "ref counting_complete tags captures links", "note")
+        optional = "note acceptances" if schema == SCHEMA_ACCEPTANCES else "note"
+        row = fields(value, "ref counting_complete tags captures links", optional)
         ref = fields(row["ref"], "source relative volumes")
         source = identifier(ref["source"])
         if source not in source_ids or type(row["counting_complete"]) is not bool:
@@ -221,9 +227,13 @@ def project_from_data(value: object) -> TagProject:
         unique(tuple((l.tag_id, l.capture_key) for l in links))
         if keys != {l.capture_key for l in links}:
             raise ValueError("Unreferenced retained capture.")
+        acceptances = []
+        for raw in array(row.get("acceptances", []), MAX_ACCEPTANCES):
+            acceptance = fields(raw, "accepted_at kind")
+            acceptances.append(SourceAcceptance(timestamp(acceptance["accepted_at"]), ChangeKind(acceptance["kind"])))
         tomograms.append(TomogramTags(TomogramRef(source, relative(ref["relative"]), tuple(volumes)),
                                       row["counting_complete"], text(row.get("note", ""), 4000),
-                                      tuple(assignments), tuple(captures), tuple(links)))
+                                      tuple(assignments), tuple(captures), tuple(links), tuple(acceptances)))
     unique(tuple((r.ref.source, r.ref.relative) for r in tomograms))
     return TagProject(identifier(data["project_id"]), timestamp(data["created"]), tuple(sources), tuple(tags),
                       tuple(tomograms), integer(data["revision"]))
@@ -235,8 +245,9 @@ def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def encode_project(project: TagProject) -> bytes:
+    schema = SCHEMA_ACCEPTANCES if any(row.acceptances for row in project.tomograms) else SCHEMA_PLAIN
     data = {
-        "schema": project.schema, "kind": "tomogram-tags", "project_id": project.project_id,
+        "schema": schema, "kind": "tomogram-tags", "project_id": project.project_id,
         "revision": project.revision, "created": project.created,
         "sources": [{"id": s.id, "path": str(s.path), "name": s.name,
                      "previous_paths": [str(p) for p in s.previous_paths]} for s in project.sources],
@@ -258,6 +269,8 @@ def encode_project(project: TagProject) -> bytes:
         }
         if row.note:
             value["note"] = row.note
+        if row.acceptances:
+            value["acceptances"] = [{"accepted_at": a.accepted_at, "kind": a.kind.value} for a in row.acceptances]
         data["tomograms"].append(value)
     project_from_data(data)
     content = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"), default=thaw).encode("utf-8")

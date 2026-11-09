@@ -182,6 +182,10 @@ class MainWindow(QMainWindow):
             loading_active=lambda: self.state.loading.loading_task_active, thread_pool=self.state.loading.load_thread_pool,
             report_action=self.ui.report_action, loading_progress=self.ui.loading_progress,
             show_toast=lambda *args, **kwargs: self.parts.context.show_toast(*args, **kwargs),
+            review_scope=lambda: self.state.review.scope,
+            user_groups=lambda: self.state.review.user_groups,
+            freeze_tomograms=lambda workspace: self.parts.tag_projects.report_snapshot(
+                workspace, self.state.review.tomogram_review),
         )
         self.ui.toast = Toast(self, clearance=self.parts.shell.toast_clearance)
         self.ui.tomogram_tab.plane_band.installEventFilter(self)

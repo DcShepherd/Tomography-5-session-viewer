@@ -84,6 +84,12 @@ QFrame#loadSessionsDropWell {{
     min-height: 112px;
 }}
 
+/* An explicit minimum would hide the Recent row from the layout: the well's
+   contents decide its height when it has one. */
+QFrame#loadSessionsDropWell[hasRecent="true"] {{
+    min-height: 0px;
+}}
+
 QLabel#dropWellTitle {{
     color: {text_strong};
     font-size: {type_lead}pt;

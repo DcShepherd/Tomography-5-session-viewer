@@ -30,6 +30,7 @@ from tomography_session_browser.services.session_intake import (
 from tomography_session_browser.services.settings_service import add_recent_session
 from tomography_session_browser.ui.folder_picker import normalise_session_folder_for_import
 from tomography_session_browser.ui.load_sessions_dialog import LoadSessionsDialog
+from tomography_session_browser.ui.loading import heap
 from tomography_session_browser.ui.loading.batch import LoadBatch
 from tomography_session_browser.ui.loading.instrumentation import LoadInstrumentation
 from tomography_session_browser.ui.loading.publication import CommittedLoadView
@@ -74,6 +75,7 @@ class SessionLoading(QObject):
     def cancel_pending(self) -> None:
         """A closing window cannot accept parse, preparation or staged updates."""
         self.closed = True
+        heap.thaw()
         self.retire_run()
         self.ui.loading_overlay.hide_loading(fade=False)
 
@@ -85,6 +87,7 @@ class SessionLoading(QObject):
             self.state.review.current_path or "",
             self.window,
             loaded_paths=[source.path for source in (*self.state.review.workspace.sessions, *self.state.review.workspace.processing_sources)],
+            recent_paths=self.state.review.settings.recent_sessions,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -547,6 +550,8 @@ class SessionLoading(QObject):
 
 
     def begin_loading(self, message: str) -> None:
+        # Every load begins here, a retry included (``ui.loading.heap``).
+        heap.thaw()
         # While the overlay shows, the status bar says nothing (plan §3.2).
         self.window.statusBar().clearMessage()
         self.ui.toast.dismiss()
@@ -645,8 +650,8 @@ class SessionLoading(QObject):
         self.parts.loading.show_pending_load_result()
         self.ui.open_button.setEnabled(True)
         self.ui.refresh_button.setEnabled(self.state.review.workspace.has_sources)
-        self.ui.report_action.setEnabled(bool(self.state.review.workspace.sessions)
-                                         and not self.parts.chrome.processing_scope() and not self.parts.report.active)
+        self.parts.report.refresh_action()
+        heap.settle()
 
 
     def loading_overlay_active(self) -> bool:

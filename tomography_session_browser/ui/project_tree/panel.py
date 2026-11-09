@@ -27,7 +27,10 @@ from tomography_session_browser.presentation.design_tokens import SPACE_M, SPACE
 from tomography_session_browser.presentation.project_tree import PROJECT_BADGE_MEANINGS, ProjectTreeGroup
 from tomography_session_browser.ui.list_decorations import is_project_badge
 from tomography_session_browser.ui.motion import ItemHoverAnimator
-from tomography_session_browser.ui.project_tree.items import ProjectTreeItems, set_tree_item_icon, style_project_group_item, project_group_for_row, tree_expansion_id_for
+from tomography_session_browser.presentation.project_folders import UserGroup, UserHeading, arrange
+from tomography_session_browser.ui.project_tree.items import (ProjectTreeItems, set_tree_item_icon, style_project_group_item,
+                                                            project_group_for_row, style_user_group_item, tree_expansion_id_for,
+                                                            user_group_expansion_id, user_group_for_row)
 from tomography_session_browser.presentation.scope_identity import scope_key
 from tomography_session_browser.ui.project_tree.widgets import FOLDED_SESSION_ROLE
 from tomography_session_browser.ui.project_tree.widgets import (
@@ -184,12 +187,20 @@ class ProjectTreePanel:
         current_key: str | None,
         recent_paths: Iterable[str],
         highlighted_tilt_series_id: str | None,
+        user_groups: Sequence[UserGroup] = (),
+        open_user_group: str | None = None,
     ) -> None:
         """Rebuild the rows for ``groups``, keeping the selected group, the
-        expanded rows, the filter and the highlight."""
+        expanded rows, the filter and the highlight.
+
+        ``user_groups`` puts the user's headings in place (B4); a rebuild clears
+        every mark. ``open_user_group`` opens a heading the user just made.
+        """
 
         tree = self.tree
         expanded_ids = self.expanded_node_ids()
+        if open_user_group is not None:
+            expanded_ids.add(user_group_expansion_id(next(group for group in user_groups if group.key == open_user_group)))
         previous_signal_state = tree.blockSignals(True)
         tree.setUpdatesEnabled(False)
         try:
@@ -210,10 +221,15 @@ class ProjectTreePanel:
 
             current_item: QTreeWidgetItem | None = None
             first_group_item: QTreeWidgetItem | None = None
-            for group in roots:
-                group_item = items.group_item(group)
-                items.populate_group_item(group_item, group)
-                tree.addTopLevelItem(group_item)
+            for entry in arrange(roots, user_groups):
+                if isinstance(entry, UserHeading):
+                    group_item = items.user_group_item(entry)
+                    tree.addTopLevelItem(group_item)
+                    group_item = group_item.child(0)  # A heading is never the fallback current row.
+                else:
+                    group_item = items.group_item(entry)
+                    items.populate_group_item(group_item, entry)
+                    tree.addTopLevelItem(group_item)
                 if first_group_item is None:
                     first_group_item = group_item
             if current_key is not None:
@@ -294,6 +310,8 @@ class ProjectTreePanel:
             group = project_group_for_row(item)
             if group is not None:
                 style_project_group_item(item, group)
+            elif user_group_for_row(item) is not None:
+                style_user_group_item(item)
             else:
                 set_tree_item_icon(item, value)
             for child_index in range(item.childCount()):

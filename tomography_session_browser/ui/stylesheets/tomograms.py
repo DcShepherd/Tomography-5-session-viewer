@@ -106,7 +106,6 @@ QWidget#tomogramCanvasToolbar QPushButton {{
     border: 1px solid transparent;
     border-radius: {radius_control}px;
     padding: 4px 8px;
-    min-width: 0;
     min-height: 20px;
 }}
 QWidget#tomogramCanvasToolbar QPushButton:hover {{
@@ -219,6 +218,44 @@ QWidget#tomogramPlaneBand QSlider::sub-page:horizontal {{
 QWidget#tomogramPlaneBand QSlider::handle:horizontal {{
     background: {canvas_text_strong};
     border-color: {canvas_accent};
+}}
+/* The rotation sliders replace the Angles cell when the toolbar has room. The
+   accent marks the axes that the keyboard turns, and the selected slider's
+   letter and handle (no ring, owner 9 Nov 2026); every size is fixed in code,
+   so the restyle relayouts nothing. */
+QWidget#tomogramRotationSliders QLabel {{
+    color: {canvas_text};
+}}
+QWidget#tomogramRotationSliders QLabel#tomogramRotationValue {{
+    color: {canvas_text_strong};
+}}
+QWidget#tomogramRotationSliders QSlider::groove:horizontal,
+QWidget#tomogramRotationSliders QSlider::add-page:horizontal,
+QWidget#tomogramRotationSliders QSlider::sub-page:horizontal {{
+    background: {canvas_border_strong};
+    height: 3px;
+    border-radius: 1px; /* pill */
+}}
+QWidget#tomogramRotationSliders QSlider::handle:horizontal {{
+    background: {canvas_text_strong};
+    border: 1px solid {canvas_accent};
+    width: 10px;
+    height: 10px;
+    margin: -4px 0;
+    border-radius: 5px; /* pill */
+}}
+QWidget#tomogramRotationSliders QSlider::handle:horizontal:disabled {{
+    background: {canvas_text_muted};
+    border-color: {canvas_border_strong};
+}}
+QWidget#tomogramRotationSliders QLabel[marked="true"],
+QWidget#tomogramRotationSliders QLabel[active="true"],
+QWidget#tomogramRotationSliders QLabel#tomogramRotationValue[marked="true"] {{
+    color: {canvas_accent};
+}}
+QWidget#tomogramRotationSliders QSlider[marked="true"]::handle:horizontal,
+QWidget#tomogramRotationSliders QSlider[active="true"]::handle:horizontal {{
+    background: {canvas_accent};
 }}
 /* Words in the UI face; the coordinates stay monospaced so they do not jitter. */
 QLabel#tomogramReadout {{
@@ -341,6 +378,14 @@ QPushButton#tomogramAppliedUndo:hover {{
 }}
 QPushButton#tomogramAppliedUndo:focus {{
     border-color: {canvas_text_strong};
+}}
+QFrame#tagChangeNotice {{
+    background: {surface_hi};
+    border: 1px solid {border_strong};
+    border-radius: {radius_control}px;
+}}
+QFrame#tagChangeNotice[tone="warn"] {{
+    border-color: {chart_amber};
 }}
 /* The review list of one pixel size for several versions. */
 QDialog#bulkPixelDialog {{

@@ -30,8 +30,8 @@ from tomography_session_browser.domain.models import (
     TiltSeries,
 )
 from tomography_session_browser.presentation.viewer_tabs import (
+    PreparedTabsCache,
     PreparedViewerTab,
-    PreparedViewerTabs,
     prepare_viewer_tabs,
 )
 from tomography_session_browser.services.markers.builders import atlas_lod_markers, markers_for_object
@@ -95,7 +95,7 @@ class ViewerCoordinator(QObject):
     def __init__(self, window: QMainWindow, state: WindowState, ui: WindowUi, parts: WindowParts) -> None:
         super().__init__(window)
         self.window, self.state, self.ui, self.parts = window, state, ui, parts
-        self.last_prepared: tuple[object, object, PreparedViewerTabs] | None = None
+        self.prepared_tabs = PreparedTabsCache()
         self.applying_payload: PreparedSessionUi | None = None
         self.applied_tabs: dict[str, tuple[object, object, PreparedViewerTab]] = {}
         #: The scope whose rows the viewer tabs list right now. Remembered tab
@@ -195,13 +195,10 @@ class ViewerCoordinator(QObject):
         self.window.statusBar().showMessage(f"Preparing {label}...")
         viewer_scope = value  # The typed selection owns folder and version; the request derives its acquisition scope.
         scope_value = dashboard_scope_value(self.state.review.workspace, viewer_scope, self.state.review.workspace.atlas_label)
-        cached = self.last_prepared
-        cached_viewer = (cached[2] if cached is not None and cached[0] is self.state.review.workspace
-                         and cached[1] is viewer_scope else None)
         owner.request(self.state.review.workspace, scope, viewer_scope, value, label, destination_tab,
             departure=departure,
             cached_dashboard=self.parts.dashboard_host.model_cache.get(dashboard_key(scope_value)),
-            cached_viewer_tabs=cached_viewer)
+            cached_viewer_tabs=self.prepared_tabs.get(self.state.review.workspace, viewer_scope))
 
     def open_scope(self, target: Any, *, destination_tab: TabKey, departure: HistoryLocation | None = None) -> None:
         """Go to a broad scope on purpose: a summary's own link, not a tree click.
@@ -262,7 +259,7 @@ class ViewerCoordinator(QObject):
             # destination is shown before the viewers rebuild, so the hidden
             # ones stay lazy. ``applying_payload`` is set, so the change does
             # not cancel the preparation it belongs to.
-            counts = {key: len(tab.items) for key, tab in payload.viewer_tabs.items()}
+            counts = {key: len(tab.items) for key, tab in payload.viewer_tabs.tabs.items()}
             counts[TabKey.TOMOGRAMS] = len(payload.tomograms.rows)
             self.parts.chrome.apply_tab_availability(counts, request.destination_tab,
                 processing_only=payload.tomograms.processing_only)
@@ -323,7 +320,7 @@ class ViewerCoordinator(QObject):
 
         self.scope_preparation.invalidate()
         self.applied_tabs.clear()
-        self.last_prepared = None
+        self.prepared_tabs.clear()
         self.rendered_scope_key = None
         self.state.viewer.viewer_states.clear()
         self.ui.tomogram_tab.rendering.invalidate()
@@ -348,18 +345,15 @@ class ViewerCoordinator(QObject):
         # red (template / exposure / tracking / focus / batch dot).
         failed_tilt_ids = self.parts.navigation.failed_tilt_ids()
         scope_context = self.parts.scopes.viewer_tab_context()
-        if prepared is None:
-            cached = self.last_prepared
-            if (cached is not None and cached[0] is self.state.review.workspace
-                    and cached[1] is scope_context and cached[2].files_unchanged()):
-                prepared_tabs = cached[2]
-            else:
-                prepared_tabs = prepare_viewer_tabs(self.state.review.workspace, scope_context)
-                self.last_prepared = (self.state.review.workspace, scope_context, prepared_tabs)
-            tab_payloads = prepared_tabs.tabs
+        if prepared is not None:
+            prepared_tabs = prepared.viewer_tabs
         else:
-            self.last_prepared = (self.state.review.workspace, scope_context, PreparedViewerTabs(prepared.viewer_tabs, prepared.availability))
-            tab_payloads = prepared.viewer_tabs
+            cached = self.prepared_tabs.get(self.state.review.workspace, scope_context)
+            prepared_tabs = (cached if cached is not None and cached.files_unchanged()
+                             else prepare_viewer_tabs(self.state.review.workspace, scope_context))
+        # The one store: under the key the tabs were prepared for, whichever path got them.
+        self.prepared_tabs.put(self.state.review.workspace, prepared_tabs)
+        tab_payloads = prepared_tabs.tabs
 
         requested_labels = labels or [*VIEWER_TAB_KEYS, TabKey.TOMOGRAMS]
         volume_payload = prepared.tomograms if prepared is not None else prepare_tomogram_tab(self.state.review.workspace, scope_context)

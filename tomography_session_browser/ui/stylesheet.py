@@ -95,7 +95,12 @@ def _session_intake_rules(palette: ThemePalette) -> str:
     bad_on_surface = readable_tone(palette.chart_red, palette.surface, palette.text_strong)
     bad_on_panel = readable_tone(palette.chart_red, palette.panel, palette.text_strong)
     warn = readable_tone(palette.chart_amber, palette.surface_alt, palette.text_strong)
+    recent_chip = readable_tone(palette.link_text, palette.panel, palette.text_strong)
     return (
+        # Link text reads below the floor on the well's panel. At rest only: hover,
+        # pressed and off keep the shared button recipes, which this would outrank.
+        'QPushButton#secondaryAction[recentChip="true"]:enabled { text-decoration: underline; }\n'
+        f'QPushButton#secondaryAction[recentChip="true"]:enabled:!hover:!pressed {{ color: {recent_chip}; }}\n'
         f'QFrame#queuedFolderRow[tone="bad"] {{ background: rgba({red}, {green}, {blue}, 12); }}\n'
         f"QLabel#queuedFolderReason {{ color: {bad_on_panel}; }}\n"
         f'QLabel#queueCount[tone="good"] {{ color: {good}; }}\n'

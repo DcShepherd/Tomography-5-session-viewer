@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 import shiboken6
 
 from tomography_session_browser.presentation.design_tokens import DARK_PALETTE, SANS_FONT_NAME, TYPE_BODY, ThemePalette
+from tomography_session_browser.ui.style import AppStyle
 from tomography_session_browser.ui.stylesheet import build_stylesheet
 
 
@@ -160,6 +161,16 @@ def mark_theme_region(widget: QWidget) -> None:
     """
 
     _THEME_REGIONS.add(widget)
+
+
+def style_application(app: QApplication, palette: ThemePalette) -> ThemePalette:
+    """Start-up styling: the app's proxy style, then ``palette``'s theme.
+
+    The application and its capture tools call this one function, so a tool's
+    screenshots use the same style as the app (GR-07).
+    """
+    app.setStyle(AppStyle(app.style().objectName()))
+    return apply_theme(app, palette)
 
 
 def apply_theme(app: QApplication, palette: ThemePalette | None = None) -> ThemePalette:

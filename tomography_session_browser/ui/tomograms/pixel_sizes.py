@@ -83,7 +83,7 @@ class PixelSizeOwner:
 
     def sources(self) -> tuple:
         payload = self.tab.payload
-        return payload.loaded_sources or payload.sources
+        return payload.loaded_sources
 
     def review(self) -> BulkReview:
         return bulk_review(self.sources(), self.values.value_for, self.is_changed)

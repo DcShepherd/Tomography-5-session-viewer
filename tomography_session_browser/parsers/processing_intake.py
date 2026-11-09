@@ -7,6 +7,7 @@ Neither adapter infers acquisition identity, registration or physical orientatio
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from tomography_session_browser.domain.identity import path_identity_key
@@ -19,6 +20,7 @@ from tomography_session_browser.domain.recorded_metrics import ProcessingEvidenc
 from tomography_session_browser.parsers.imod_commands import literal_path, parameter, standard_input
 from tomography_session_browser.parsers.recorded_metrics import read_imod_processing_evidence
 from tomography_session_browser.parsers.reconstruction_intake import has_reconstructions, load_reconstructions
+from tomography_session_browser.parsers.scipion_jobs import processing_root, scipion_job
 
 IMOD_COMMANDS = ("tilt.com", "tilta.com", "tiltb.com")
 ARETOMO_HALF_SETS = ("_evn_vol.mrc", "_odd_vol.mrc")
@@ -26,6 +28,7 @@ METADATA_LIMIT = 1024 * 1024
 
 
 def processing_pipelines(path: Path) -> tuple[str, ...]:
+    path = processing_root(path)
     found = []
     if is_warp_source(path):
         found.append("Warp")
@@ -56,10 +59,16 @@ def imod_output(command: Path, root: Path) -> Path:
 
 
 def load_processing_source(path: Path) -> ProcessingSource:
-    root = path.resolve()
+    """Load a processing root; a recognised Scipion job also protects the job folder around it."""
+    chosen = processing_root(path)
+    source = _load_source(chosen.resolve())
+    return source if scipion_job(chosen) is None else replace(source, job_root=chosen.parent.resolve())
+
+
+def _load_source(root: Path) -> ProcessingSource:
     pipelines = processing_pipelines(root)
     if len(pipelines) != 1:
-        raise ValueError("Choose one processing root with unambiguous Warp, IMOD or AreTomo3 metadata.")
+        raise ValueError("Choose one processing folder with unambiguous Warp, IMOD, AreTomo3 or reconstruction metadata.")
     pipeline = pipelines[0]
     if pipeline == "Warp":
         return load_warp_source(root)

@@ -1,9 +1,10 @@
 """One ordered key list drives rows, compact selection and Previous/Next."""
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from tomography_session_browser.domain.tomograms import Volume
+from tomography_session_browser.presentation.formatting import shared_name_prefix
 from tomography_session_browser.ui.widgets.link_button import link_button
 from PySide6.QtCore import QRectF, QSize, Qt, Signal, QSignalBlocker, QModelIndex
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
@@ -17,7 +18,7 @@ from tomography_session_browser.presentation.recorded_metrics import metric_numb
 from tomography_session_browser.presentation.tomogram_tag_filters import TagFilter
 from tomography_session_browser.presentation.tomogram_list_filter import ListFilter, list_membership, keep_not_opened_membership
 from tomography_session_browser.presentation.design_tokens import (RADIUS_CONTROL, SPACE_M, SPACE_S, STATUS_TONE_COLOURS,
-                                                                   TYPE_BODY, TYPE_CAPTION, readable_tone)
+                                                                   TYPE_BODY, TYPE_CAPTION, ThemePalette, readable_tone)
 from tomography_session_browser.presentation.tomogram_state import ReviewSegment, TomogramViewState
 from tomography_session_browser.presentation.tomogram_versions import review_versions
 from tomography_session_browser.presentation.viewer_entries import GroupHeader
@@ -28,8 +29,10 @@ from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.tomograms.layout_controls import Versions
 from tomography_session_browser.ui.tomograms.capture_column import CaptureColumn
+from tomography_session_browser.ui.tomograms.movie_marks import MovieMarks
 from tomography_session_browser.ui.viewer.constants import LIST_GROUP_SHOWN_ROLE, LIST_ROW_SINGLE_HEIGHT_PX, LIST_REFILL_VEIL_OPACITY, VIEWER_ENTRY_ROLE
 from tomography_session_browser.ui.viewer.group_rows import make_group_row, paint_group_row
+from tomography_session_browser.ui.viewer.list_rows import fit_list_name
 
 
 class SelectorDelegate(QStyledItemDelegate):
@@ -60,10 +63,34 @@ def row_value(row: TomogramRow, sort: str) -> str:
     return f"{metric_number(metric)} {metric.unit}" if metric is not None else ""
 
 
+def name_colour(opened: bool, selected: bool, theme: ThemePalette) -> str:
+    """A name not opened reads strong; an opened name goes grey as a whole (owner, 9 Nov 2026).
+
+    The other lists mark state by weight only; this list also greys opened
+    names. On the selection fill an opened name uses the body text colour, so
+    it stays readable.
+    """
+    if opened:
+        return theme.text if selected else theme.text_muted
+    return theme.selection_text if selected else theme.text_strong
+
+
+def group_name_prefixes(rows: Iterable[TomogramRow]) -> dict[str, str]:
+    """The name start that every row of a group shares, which gives way first when a name does not fit.
+
+    Taken from every row, not the rows on show, so a filter or a segment never
+    changes how a name is cut.
+    """
+    names: dict[str, list[str]] = {}
+    for row in rows:
+        names.setdefault(row.group, []).append(row.tomogram.name)
+    return {group: shared_name_prefix(group_names) for group, group_names in names.items()}
+
+
 class ReviewRowDelegate(QStyledItemDelegate):
     """Rows as the other viewer lists draw them: a rounded fill, the selection
-    marker and a hairline. The shared name prefix is muted so the distinguishing
-    suffix reads first; unopened rows are bold; an attention tag sits right."""
+    marker and a hairline. The whole name is one colour: strong and bold when
+    not opened, grey when opened (``name_colour``); an attention tag sits right."""
 
     def __init__(self, owner: TomogramList) -> None:
         super().__init__(owner)
@@ -103,6 +130,9 @@ class ReviewRowDelegate(QStyledItemDelegate):
         if self.owner.capture_column.width:
             self.owner.capture_column.paint(painter, option, key)
             right = self.owner.capture_column.rect(option.rect).left() - SPACE_S
+        if self.owner.movie_marks.width:
+            self.owner.movie_marks.paint(painter, option.rect, key)
+            right = self.owner.movie_marks.rect(option.rect).left() - SPACE_S
         value = row_value(row, self.owner.sort.currentText())
         if value:
             font = QFont(option.font)
@@ -116,26 +146,16 @@ class ReviewRowDelegate(QStyledItemDelegate):
         tag = row_tag(row, self.owner.stated_for)
         if tag is not None:
             right = self.paint_tag(painter, option, rect, right, *tag) - SPACE_S
+        opened = key in self.owner.opened
         font = QFont(option.font)
         font.setPointSizeF(TYPE_BODY)
-        font.setWeight(QFont.Weight.DemiBold if key not in self.owner.opened else QFont.Weight.Normal)
+        font.setWeight(QFont.Weight.Normal if opened else QFont.Weight.DemiBold)
         painter.setFont(font)
-        metrics = painter.fontMetrics()
-        name = row.tomogram.name
-        split = name.rfind("_")
-        prefix, suffix = (name[:split], name[split:]) if split > 0 else ("", name)
         width = max(16, right - left)
-        suffix = metrics.elidedText(suffix, Qt.TextElideMode.ElideRight, width)
-        room = width - metrics.horizontalAdvance(suffix)
-        prefix = metrics.elidedText(prefix, Qt.TextElideMode.ElideMiddle, room) if prefix and room > 16 else ""
-        strong = QColor(theme.selection_text if selected else theme.text_strong)
-        muted = QColor(theme.text if selected else theme.text_muted)
-        text_rect = QRectF(left, rect.top(), width, rect.height())
-        flags = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
-        painter.setPen(muted)
-        painter.drawText(text_rect, flags, prefix)
-        painter.setPen(strong)
-        painter.drawText(text_rect.adjusted(metrics.horizontalAdvance(prefix), 0, 0, 0), flags, suffix)
+        name = fit_list_name(row.tomogram.name, painter.fontMetrics(), width, self.owner.name_prefixes.get(row.group, ""))
+        painter.setPen(QColor(name_colour(opened, selected, theme)))
+        painter.drawText(QRectF(left, rect.top(), width, rect.height()),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, name)
         painter.restore()
 
     @staticmethod
@@ -169,6 +189,7 @@ class TomogramList(QWidget):
         super().__init__(parent)
         self.setObjectName("tomogramList")
         self.rows: dict[str, TomogramRow] = {}
+        self.name_prefixes: dict[str, str] = {}
         self.opened: set[str] = set()
         self.stated_for: Callable[[Volume], float | None] = lambda _volume: None
         self.ordered_keys: tuple[str, ...] = ()
@@ -218,6 +239,7 @@ class TomogramList(QWidget):
         self.tree.setMouseTracking(True)
         self.tree.setItemDelegate(ReviewRowDelegate(self))
         self.capture_column = CaptureColumn(self)
+        self.movie_marks = MovieMarks(self)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.context_menu)
         self.compact = QComboBox(parent)
@@ -268,6 +290,7 @@ class TomogramList(QWidget):
 
     def install(self, payload: PreparedTomogramTab) -> None:
         self.rows = {row.tomogram.id: row for row in payload.rows}
+        self.name_prefixes = group_name_prefixes(payload.rows)
         self.membership = None
         self.route_keys, self.scope_label = None, ""
         self.rebuild()
@@ -400,6 +423,7 @@ class TomogramList(QWidget):
 
     def refresh_counts(self) -> None:
         self.capture_column.reflow()
+        self.movie_marks.reflow()
         self.result.setText(f"{len(self.ordered_keys)} of {len(self.rows)} shown")
         self.provenance.setText(f"from {self.scope_label}" if self.route_keys is not None else "")
         self.route_chip.setVisible(self.route_keys is not None)
@@ -408,7 +432,8 @@ class TomogramList(QWidget):
         self.segment.setItemText(0, f"All · {len(self.rows)}")
         self.segment.setItemText(1, f"Not opened · {not_opened}")
         self.segment.setItemText(2, f"Needs attention · {sum(self.needs_attention(row) for row in self.rows.values())}")
-        self.segment.setItemData(0, f"Show all {len(self.rows)} tomograms. Bold names are tomograms that you did not open.", Qt.ItemDataRole.ToolTipRole)
+        self.segment.setItemData(0, f"Show all {len(self.rows)} tomograms. Names in bold are tomograms that you did not open. "
+                                 "Names in grey are tomograms that you opened.",Qt.ItemDataRole.ToolTipRole)
         self.segment.setItemData(2, f"Show the {sum(self.needs_attention(row) for row in self.rows.values())} tomograms "
                                  "with warnings. A tomogram that you correct stays until you change the filter.",
                                  Qt.ItemDataRole.ToolTipRole)
@@ -422,6 +447,7 @@ class TomogramList(QWidget):
         for index in range(self.sort.count()):
             self.sort.setItemIcon(index, themed_icon("arrow-up-down", size=14))
         self.capture_column.icon = themed_icon("camera", size=14)
+        self.movie_marks.icon = themed_icon("film", size=14)
         self.capture_column.reflow()
         self.tree.viewport().update()
 

@@ -15,7 +15,10 @@ from tomography_session_browser.reports.formatting import acquisition_window_tex
 from tomography_session_browser.reports.layout import meta_row, stat_card_data, stat_cards_block
 from tomography_session_browser.reports.sections.contents import contents_card
 from tomography_session_browser.reports.sections.totals import Totals, aggregate_totals, dashboard_tile_statuses, report_atlas_statuses
+from tomography_session_browser.reports.sections.tomograms import contents_detail, cover_card
 from tomography_session_browser.reports.sections.warnings import warning_summary_table
+from tomography_session_browser.presentation.report_tomograms import ScopedTomograms
+from tomography_session_browser.reports.tomogram_slices import ReportSlices
 
 
 def cover_page(
@@ -25,6 +28,8 @@ def cover_page(
     project_groups: Sequence[ProjectReportGroup] = (),
     generated_at: datetime | None = None,
     sections: Sequence[ReportSection] = (),
+    tomograms: ScopedTomograms | None = None,
+    slices: ReportSlices | None = None,
 ) -> list:
     generated_at = generated_at or datetime.now()
     title = project_title or report_title([ctx.session for ctx in contexts])
@@ -46,10 +51,15 @@ def cover_page(
 
     flowables.extend(stat_cards_block(cover_stat_cards(contexts, totals)))
     flowables.append(Spacer(1, styles.CARD_GAP))
+    if tomograms is not None:
+        flowables.extend(cover_card(tomograms, slices))
+        flowables.append(Spacer(1, styles.CARD_GAP))
 
     # The Tilt series card already states the outcomes, and the contents
     # shows them per dataset, so the summary has no separate outcome chart.
-    contents = contents_card(sections, width=PORTRAIT_USABLE_W)
+    by_dataset = {section.anchor.removesuffix("-tomograms"): section for section in tomograms.sections} if tomograms else {}
+    contents = contents_card(sections, width=PORTRAIT_USABLE_W,
+                             tomograms={key: contents_detail(section) for key, section in by_dataset.items()})
     if contents is not None:
         flowables.append(contents)
         flowables.append(Spacer(1, styles.CARD_GAP))
@@ -97,7 +107,9 @@ def cover_meta(contexts: Sequence[SessionContext], generated_at: datetime) -> li
     windows = [ctx for ctx in contexts if ctx.dashboard.acquisition_start]
     if len(windows) == 1:
         items.append(("Acquisition", acquisition_window_text(windows[0].dashboard)))
-    items.append(("Generated", generated_at.strftime("%Y-%m-%d %H:%M")))
+    # A no-break space keeps the date and time on one line: on A4 the group
+    # otherwise splits and leaves the time alone on the next line.
+    items.append(("Generated", generated_at.strftime("%Y-%m-%d %H:%M")))
     return items
 
 

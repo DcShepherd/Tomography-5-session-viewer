@@ -1,5 +1,6 @@
 """Plane-slider marks with an independent, bounded capture-history consumer."""
 from __future__ import annotations
+from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.presentation.help_content import LocalBinding, InteractionKind
 
 from dataclasses import dataclass
@@ -234,8 +235,7 @@ class PlaneSlider(QSlider):
             planes += f" and {len(cluster.planes) - 6} more"
         versions = ", ".join(sorted({value.entry.record.request.volume.version for value in cluster.captures}))
         count = len(cluster.captures)
-        noun = "capture" if count == 1 else "captures"
-        text = f"{normal_axis(self.tab.state.axis)} {planes} · {versions}\n{count} {noun}"
+        text = f"{normal_axis(self.tab.state.axis)} {planes} · {versions}\n{count_phrase(count, 'capture')}"
         if len(cluster.planes) > 1:
             text += " · click to choose a plane"
         text += "\n" + " ".join(self.marks.notices)
@@ -274,8 +274,8 @@ class PlaneSlider(QSlider):
             for plane in cluster.planes:
                 captures = tuple(value for value in cluster.captures if value.plane == plane)
                 versions = ", ".join(sorted({value.entry.record.request.volume.version for value in captures}))
-                noun = "capture" if len(captures) == 1 else "captures"
-                action = menu.addAction(f"{normal_axis(self.tab.state.axis)} {plane + 1} · {versions} · {len(captures)} {noun}")
+                action = menu.addAction(f"{normal_axis(self.tab.state.axis)} {plane + 1} · {versions} · "
+                                        f"{count_phrase(len(captures), 'capture')}")
                 action.triggered.connect(lambda checked=False, value=captures[0]: self.activate_capture(value.entry.id, value.plane))
         if self.marks.notices:
             menu.addSeparator()

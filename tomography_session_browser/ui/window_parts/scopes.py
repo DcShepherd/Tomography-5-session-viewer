@@ -213,7 +213,7 @@ class ScopeQueries(QObject):
         return None
 
 
-    def populate_tree(self) -> None:
+    def populate_tree(self, *, open_user_group: str | None = None) -> None:
         self.parts.project_panel.populate(
             ProjectTreeItems(self.state.review.workspace, self.parts.scopes.label_for),
             self.parts.scopes.project_groups(),
@@ -221,6 +221,8 @@ class ScopeQueries(QObject):
             current_key=self.parts.scopes.selected_project_group_key(),
             recent_paths=self.state.review.settings.recent_sessions,
             highlighted_tilt_series_id=self.state.dashboard.dashboard_highlighted_tilt_series_id,
+            user_groups=self.state.review.user_groups,
+            open_user_group=open_user_group,
         )
 
 

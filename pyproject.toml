@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tomography-session-browser"
-version = "1.0.1"
+version = "1.1.0"
 description = "Read-only Tomography 5 session browser."
 requires-python = ">=3.11"
 dependencies = [

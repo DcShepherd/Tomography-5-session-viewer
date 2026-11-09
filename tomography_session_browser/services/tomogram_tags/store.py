@@ -13,7 +13,7 @@ from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.domain.tomogram_tags import TagProject
 from tomography_session_browser.services.atomic_files import atomic_write, bounded_read, exclusive, move_exclusive, FileChanged, FileTooLarge
 from tomography_session_browser.services.settings_service import settings_path
-from tomography_session_browser.services.tomogram_tags.codec import PROJECT_LIMIT, decode_project, encode_project
+from tomography_session_browser.services.tomogram_tags.codec import NEWEST_SCHEMA, PROJECT_LIMIT, decode_project, encode_project
 from tomography_session_browser.services.output_boundary import check_output_path, require_output_directory
 
 
@@ -69,7 +69,10 @@ class TagProjectStore:
         self.backup = self.path.with_name(self.path.name + ".bak")
         self.protected_roots = protected_roots
         directory = lock_directory or settings_path().parent / "tag-project-locks"
-        self.lock = directory / (hashlib.sha256(path_identity_key(self.path.resolve()).encode()).hexdigest() + ".lock")
+        #: The resolved path identity, computed once. A new store is built for
+        #: each open or reload, so callers need no further ``resolve()``.
+        self.identity = path_identity_key(self.path.resolve())
+        self.lock = directory / (hashlib.sha256(self.identity.encode()).hexdigest() + ".lock")
         # Only one accepted header is retained. Its digest proves that the bytes
         # under the lock are the already validated copy, avoiding a second full
         # decode on every save. An outside change still refuses before this cache.
@@ -113,7 +116,7 @@ class TagProjectStore:
                 return LoadedProject(ProjectStatus.MISSING, has_backup=self.backup.exists())
             try:
                 raw = json.loads(content)
-                if isinstance(raw, dict) and raw.get("kind") == "tomogram-tags" and type(raw.get("schema")) is int and raw["schema"] > 1:
+                if isinstance(raw, dict) and raw.get("kind") == "tomogram-tags" and type(raw.get("schema")) is int and raw["schema"] > NEWEST_SCHEMA:
                     return LoadedProject(ProjectStatus.READ_ONLY, reason="This project needs a newer version of the app.")
                 project = decode_project(content)
                 accepted = digest(content)

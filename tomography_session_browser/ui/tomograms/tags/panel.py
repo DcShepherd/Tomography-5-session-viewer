@@ -8,10 +8,12 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMenu, QPlainTextEdi
 
 from tomography_session_browser.presentation.design_tokens import SPACE_S
 from tomography_session_browser.presentation.tomogram_tag_entry import DraftValidity
+from tomography_session_browser.presentation.tomogram_tag_changes import ChangeNotice, count_tooltip
 from tomography_session_browser.services.tomogram_tags.session import SaveState, SaveStatus
 from tomography_session_browser.services.tomogram_tags.binding import ProjectKey
 from tomography_session_browser.presentation.messages import MessageContent
 from tomography_session_browser.ui.tomograms.tags.entry import TagEntry
+from tomography_session_browser.ui.tomograms.tags.change_notice import ChangeNoticeFrame
 from tomography_session_browser.ui.widgets.switch import Switch
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
@@ -128,6 +130,9 @@ class TagsPanel(QFrame):
         self.reason.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.reason.setWordWrap(True)
         self.layout_.addWidget(self.reason)
+        self.change_notice = ChangeNoticeFrame(self)
+        self.change_notice.review.clicked.connect(owner.review_change)
+        self.layout_.addWidget(self.change_notice)
         self.setup = QWidget(self)
         setup = QVBoxLayout(self.setup)
         setup.setContentsMargins(0, 0, 0, 0)
@@ -208,12 +213,14 @@ class TagsPanel(QFrame):
         self.pending_flash = None
 
     def render(self, target, project, row, reason: str, editable: bool, save_state: SaveState | None, can_create: bool = False,
-               *, save_notice: MessageContent | None = None, project_key: ProjectKey | None = None) -> None:
+               *, save_notice: MessageContent | None = None, project_key: ProjectKey | None = None,
+               change: ChangeNotice | None = None) -> None:
         previous_key = self.project_key
         if self.note_target is not None and target != self.note_target:
             self.close_note()
         self.reason.setText(reason)
         self.reason.setVisible(bool(reason))
+        self.change_notice.render(change)
         self.save_state = save_state
         self.project_key = project_key
         self.save_as.setEnabled(project_key is not None)
@@ -234,7 +241,8 @@ class TagsPanel(QFrame):
         with QSignalBlocker(self.complete):
             self.complete.setChecked(row.counting_complete if row else False)
         self.heading.setText(f"TAGS · {len(row.tags) if row else 0}")
-        content = (target, project.catalogue if project else (), row.tags if row else (), row.links if row else (), editable)
+        content = (target, project.catalogue if project else (), row.tags if row else (), row.links if row else (),
+                   row.acceptances if row else (), editable)
         if content != self.rows_content:
             self.rows_content = content
             self.render_rows(project, row, editable)
@@ -288,7 +296,7 @@ class TagsPanel(QFrame):
             count.setFlat(True)
             count.setEnabled(editable)
             count.setAccessibleName(f"Count for {catalogue[assignment.tag_id].name}")
-            count.setToolTip(f"Recorded on {assignment.version_label} · {assignment.recorded_at}")
+            count.setToolTip(literal_tooltip(count_tooltip(assignment, row)))
             count.clicked.connect(lambda _, i=assignment.tag_id: self.entry.edit_count(i))
             camera = QToolButton(widget)
             camera.setAutoRaise(True)

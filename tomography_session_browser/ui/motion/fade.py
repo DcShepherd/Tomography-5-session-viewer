@@ -14,6 +14,12 @@ from tomography_session_browser.ui.motion.easing import ease_out_cubic
 PENDING_LAYOUT_PASSES = 3
 
 
+def flush_pending_layouts() -> None:
+    """Run the posted layout requests now, so every geometry is as it will next paint."""
+    for _ in range(PENDING_LAYOUT_PASSES):
+        QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+
+
 class PageFade(QWidget):
     """A veil in the page's colour lifting off a tab page as it appears.
 
@@ -154,8 +160,7 @@ class PictureFade(QWidget):
         No event is processed while it is hidden, so no frame shows the gap.
         """
 
-        for _ in range(PENDING_LAYOUT_PASSES):
-            QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+        flush_pending_layouts()
         ratio, parent = self.devicePixelRatioF(), self.parentWidget()
         picture = QPixmap(self.size() * ratio)
         picture.setDevicePixelRatio(ratio)

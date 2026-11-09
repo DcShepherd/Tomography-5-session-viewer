@@ -14,7 +14,10 @@ from tomography_session_browser.ui.widgets import message_sheet
 from tomography_session_browser.ui.widgets.literal_text import literal_mnemonic
 from tomography_session_browser.domain.tomogram_tags import TagAssignment, TagSource
 from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogram, Volume
-from tomography_session_browser.services.tomogram_tags.binding import ProjectKey, bind_row, reference, suggested_path
+from tomography_session_browser.services.tomogram_tags.binding import (
+    AcceptanceProposal, ProjectKey, bind_row, bind_rows, commit_acceptance, propose_acceptance, reference, suggested_path,
+)
+from tomography_session_browser.presentation.tomogram_tag_changes import change_notice
 from tomography_session_browser.services.tomogram_tags.project import (
     assign, create_tag, find_row, new_project, set_complete, set_note, unassign, utc_now,
 )
@@ -45,7 +48,7 @@ class TagOwner(QWidget):
         self.projects = projects or TagProjects(self, tab.protected_roots)
         if self.owns_projects:
             tab.destroyed.connect(self.projects.dispose)
-            self.projects.loaded_sources = lambda: tab.payload.sources
+            self.projects.loaded_sources = lambda: tab.payload.loaded_sources
         self.export_feedback: dict[ProjectKey, MessageContent] = {}
         self.panel = TagsPanel(self)
         self.column = TagsColumn(self)
@@ -99,9 +102,10 @@ class TagOwner(QWidget):
         target = self.target()
         session = target.session if target else None
         project = session.project if session else None
-        row, warning = None, ""
+        row, warning, change = None, "", None
         if target and project:
             binding = bind_row(project, target.folder, target.row)
+            change = change_notice(binding)
             row, warning = binding.saved, binding.reason
         if target:
             folder_key = path_identity_key(target.folder.path)
@@ -133,7 +137,7 @@ class TagOwner(QWidget):
         key = ProjectKey.at(session.store.path, project) if session and project else None
         previous_key = self.panel.project_key
         self.panel.render(target, project, row, warning, self.editable(), session.save_state if session else None, can_create,
-            save_notice=notice, project_key=key)
+            save_notice=notice, project_key=key, change=change)
         # One retained export result per open project; a retired project cannot publish feedback.
         self.export_feedback = {identity: content for identity, content in self.export_feedback.items()
             if (saved := self.projects.sessions.get(identity.path)) is not None
@@ -149,7 +153,7 @@ class TagOwner(QWidget):
         total = len(self.projects.attention_sessions())
         verb = "needs" if total == 1 else "need"
         self.tab.status.tag_save.setText(f"{count_phrase(total, 'tag project')} {verb} attention · Review")
-        self.tab.status.tag_save.setVisible(bool(total))
+        self.tab.status.show_action(self.tab.status.tag_save, bool(total))
 
     def begin(self) -> None:
         if self.column.compact:
@@ -227,7 +231,7 @@ class TagOwner(QWidget):
         ref = reference(source, target.folder, target.row)
         project = assign(project, ref, TagAssignment(tag.id, draft.value(), target.volume.path.relative_to(target.folder.path).as_posix(), target.volume.version, utc_now()))
         folder = self.tab.settings.tomogram_snapshot_folder
-        suggested = suggested_path(target.folder.path, Path(folder)) if folder else Path.home() / (target.folder.name + ".tags.json")
+        suggested = suggested_path(target.folder.path, Path(folder) if folder else None)
         if folder and not suggested.exists():
             path = str(suggested)
         else:
@@ -378,7 +382,8 @@ class TagOwner(QWidget):
         self.changed()
 
     def show_recovery(self) -> None:
-        menu = QMenu(self.tab.status.tag_save)
+        anchor = self.tab.status.action_anchor(self.tab.status.tag_save)
+        menu = QMenu(anchor)
         for session in self.projects.sessions.values():
             if not session.dirty and not any(s is session for _, s in self.projects.failed_bindings.values()):
                 continue
@@ -387,7 +392,7 @@ class TagOwner(QWidget):
             item.addAction("Save As…", lambda _, s=session: self.save_as(s)).setEnabled(session.project is not None)
             item.addAction("Retry folder bindings", self.retry)
             item.addAction("Reload and discard edits…", lambda _, s=session: self.recovery_reload(s))
-        menu.exec(self.tab.status.tag_save.mapToGlobal(self.tab.status.tag_save.rect().bottomLeft()))
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     def recovery_reload(self, session) -> None:
         if self.resolve_old(session):
@@ -402,6 +407,44 @@ class TagOwner(QWidget):
             finally:
                 dialog.deleteLater()
 
+    def review_change(self) -> None:
+        from tomography_session_browser.ui.tomograms.tags.change_sheet import ChangeSheet
+
+        target = self.target()
+        if target is None or target.session is None or target.session.project is None:
+            return
+        binding = bind_row(target.session.project, target.folder, target.row)
+        if binding.ref is None or not binding.needs_review:
+            return
+        sheet = ChangeSheet(self.panel, self, target.session, (binding.ref.source, binding.ref.relative))
+        try:
+            sheet.exec()
+        finally:
+            sheet.deleteLater()
+
+    def change_proposal(self, session: TagSession, keys: frozenset[tuple[str, str]] | None = None) -> AcceptanceProposal | None:
+        project = session.project
+        if project is None or session.retired:
+            return None
+        rows = bind_rows(project, self.tab.payload.loaded_sources)
+        return propose_acceptance(project, (item for item in rows if keys is None or (
+            item.binding.ref is not None and (item.binding.ref.source, item.binding.ref.relative) in keys)))
+
+    def accept_changes(self, session: TagSession, displayed: AcceptanceProposal,
+                       keys_shown: frozenset[tuple[str, str]] | None, chosen: frozenset[tuple[str, str]]) -> str:
+        project = session.project
+        if project is None or self.change_proposal(session, keys_shown) != displayed:
+            subject = "This tomogram" if keys_shown is not None else "The list"
+            return f"{subject} changed while you reviewed it. Nothing was accepted. Review it again."
+        if self.projects.stopping:
+            return "The window is closing. Nothing was accepted."
+        try:
+            session.edit(commit_acceptance(project, displayed, chosen, utc_now()), expected=displayed.project)
+        except ValueError as exc:
+            return str(exc)
+        self.changed()
+        return ""
+
     def export(self, *, parent: QWidget | None = None) -> None:
         from tomography_session_browser.services.tomogram_tags.csv_export import export_csv
         target = self.target()
@@ -415,11 +458,10 @@ class TagOwner(QWidget):
         if not path:
             return
         states = {}
-        for folder in self.tab.payload.sources:
-            for row in folder.tomograms:
-                binding = bind_row(project, folder, row)
-                if binding.ref:
-                    states[(binding.ref.source, binding.ref.relative)] = ("Bound", binding.changed)
+        for bound in bind_rows(project, self.tab.payload.loaded_sources):
+            binding = bound.binding
+            if binding.ref:
+                states[(binding.ref.source, binding.ref.relative)] = ("Bound", binding.source_changed)
         roots = self.tab.protected_roots()
         def finished(future):
             if future.exception():

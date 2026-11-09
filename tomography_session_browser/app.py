@@ -17,16 +17,14 @@ def run(argv: Sequence[str] | None = None) -> int:
     from tomography_session_browser.ui.main_window import MainWindow
     from tomography_session_browser.ui.qt_logging import install_qt_message_handler
     from tomography_session_browser.presentation.design_tokens import palette_for
-    from tomography_session_browser.ui.theme import apply_theme
-    from tomography_session_browser.ui.style import AppStyle
+    from tomography_session_browser.ui.theme import style_application
 
     install_crash_logging()
     install_qt_message_handler()
     app = QApplication(list(argv or []))
-    app.setStyle(AppStyle(app.style().objectName()))
     app.setWindowIcon(brand_window_icon())
     settings = load_settings()
-    apply_theme(app, palette_for(settings.theme))
+    style_application(app, palette_for(settings.theme))
     window = MainWindow(settings=settings)
     window.show()
     return app.exec()

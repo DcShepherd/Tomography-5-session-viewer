@@ -12,6 +12,7 @@ from tomography_session_browser.services.tilt_series_validation import GridValid
 from tomography_session_browser.presentation.dashboard.dashboard import analysed_dashboard_model
 from tomography_session_browser.presentation.dashboard.models import DashboardModel
 from tomography_session_browser.presentation.warnings import session_warnings
+from tomography_session_browser.presentation.report_datasets import report_datasets
 from tomography_session_browser.services.session_linking import atlas_link_resolutions
 
 
@@ -41,39 +42,11 @@ class SessionContext:
         dashboard, analysis = analysed_dashboard_model(session, workspace=workspace)
         validations = analysis.validation_by_key
 
-        collection_samples = [
-            sample
-            for sample in session.samples
-            if (
-                sample.search_maps
-                or sample.search_tiles
-                or sample.batch_positions
-                or sample.tilt_series
-                or sample.overviews
-            )
-        ]
         # Atlas-only / single-collection sessions sometimes hold their
-        # data-collection content directly on the session rather than on
-        # a Sample. Synthesise a single "session-level" Sample in that
-        # case so the per-sample section logic keeps working.
-        if not collection_samples and (
-            session.overviews or session.search_maps or session.search_tiles or session.batch_positions or session.tilt_series
-        ):
-            collection_samples.append(
-                Sample(
-                    id=session.id,
-                    name=session.name,
-                    path=session.path,
-                    atlas=session.atlas,
-                    overviews=session.overviews,
-                    search_maps=session.search_maps,
-                    search_tiles=session.search_tiles,
-                    batch_positions=session.batch_positions,
-                    tilt_series=session.tilt_series,
-                    metadata=session.metadata_summary,
-                    warnings=list(session.warnings),
-                )
-            )
+        # data-collection content directly on the session rather than on a
+        # Sample; ``report_datasets`` then gives one synthetic session-level
+        # Sample so the per-sample section logic keeps working.
+        collection_samples = report_datasets(session)
 
         warnings = session_warnings(session)
         warning_rows = summarise_warnings(warnings)

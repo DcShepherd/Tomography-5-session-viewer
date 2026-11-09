@@ -20,21 +20,23 @@ switch to the landscape template without re-implementing the chrome.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from os import PathLike
 from functools import partial
-from typing import Sequence
+from typing import BinaryIO, Sequence
 
-from reportlab.lib.pagesizes import LETTER, landscape
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import inch
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import BaseDocTemplate, Flowable, Frame, PageTemplate
 
 from tomography_session_browser.reports import styles
 from tomography_session_browser.reports.graphics import draw_brand_mark, fit_text
+from tomography_session_browser.services.atomic_files import publish_from
 from tomography_session_browser.services.output_boundary import check_output_path
 
-PAGE_SIZE = LETTER
+PAGE_SIZE = A4
 LEFT_MARGIN = RIGHT_MARGIN = 0.6 * inch
 TOP_MARGIN = 0.78 * inch
 BOTTOM_MARGIN = 0.62 * inch
@@ -119,11 +121,12 @@ class _ReportDoc(BaseDocTemplate):
 
     def __init__(
         self,
-        path: Path,
+        path: Path | BinaryIO,
         *,
         title: str,
         footer_label: str,
         protected_roots: tuple[Path, ...] = (),
+        keywords: str | None = None,
     ) -> None:
         styles.ensure_fonts()
         self.page_count = 0
@@ -132,7 +135,7 @@ class _ReportDoc(BaseDocTemplate):
         self._protected_roots = protected_roots
 
         super().__init__(
-            str(path),
+            str(path) if isinstance(path, Path) else path,
             pagesize=PAGE_SIZE,
             leftMargin=LEFT_MARGIN,
             rightMargin=RIGHT_MARGIN,
@@ -142,6 +145,8 @@ class _ReportDoc(BaseDocTemplate):
             author="Tomography Session Browser",
             creator="Tomography Session Browser",
             subject="Tomography session report",
+            # Only reports with central slices carry keywords (D4 §5.5).
+            **({"keywords": keywords} if keywords is not None else {}),
         )
 
         portrait_frame = Frame(
@@ -239,6 +244,14 @@ class _ReportDoc(BaseDocTemplate):
         self.page_count = self.page
 
 
+@dataclass(slots=True)
+class ReportResult:
+    """What a published report gives back: its path, page count and generation warnings."""
+    path: Path
+    page_count: int
+    warnings: list[str]
+
+
 def write_pdf(
     output_path: Path,
     flowables: Sequence[Flowable],
@@ -246,14 +259,20 @@ def write_pdf(
     title: str,
     footer_label: str,
     protected_roots: tuple[Path, ...] = (),
+    keywords: str | None = None,
 ) -> int:
     """Render ``flowables`` to ``output_path`` and return the page count."""
 
     check_output_path(output_path, protected_roots)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    doc = _ReportDoc(output_path, title=title, footer_label=footer_label, protected_roots=protected_roots)
-    doc.build(list(flowables))
-    return doc.page_count or 1
+
+    def write(stream: BinaryIO) -> int:
+        doc = _ReportDoc(stream, title=title, footer_label=footer_label, protected_roots=protected_roots,
+                         keywords=keywords)
+        doc.build(list(flowables))
+        return doc.page_count or 1
+    # Publication is atomic: a failed build leaves any earlier file intact.
+    return publish_from(output_path, write, protected_roots)
 
 
 __all__ = [
@@ -262,5 +281,6 @@ __all__ = [
     "PAGE_SIZE",
     "PORTRAIT_USABLE_H",
     "PORTRAIT_USABLE_W",
+    "ReportResult",
     "write_pdf",
 ]

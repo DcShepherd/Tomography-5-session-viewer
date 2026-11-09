@@ -2,18 +2,24 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from tomography_session_browser.domain.identity import entity_key_text, path_identity_key
 from tomography_session_browser.domain.models import Sample, Session, TiltSeries
 from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogram
-from tomography_session_browser.presentation.project_tree import ProjectTreeGroup, session_key, display_samples
+from tomography_session_browser.presentation.project_tree import ProjectTreeGroup, session_key, display_samples, processing_group_key
 from tomography_session_browser.services.tomogram_links import TomogramLink
 
 if TYPE_CHECKING:
     from tomography_session_browser.presentation.workspace import Workspace
+
+
+#: Why a row is not placed under a parent. The link status does not change;
+#: these explain placement only, for exclusion notes in reports.
+ResidualReason = Literal['nonunique_owner', 'unrepresented_owner']
+ExclusionKind = Literal['ambiguous', 'unconfirmed_name', 'declined_name', 'revoked_name'] | ResidualReason
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +28,9 @@ class TomogramPlacement:
     by_parent: Mapping[str, tuple[Tomogram, ...]]
     owner_by_row: Mapping[str, Sample | Session]
     residual_by_source: Mapping[str, tuple[Tomogram, ...]]
+    #: A resolved row that stays residual: its parent has several displayed
+    #: owners, or none (a session-level record in a session with samples).
+    residual_reasons: Mapping[str, ResidualReason] = field(default_factory=lambda: MappingProxyType({}))
 
     @classmethod
     def build(cls, workspace: Workspace) -> TomogramPlacement:
@@ -46,6 +55,7 @@ class TomogramPlacement:
         rows = tuple({row.id: row for source in workspace.processing_sources for row in source.tomograms}.values())
         parents: dict[str, list[Tomogram]] = {}
         placed: dict[str, Sample | Session] = {}
+        reasons: dict[str, ResidualReason] = {}
         residual: dict[str, list[Tomogram]] = {source.id: [] for source in workspace.processing_sources}
         for row in rows:
             link = workspace.tomogram_links.get(row.id)
@@ -55,8 +65,25 @@ class TomogramPlacement:
                 parents.setdefault(link.target_key or '', []).append(row)
             else:
                 residual[row.source_id].append(row)
+                if link is not None and link.status == 'resolved':
+                    reasons[row.id] = 'nonunique_owner' if candidates else 'unrepresented_owner'
         return cls(rows, MappingProxyType({key: tuple(values) for key, values in parents.items()}),
-                   MappingProxyType(placed), MappingProxyType({key: tuple(values) for key, values in residual.items()}))
+                   MappingProxyType(placed), MappingProxyType({key: tuple(values) for key, values in residual.items()}),
+                   MappingProxyType(reasons))
+
+    def exclusion(self, row: Tomogram, link: TomogramLink) -> ExclusionKind | None:
+        """Why a row with a named candidate is not placed; None when placed or nothing is named."""
+        if row.id in self.owner_by_row:
+            return None
+        if row.id in self.residual_reasons:
+            return self.residual_reasons[row.id]
+        if link.status == 'ambiguous':
+            return 'ambiguous'
+        if link.status == 'unresolved' and link.step == 'E' and link.proposal_signature:
+            if link.decision == 'dismissed':
+                return 'declined_name'
+            return 'revoked_name' if link.decision == 'revoked' else 'unconfirmed_name'
+        return None
 
     def for_parents(self, parents: Sequence[TiltSeries]) -> tuple[Tomogram, ...]:
         keys = {row.id for parent in parents for row in self.by_parent.get(entity_key_text(parent), ())}
@@ -67,7 +94,7 @@ class TomogramPlacement:
         for source in sources:
             if source.tomograms and not self.residual_by_source[source.id]:
                 continue
-            key = 'processing:' + source.id
+            key = processing_group_key(source.id)
             groups.append(ProjectTreeGroup(key, 'processing', source.name, names.get(key, source.name), [],
                 warnings=list(source.warnings), name_lookup_keys=(key,), processing_source=source))
         return tuple(groups)

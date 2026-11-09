@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tomography_session_browser.domain.tomograms import VolumeFingerprint
 from tomography_session_browser.parsers.volume_header import fingerprint
+from tomography_session_browser.presentation.tomogram_movie_history import MovieMark, movie_marks
 from tomography_session_browser.presentation.tomogram_persistence import decode_state
 from tomography_session_browser.presentation.tomogram_state import TomogramViewState
 from tomography_session_browser.presentation.tomogram_tabs import TomogramRow, restored_sort
@@ -55,6 +56,9 @@ class CapturePage:
     total: int
     counts: tuple[tuple[str, int], ...] = ()
     retained_ids: frozenset[str] = frozenset()
+    #: The newest saved movie of each row; None when this query did not read them
+    #: (a history page), so the last known marks stay.
+    movies: tuple[tuple[str, MovieMark], ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +129,7 @@ def decode_capture(record: ReviewRecord, context: HistoryContext) -> CaptureEntr
 
 def capture_page(repository: ReviewRepository, context: HistoryContext, *, before: tuple[int, str] | None = None,
                  limit: int = 50, extra: tuple[ReviewRecord, ...] = (),
-                 retain_ids: frozenset[str] = frozenset(),
+                 retain_ids: frozenset[str] = frozenset(), with_movies: bool = False,
                  cancelled: Callable[[], bool] = lambda: False) -> CapturePage:
     # Reconcile a bounded set of cross-page identities during the existing worker
     # scan, without keeping all records or rescanning the repository on the GUI.
@@ -159,7 +163,8 @@ def capture_page(repository: ReviewRepository, context: HistoryContext, *, befor
         elif current[volume.path] != volume.fingerprint:
             notice = "Captured source changed. The capture is kept."
         entries.append(replace(entry, restore_notice=notice))
-    return CapturePage(tuple(entries), page.next_cursor, page.total, page.counts, frozenset(retained))
+    movies = movie_marks(repository, context.identities, cancelled=cancelled) if with_movies else None
+    return CapturePage(tuple(entries), page.next_cursor, page.total, page.counts, frozenset(retained), movies)
 
 
 def scope_history(repository: ReviewRepository, context: HistoryContext, *, extra: tuple[ReviewRecord, ...] = (),
@@ -167,7 +172,7 @@ def scope_history(repository: ReviewRepository, context: HistoryContext, *, extr
     # Pixel sizes reach every loaded version, so they are read for any scope, also an empty one.
     stated = read_stated(repository, cancelled=cancelled)
     if not context.identities:
-        return ScopeHistory(None, "", (), CapturePage((), None, 0), stated)
+        return ScopeHistory(None, "", (), CapturePage((), None, 0, movies=()), stated)
     # A view saved before pixel sizes had their own records still holds a confirmed
     # value. It counts until a record speaks for that file, and then the record wins.
     saved: dict[str, StatedPixelSize] = {}
@@ -207,5 +212,6 @@ def scope_history(repository: ReviewRepository, context: HistoryContext, *, extr
     updates = {key: True for key in opened}
     updates.update({key: value[1] for key, value in explicit.items()})
     return ScopeHistory(candidate[1] if candidate else None, candidate[2] if candidate else "",
-                        tuple(updates.items()), capture_page(repository, context, limit=200, extra=extra, cancelled=cancelled),
+                        tuple(updates.items()), capture_page(repository, context, limit=200, extra=extra,
+                                                                             with_movies=True, cancelled=cancelled),
                         StoredPixelSizes({**saved, **stated.entries}, stated.rejected))

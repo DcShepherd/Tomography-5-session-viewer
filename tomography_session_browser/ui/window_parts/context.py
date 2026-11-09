@@ -244,9 +244,7 @@ class ContextController(QObject):
         self.ui.context_header.set_context_stack(self.parts.context.current_context_stack())
         scope = self.state.review.scope
         self.parts.context_panel.sources.set_sources(self.parts.project.sources_for_scope(scope))
-        processing = isinstance(scope, ProjectTreeGroup) and scope.processing_source is not None
-        self.ui.report_action.setEnabled(bool(self.state.review.workspace.sessions) and not processing
-                                         and not self.state.loading.loading_task_active and not self.parts.report.active)
+        self.parts.report.refresh_action()
 
 
 
@@ -462,9 +460,25 @@ class ContextController(QObject):
         viewer = self.ui.viewer_tabs.get(TabKey.TILT_SERIES)
         if self.ui.tabs.currentIndex() != TAB_LABELS.index(TabKey.TILT_SERIES) or viewer is None or viewer.current_object() is not value:
             return
-        lines = [self.parts.context.context_description(value), "",
-                 *self.frame_context_lines(viewer, value, frame_index, frame_count)]
-        self.parts.context_panel.show_item(self.parts.scopes.label_for(value), "\n".join(lines), item=value)
+        self.parts.context_panel.show_item(self.parts.scopes.label_for(value),
+                                           self.with_frame(value, viewer, frame_index, frame_count), item=value)
+
+    def with_frame(self, value: TiltSeries, viewer: ViewerTab, frame_index: int | None, frame_count: int) -> str:
+        """A tilt series' description followed by the frame its viewer displays."""
+        return "\n\n".join((self.parts.context.context_description(value),
+                            "\n".join(self.frame_context_lines(viewer, value, frame_index, frame_count))))
+
+    def displayed_description(self, value: Any) -> str:
+        """The text ``set_context`` shows for ``value``: the tilt series on its page adds its displayed frame.
+
+        Tools that check the panel compare against this, so they cannot drift from it (GR-07).
+        """
+        if (isinstance(value, TiltSeries) and value is self.parts.context.page_item()
+                and not self.state.review.suppress_viewer_context):
+            viewer = self.ui.viewer_tabs[TabKey.TILT_SERIES]
+            return self.with_frame(value, viewer, viewer.parts.frame_scrubber.displayed_frame_index(),
+                                   viewer.slice_slider.maximum() + 1)
+        return self.parts.context.context_description(value)
 
     def frame_context_lines(self, viewer: ViewerTab, value: TiltSeries, frame_index: int | None, frame_count: int) -> list[str]:
         scrubber = viewer.parts.frame_scrubber
@@ -508,15 +522,9 @@ class ContextController(QObject):
             self.parts.context.refresh_context_header()
             self.parts.context.sync_context_heading()
             return
-        description = self.parts.context.context_description(value)
-        if (isinstance(value, TiltSeries) and value is self.parts.context.page_item()
-                and not self.state.review.suppress_viewer_context):
-            viewer = self.ui.viewer_tabs[TabKey.TILT_SERIES]
-            description += "\n\n" + "\n".join(self.frame_context_lines(
-                viewer, value, viewer.parts.frame_scrubber.displayed_frame_index(), viewer.slice_slider.maximum() + 1))
         self.parts.context_panel.show_item(
             label,
-            description,
+            self.displayed_description(value),
             item=value,
             scope=isinstance(value, Session | Sample | LinkedSampleGroup | ProjectTreeGroup | AllTomograms | FolderTomograms),
         )

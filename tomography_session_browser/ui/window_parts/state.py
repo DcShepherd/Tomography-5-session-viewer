@@ -39,6 +39,7 @@ from tomography_session_browser.services.settings_service import (
 )
 from tomography_session_browser.ui.viewer.models import ViewerViewState
 from tomography_session_browser.presentation.tomogram_state import TomogramViewState
+from tomography_session_browser.presentation.project_folders import UserGroup
 from tomography_session_browser.domain.tomograms import ProcessingSource
 from tomography_session_browser.presentation.tomogram_review_state import TomogramReviewState
 from tomography_session_browser.presentation.processing_context import SourceReadTimes
@@ -102,6 +103,9 @@ class ReviewState:
     pending_filter_notice: str | None
     preserve_tree_root_context: bool
     project_display_names: dict[str, str]
+    #: The user's own project-panel groups, for this app session only, like renames (B4).
+    user_groups: tuple[UserGroup, ...]
+    user_group_serial: int
     project_tree_activation_guard: int | None
     save_settings: Callable[[Settings], None]
     scope: Scope
@@ -152,6 +156,8 @@ class WindowState:
         self.dashboard.pending_project_tree_clear_tilt_id: str | None = None
         self.dashboard.dashboard_scope_prefers_tree = False
         self.review.project_display_names: dict[str, str] = {}
+        self.review.user_groups: tuple[UserGroup, ...] = ()
+        self.review.user_group_serial = 0
         self.viewer.atlas_collection_visibility: dict[tuple[str, str], bool] = {}
         self.review.suppress_viewer_context = False
         self.review.preserve_tree_root_context = False

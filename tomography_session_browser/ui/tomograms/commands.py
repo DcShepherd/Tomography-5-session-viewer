@@ -48,6 +48,17 @@ def input_available(tab: TomogramTab) -> bool:
 
 
 def install_commands(tab: TomogramTab) -> tuple[QAction, ...]:
+    oblique = tab.oblique
+
+    def step(delta: float) -> Callable[[], None]:
+        """Turn the keypad axis; the sliders mark it."""
+        return lambda: oblique.by_keyboard(lambda: oblique.step_active(delta))
+
+    def view(x: int, y: int, roll: bool = False) -> Callable[[], None]:
+        """Turn the view by one increment about the active pane's axes; the sliders mark every axis that changes."""
+        return lambda: oblique.by_keyboard(lambda: oblique.drag(tab.state.axis, x * oblique.increment, y * oblique.increment,
+                                                                roll, preview=False))
+
     definitions = (
         Command("tomograms.add-a-tag", "Add a tag", "#", tab.tags.begin),
         Command("tomograms.snapshot", "Snapshot", "Ctrl+S", tab.captures.snapshot),
@@ -66,27 +77,27 @@ def install_commands(tab: TomogramTab) -> tuple[QAction, ...]:
         Command("tomograms.navigator", "Navigator", "N", tab.toggle_navigator),
         Command("tomograms.pivot-lock", "Pivot lock", "Ctrl+L", tab.oblique.lock.toggle),
         Command("tomograms.orientation-box", "Orientation box", "B", tab.oblique.show_box),
-        Command("tomograms.zero-active-rotation-axis", "Zero active rotation axis", "Num+0", tab.oblique.zero_active),
-        Command("tomograms.smaller-rotation-increment", "Smaller rotation increment", "<", lambda: tab.oblique.change_increment(-1)),
-        Command("tomograms.larger-rotation-increment", "Larger rotation increment", ">", lambda: tab.oblique.change_increment(1)),
-        Command("tomograms.view-rotation-left", "View rotation left", "Shift+Num+4", lambda: tab.oblique.drag(tab.state.axis, -tab.oblique.increment, 0, preview=False)),
-        Command("tomograms.view-rotation-right", "View rotation right", "Shift+Num+6", lambda: tab.oblique.drag(tab.state.axis, tab.oblique.increment, 0, preview=False)),
-        Command("tomograms.view-rotation-up", "View rotation up", "Shift+Num+8", lambda: tab.oblique.drag(tab.state.axis, 0, tab.oblique.increment, preview=False)),
-        Command("tomograms.view-rotation-down", "View rotation down", "Shift+Num+2", lambda: tab.oblique.drag(tab.state.axis, 0, -tab.oblique.increment, preview=False)),
-        Command("tomograms.view-rotation-clockwise", "View rotation clockwise", "Shift+Num+9", lambda: tab.oblique.drag(tab.state.axis, tab.oblique.increment, 0, True, preview=False)),
-        Command("tomograms.view-rotation-anticlockwise", "View rotation anticlockwise", "Shift+Num+3", lambda: tab.oblique.drag(tab.state.axis, -tab.oblique.increment, 0, True, preview=False)),
-        Command("tomograms.rotate-active-axis-minus-0-1", "Rotate active axis -0.1°", "Num+4", lambda: tab.oblique.step_active(-.1)),
-        Command("tomograms.rotate-active-axis-plus-0-1", "Rotate active axis +0.1°", "Num+6", lambda: tab.oblique.step_active(.1)),
-        Command("tomograms.rotate-active-axis-minus-0-5", "Rotate active axis -0.5°", "Num+2", lambda: tab.oblique.step_active(-.5), ("Num+Down",)),
-        Command("tomograms.rotate-active-axis-plus-0-5", "Rotate active axis +0.5°", "Num+8", lambda: tab.oblique.step_active(.5)),
-        Command("tomograms.rotate-active-axis-minus-15", "Rotate active axis -15°", "Num+1", lambda: tab.oblique.step_active(-15), ("Num+End",)),
-        Command("tomograms.rotate-active-axis-plus-15", "Rotate active axis +15°", "Num+3", lambda: tab.oblique.step_active(15)),
-        Command("tomograms.rotate-view-left", "Rotate view left", "Shift+Left", lambda: tab.oblique.drag(tab.state.axis, -tab.oblique.increment, 0, preview=False)),
-        Command("tomograms.rotate-view-right", "Rotate view right", "Shift+Right", lambda: tab.oblique.drag(tab.state.axis, tab.oblique.increment, 0, preview=False)),
-        Command("tomograms.rotate-view-up", "Rotate view up", "Shift+Up", lambda: tab.oblique.drag(tab.state.axis, 0, tab.oblique.increment, preview=False)),
-        Command("tomograms.rotate-view-down", "Rotate view down", "Shift+Down", lambda: tab.oblique.drag(tab.state.axis, 0, -tab.oblique.increment, preview=False)),
-        Command("tomograms.rotate-in-plane-clockwise", "Rotate in plane clockwise", "Shift+PgUp", lambda: tab.oblique.drag(tab.state.axis, tab.oblique.increment, 0, True, preview=False)),
-        Command("tomograms.rotate-in-plane-anticlockwise", "Rotate in plane anticlockwise", "Shift+PgDown", lambda: tab.oblique.drag(tab.state.axis, -tab.oblique.increment, 0, True, preview=False)),
+        Command("tomograms.zero-active-rotation-axis", "Zero active rotation axis", "Num+0", lambda: oblique.by_keyboard(oblique.zero_active)),
+        Command("tomograms.smaller-rotation-increment", "Smaller rotation increment", "<", lambda: oblique.change_increment(-1)),
+        Command("tomograms.larger-rotation-increment", "Larger rotation increment", ">", lambda: oblique.change_increment(1)),
+        Command("tomograms.view-rotation-left", "View rotation left", "Shift+Num+4", view(-1, 0)),
+        Command("tomograms.view-rotation-right", "View rotation right", "Shift+Num+6", view(1, 0)),
+        Command("tomograms.view-rotation-up", "View rotation up", "Shift+Num+8", view(0, 1)),
+        Command("tomograms.view-rotation-down", "View rotation down", "Shift+Num+2", view(0, -1)),
+        Command("tomograms.view-rotation-clockwise", "View rotation clockwise", "Shift+Num+9", view(1, 0, True)),
+        Command("tomograms.view-rotation-anticlockwise", "View rotation anticlockwise", "Shift+Num+3", view(-1, 0, True)),
+        Command("tomograms.rotate-active-axis-minus-0-1", "Rotate active axis -0.1°", "Num+4", step(-.1)),
+        Command("tomograms.rotate-active-axis-plus-0-1", "Rotate active axis +0.1°", "Num+6", step(.1)),
+        Command("tomograms.rotate-active-axis-minus-0-5", "Rotate active axis -0.5°", "Num+2", step(-.5), ("Num+Down",)),
+        Command("tomograms.rotate-active-axis-plus-0-5", "Rotate active axis +0.5°", "Num+8", step(.5)),
+        Command("tomograms.rotate-active-axis-minus-15", "Rotate active axis -15°", "Num+1", step(-15), ("Num+End",)),
+        Command("tomograms.rotate-active-axis-plus-15", "Rotate active axis +15°", "Num+3", step(15)),
+        Command("tomograms.rotate-view-left", "Rotate view left", "Shift+Left", view(-1, 0)),
+        Command("tomograms.rotate-view-right", "Rotate view right", "Shift+Right", view(1, 0)),
+        Command("tomograms.rotate-view-up", "Rotate view up", "Shift+Up", view(0, 1)),
+        Command("tomograms.rotate-view-down", "Rotate view down", "Shift+Down", view(0, -1)),
+        Command("tomograms.rotate-in-plane-clockwise", "Rotate in plane clockwise", "Shift+PgUp", view(1, 0, True)),
+        Command("tomograms.rotate-in-plane-anticlockwise", "Rotate in plane anticlockwise", "Shift+PgDown", view(-1, 0, True)),
         Command("tomograms.ortho-lines", "Ortho lines", "L", tab.lines_button.toggle),
         Command("tomograms.filters", "Filters", "G", tab.recipes.toggle_filters),
         Command("tomograms.undo-image-change", "Undo image change", "Ctrl+Z", tab.recipes.undo),

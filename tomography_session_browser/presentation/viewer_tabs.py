@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from tomography_session_browser.parsers.path_utils import natural_key
 from tomography_session_browser.presentation.viewer_entries import Entry, entries_for_tab
 from tomography_session_browser.presentation.workspace import EntityKind, Scope, Workspace
 from tomography_session_browser.presentation.atlas_rows import atlas_list_status, atlas_row
+from tomography_session_browser.presentation.scope_identity import prepared_tabs_key
 from tomography_session_browser.services.item_status import ItemListStatus, build_item_status_context, item_list_status
 from tomography_session_browser.services.preview_sources import (
     PreviewSources, atlas_preview_path, batch_position_preview_path,
@@ -32,7 +34,7 @@ VIEWER_TAB_SOURCES = {
 }
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class PreparedViewerTab:
     """One tab's rows, with each row's status and preview source by row key.
 
@@ -51,13 +53,63 @@ class PreparedViewerTab:
     entries: tuple[Entry, ...] = ()
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class PreparedViewerTabs:
+    """Every tab for one scope, and whether each file preparation checked existed.
+
+    ``key`` is ``prepared_tabs_key`` of the scope it was prepared for, so it is
+    stored under that scope whichever path renders it.
+    """
+
+    key: str
     tabs: dict[str, PreparedViewerTab]
     availability: dict[Path, bool] = field(default_factory=dict)
 
     def files_unchanged(self) -> bool:
         return all(path.exists() == existed for path, existed in self.availability.items())
+
+
+#: How many scopes' prepared tabs ``PreparedTabsCache`` keeps.
+PREPARED_TABS_CAPACITY = 8
+
+
+class PreparedTabsCache:
+    """Recently prepared tabs by ``prepared_tabs_key``, for one workspace at a time.
+
+    The least recently used entry goes first. A ``get`` or ``put`` with another
+    workspace empties the cache and keeps that one, so no entry of a replaced
+    workspace is ever served. The cache never prepares and never reads a file:
+    each caller decides whether an entry is still current (``files_unchanged``).
+    GUI thread only.
+    """
+
+    def __init__(self, capacity: int = PREPARED_TABS_CAPACITY) -> None:
+        self.capacity = capacity
+        self.workspace: Workspace | None = None
+        self.entries: OrderedDict[str, PreparedViewerTabs] = OrderedDict()
+
+    def get(self, workspace: Workspace, scope: Scope) -> PreparedViewerTabs | None:
+        self._bind(workspace)
+        key = prepared_tabs_key(scope)
+        if key in self.entries:
+            self.entries.move_to_end(key)
+        return self.entries.get(key)
+
+    def put(self, workspace: Workspace, tabs: PreparedViewerTabs) -> None:
+        self._bind(workspace)
+        self.entries[tabs.key] = tabs
+        self.entries.move_to_end(tabs.key)
+        while len(self.entries) > self.capacity:
+            self.entries.popitem(last=False)
+
+    def clear(self) -> None:
+        self.workspace = None
+        self.entries.clear()
+
+    def _bind(self, workspace: Workspace) -> None:
+        if workspace is not self.workspace:
+            self.entries.clear()
+            self.workspace = workspace
 
 
 def search_tile_sort_key(value: SearchTile) -> tuple[Any, ...]:
@@ -137,4 +189,4 @@ def prepare_viewer_tabs(
                 inferred_labels=status_context.inferred_batch_labels,
             )
         tabs[label] = PreparedViewerTab(label, grouped.items, statuses, sources, grouped.entries)
-    return PreparedViewerTabs(tabs, availability)
+    return PreparedViewerTabs(prepared_tabs_key(scope), tabs, availability)

@@ -174,6 +174,11 @@ def _isolate_qt_state_between_tests(_isolate_profile_between_tests):
     method on a deleted widget crashes the process. Each window is then
     retired on its own (``deleteLater`` then a targeted ``DeferredDelete``),
     never by a global flush that would run other objects' deferred work.
+
+    A finished load freezes the garbage collector's heap (``ui.loading.heap``)
+    until the next load or the window's close. A window retired here is never
+    closed, so the heap is thawed here too: otherwise a later test's
+    ``gc.collect()`` could not free what this test made.
     """
 
     before = _window_addresses()
@@ -197,5 +202,8 @@ def _isolate_qt_state_between_tests(_isolate_profile_between_tests):
                     window.deleteLater()
                     QCoreApplication.sendPostedEvents(window, QEvent.Type.DeferredDelete)
     finally:
+        from tomography_session_browser.ui.loading import heap
+
+        heap.thaw()
         _restore_theme_state(theme_before)
         _clear_held_keys()

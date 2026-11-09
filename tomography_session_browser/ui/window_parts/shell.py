@@ -148,7 +148,7 @@ class WindowShell(QObject):
         self.ui.open_action = self.parts.shell.action(
             "folder-plus",
             LOAD_SESSIONS_TITLE + "…",
-            "Load acquisition sessions or Warp, IMOD or AreTomo3 processing folders. "
+            "Load acquisition sessions or Warp, IMOD, AreTomo3, Scipion or reconstruction folders. "
             "You can load several or drop them onto Project.",
             QKeySequence.StandardKey.Open,
             identity="shell.open",
@@ -198,7 +198,7 @@ class WindowShell(QObject):
 
         # Report action -------------------------------------------------------
         self.ui.report_action = self.parts.shell.action(
-            "file-text", "Report", "Export a PDF report for the loaded session(s).", QKeySequence.StandardKey.Print,
+            "file-text", "Report", "Make a PDF report of the loaded sessions or processing folders.", QKeySequence.StandardKey.Print,
             identity="shell.report",
         )
         self.ui.report_action.setEnabled(False)
@@ -470,7 +470,9 @@ class WindowShell(QObject):
         self.ui.project_dock.setWidget(panel)
         self.window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.ui.project_dock)
         self.ui.project_drawer = PanelDrawer(self.window, name="Project", from_left=True)
-        self.ui.connections.append(lambda signal=self.ui.project_drawer.escape_pressed: signal.connect(self.parts.chrome.close_project_drawer))
+        # Marks show only in the drawer: Escape clears them first, then closes it (B4).
+        self.ui.connections.append(lambda signal=self.ui.project_drawer.escape_pressed: signal.connect(
+            lambda: self.parts.project_panel.tree.clear_marks() or self.parts.chrome.close_project_drawer()))
         self.ui.project_drawer.stay_under = lambda: self.ui.loading_overlay
         self.ui.project_drawer.toggle_control = lambda: self.ui.main_toolbar.widgetForAction(self.ui.project_panel_action)
 

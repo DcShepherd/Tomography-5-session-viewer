@@ -83,6 +83,13 @@ QLabel#healthValue[valueState="ambiguous"] {{
     font-weight: 400;
 }}
 
+/* The report dialog's options area scrolls on a short screen; it shows the dialog's own background. */
+QScrollArea#reportOptionsScroll,
+QWidget#reportOptions {{
+    background: transparent;
+    border: 0;
+}}
+
 /* The dashboard's and the report dialog's secondary buttons: one rule for
    both classes (they were styled twice, with different borders and padding). */
 QToolButton#dashboardFilterButton,
@@ -191,9 +198,11 @@ QToolButton#viewerCompactItem::menu-indicator {{
     right: 4px;
 }}
 
-/* A glyph button that opens a menu (the project badge key, file actions) is
-   its own cue. The native arrow was drawn over the glyph's lower right corner. */
-QToolButton[menuIndicator="none"]::menu-indicator {{
+/* A glyph button that opens a menu (the project badge key, file actions, the
+   rotation sliders' angle settings) is its own cue. The native arrow was drawn
+   over the glyph; in a push button it also pushed the glyph out of its cell. */
+QToolButton[menuIndicator="none"]::menu-indicator,
+QPushButton[menuIndicator="none"]::menu-indicator {{
     image: none;
     width: 0px;
 }}

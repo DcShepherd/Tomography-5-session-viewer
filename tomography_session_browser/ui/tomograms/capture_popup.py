@@ -1,5 +1,6 @@
 """Bounded row history and explicit menu traversal; transactions stay with Captures."""
 from __future__ import annotations
+from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.presentation.help_content import LocalBinding, InteractionKind
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -186,7 +187,7 @@ class CapturePopup(QMenu):
         name = row.tomogram.name if row else "Tomogram outside this scope"
         counts = self.tab.history.count_snapshot
         total = page.total if page is not None else counts.rows.get(self.row_key) if counts else None
-        self.addAction(f"{name} · {total if total is not None else '…'} captures").setEnabled(False)
+        self.addAction(f"{name} · {count_phrase(total, 'capture') if total is not None else '… captures'}").setEnabled(False)
         for failure in self.captures.failures:
             if failure.job.request.row_key != self.row_key:
                 continue

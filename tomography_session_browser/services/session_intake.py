@@ -23,6 +23,7 @@ import time
 from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.identity import path_identity_key
+from tomography_session_browser.parsers.scipion_jobs import processing_root
 
 #: How long a drag may spend classifying before the rest wait for the drop.
 #: Classification is cheap on a local disk, but a slow network share must not
@@ -104,13 +105,21 @@ class DroppedFolder:
             return "Data collection"
         if self.status == FolderCheck.SESSION_FILE:
             return "File"
-        return "Not a session"
+        # Only a finished check can say this. A missing or unreadable folder was
+        # never classified, so it has no kind to name; its reason says why.
+        return "Not a session" if self.kind == SessionKind.UNKNOWN else ""
 
     @property
     def reason(self) -> str:
         """Why it will not load; empty when it will."""
 
         return self.note or _REASONS.get(self.status, "")
+
+
+def source_key(path: str | Path) -> str:
+    """The key of the source a path loads: a Scipion job folder loads its ``extra`` folder."""
+
+    return path_identity_key(processing_root(Path(path)))
 
 
 def names_a_file(path: Path) -> bool:
@@ -142,7 +151,7 @@ def check_folder(
         return DroppedFolder(text, FolderCheck.NOT_A_SESSION, note=UNREADABLE_REASON)
     if kind == SessionKind.UNKNOWN:
         return DroppedFolder(text, FolderCheck.NOT_A_SESSION, kind=kind)
-    if path_identity_key(path) in loaded_keys:
+    if source_key(path) in loaded_keys:
         return DroppedFolder(text, FolderCheck.ALREADY_LOADED, kind=kind)
     return DroppedFolder(text, FolderCheck.READY, kind=kind)
 
@@ -235,7 +244,7 @@ def assess_paths(
     seen: set[str] = set()
     folders: list[DroppedFolder] = []
     for raw_path in paths:
-        key = path_identity_key(raw_path)
+        key = source_key(raw_path)
         if key in seen:
             continue
         seen.add(key)

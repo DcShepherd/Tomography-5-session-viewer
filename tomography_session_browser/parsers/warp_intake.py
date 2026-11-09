@@ -40,6 +40,16 @@ def recorded_movie_paths(path: Path) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(block.value or ()))
 
 
+def confirmed_absent(path: Path) -> bool:
+    try:
+        path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def load_warp_source(path: Path) -> ProcessingSource:
     path = path.resolve()
     if not is_warp_source(path):
@@ -47,17 +57,27 @@ def load_warp_source(path: Path) -> ProcessingSource:
     source_key = path_identity_key(path)
     grouped: dict[str, list[Volume]] = defaultdict(list)
     issues: list[str] = []
+    versions_complete = True
     for relative, version in WARP_VERSIONS:
         folder = path / relative
         if not folder.is_dir():
+            if not confirmed_absent(folder):
+                issues.append(f"{relative}: could not be checked. It may still be there.")
+                versions_complete = False
             continue
         try:
             files = sorted(folder.iterdir(), key=lambda item: natural_key(item.name))
         except OSError as exc:
             issues.append(f"{relative}: {exc}")
+            versions_complete = False
             continue
         for file in files:
-            if file.suffix.lower() not in (".mrc", ".rec", ".map") or not file.is_file():
+            if file.suffix.lower() not in (".mrc", ".rec", ".map"):
+                continue
+            if not file.is_file():
+                if not file.is_dir():
+                    issues.append(f"{file.relative_to(path).as_posix()}: could not be checked. It may still be there.")
+                    versions_complete = False
                 continue
             match = VOLUME_NAME.fullmatch(file.stem)
             stem = match.group("stem") if match else file.stem
@@ -65,6 +85,7 @@ def load_warp_source(path: Path) -> ProcessingSource:
                 grouped[stem].append(read_volume(file, version))
             except OSError as exc:
                 issues.append(f"{file.name}: {exc}")
+                versions_complete = False
     tomograms = []
     for stem in sorted(grouped, key=natural_key):
         evidence = warp_evidence(path, stem)
@@ -74,4 +95,5 @@ def load_warp_source(path: Path) -> ProcessingSource:
                                   tuple(grouped[stem]), evidence, warnings + processing.warnings, processing))
     if not tomograms:
         issues.append("No reconstruction MRC files were found in the known Warp output directories.")
-    return ProcessingSource(source_key, path.name, path, tuple(tomograms), warnings=tuple(issues))
+    return ProcessingSource(source_key, path.name, path, tuple(tomograms),
+                            warnings=tuple(issues), versions_complete=versions_complete)

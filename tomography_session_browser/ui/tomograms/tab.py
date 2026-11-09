@@ -439,6 +439,8 @@ class TomogramTab(QWidget):
             self.state = TomogramViewState(self.state.row_key, volume.id, spacing_override=self.pixel_sizes.displayed(volume),
                                           query=self.query(), segment=self.review_list.segment_key(), sort=self.review_list.sort.currentText())
             self.warning.setText(" ".join(filter(None, (self.warning.text(), "Source fingerprint changed; using fresh geometry and levels."))))
+            # The fresh state has no rotation; the sync above showed the old one.
+            self.oblique.sync()
         self.version_selection.show_notice()
         self.warning.setVisible(bool(self.warning.text()))
         self.state = replace(self.state, volume_signature=signature)

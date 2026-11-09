@@ -94,7 +94,7 @@ def no_session_state() -> EmptyState:
     return EmptyState(
         kind=KIND_NO_SESSION,
         title="No session loaded",
-        detail="Load a Tomography 5 session folder, or a Warp, IMOD or AreTomo3 processing folder. You can load several at once.",
+        detail="Load a Tomography 5 session folder, or a Warp, IMOD, AreTomo3, Scipion job or reconstruction folder. You can load several at once.",
         evidence=("Ctrl+O opens Load sessions. Source folders stay unchanged.",),
         primary=EmptyStateAction("Load sessions…", COMMAND_OPEN_SESSION),
     )
@@ -232,7 +232,7 @@ def viewer_empty_state(
 
 def no_processing_state() -> EmptyState:
     return EmptyState(KIND_NO_ENTITIES, "No tomogram sources loaded",
-        "Load a Warp, IMOD or AreTomo3 processing folder to review tomograms.",
+        "Load a Warp, IMOD, AreTomo3, Scipion or reconstruction folder to review tomograms.",
         primary=EmptyStateAction("Load processing folder…", COMMAND_OPEN_SESSION))
 
 

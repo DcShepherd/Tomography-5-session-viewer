@@ -13,6 +13,7 @@ from tomography_session_browser.services.volume.review_repository import ReviewR
 from tomography_session_browser.services.volume.pixel_sizes import KIND as PIXEL_SIZE_KIND
 from tomography_session_browser.services.volume.review_writer import ReviewBatch, ReviewBatchResult, ReviewWrite, ReviewWriteFailure, ReviewWriter
 from tomography_session_browser.presentation.tomogram_capture_history import CaptureEntry
+from tomography_session_browser.presentation.tomogram_movie_history import MOVIE_KIND
 
 
 class ReviewPersistence:
@@ -94,6 +95,10 @@ class ReviewPersistence:
         elif isinstance(context, ReviewBatch) or (isinstance(context, ReviewWrite) and context.kind == PIXEL_SIZE_KIND):
             logging.getLogger(__name__).warning("Could not save a pixel size: %s", message)
             self.tab.pixel_sizes.not_saved(context.writes if isinstance(context, ReviewBatch) else (context,))
+        elif isinstance(context, ReviewWrite) and context.kind == MOVIE_KIND:
+            logging.getLogger(__name__).warning("Could not record a movie export: %s", message)
+            self.tab.status.message.setText("The movie is saved, but the app could not record it. "
+                                            "Its mark in the list shows only until you close the app.")
         else:
             logging.getLogger(__name__).warning("Could not save tomogram review state: %s", message)
             self.tab.status.message.setText("Review state could not be saved; the current view remains usable.")
@@ -206,5 +211,5 @@ class ReviewPersistence:
         self.tab.status.keep.setToolTip("Keep this view and allow it to replace the saved view. Source files are unchanged.")
         if not visible and (self.tab.status.resume.hasFocus() or self.tab.status.keep.hasFocus()):
             self.tab.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
-        self.tab.status.resume.setVisible(visible)
-        self.tab.status.keep.setVisible(visible)
+        self.tab.status.show_action(self.tab.status.resume, visible)
+        self.tab.status.show_action(self.tab.status.keep, visible)

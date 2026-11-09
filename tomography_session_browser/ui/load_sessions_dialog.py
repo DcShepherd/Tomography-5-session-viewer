@@ -5,11 +5,16 @@ screening and data collection folders go into one list, by browsing or by
 dropping them on the window; each is checked as it arrives
 (``services/session_intake.py``, the same check the project panel's drop uses)
 and a folder that will not load says why, with "Use parent folder" when a
-session file was chosen instead of its folder.
+session file was chosen instead of its folder. Recent folders are one more way
+to queue: a chip calls ``add_paths``, as browsing and dropping do, so it inherits
+the same check, and the window never touches a recent folder until one is chosen.
+With recents, the queue area is reserved from first show, so queuing never moves
+a chip, and a keyboard choice hands focus to Load, or to Browse if the folder
+will not load (``ui/widgets/recent_session_row.py`` owns the chips' keys).
 
 Loading always adds to the current project, as Open and Import both did. The
 window only chooses folders: it reads nothing but what classification needs,
-and the source folders stay read-only.
+writes no settings or history, and the source folders stay read-only.
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QPainter, QPen
 from PySide6.QtWidgets import (
     QDialog,
@@ -32,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from tomography_session_browser.domain.display_names import count_phrase
+from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.services.session_intake import (
     DroppedFolder,
@@ -39,11 +45,18 @@ from tomography_session_browser.services.session_intake import (
     SessionIntake,
     assess_paths,
 )
+from tomography_session_browser.services.settings_service import recent_session_paths
 from tomography_session_browser.ui.folder_picker import select_session_folder
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.presentation.design_tokens import SPACE_L, SPACE_M, SPACE_S, SPACE_XL, SPACE_XS, SPACE_XXL
 from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
+from tomography_session_browser.ui.widgets.recent_session_row import (
+    METRIC_CHANGE_EVENTS,
+    Activation,
+    HeldEnterFilter,
+    RecentSessionRow,
+)
 from tomography_session_browser.ui.widgets.session_drop import (
     Glyph,
     GlyphButton,
@@ -54,12 +67,16 @@ from tomography_session_browser.ui.widgets.session_drop import (
 
 LOAD_SESSIONS_TITLE = "Load sessions"
 LOAD_SESSIONS_SUBTITLE = (
-    "Add acquisition, Warp, IMOD or AreTomo3 processing folders. "
+    "Add acquisition, Warp, IMOD, AreTomo3, Scipion or reconstruction folders. "
     "Sessions that belong together are linked when they load."
 )
 DROP_WELL_TITLE = "Drop session folders here"
 BROWSE_HINT = "Browse adds one folder at a time; drop several at once"
 NOTHING_QUEUED_NOTE = "Nothing queued yet"
+#: How many recent folders the window offers.
+RECENT_CHIPS = 3
+MINIMUM_WIDTH = 560
+BASE_MINIMUM_HEIGHT = 440
 
 
 def load_button_text(ready_count: int) -> str:
@@ -142,6 +159,7 @@ class QueuedFolderRow(QFrame):
 
         self.kind = QLabel(folder.kind_label, self)
         self.kind.setObjectName("queuedFolderKind")
+        self.kind.setHidden(not folder.kind_label)
         layout.addWidget(self.kind)
 
         self.parent_button: QPushButton | None = None
@@ -163,13 +181,15 @@ class QueuedFolderRow(QFrame):
         self.remove_button = GlyphButton("x", f"Remove {folder.name}", self, size=28)
         self.remove_button.clicked.connect(lambda: self.remove_requested.emit(folder.path))
         layout.addWidget(self.remove_button)
-        self.setAccessibleName(
-            f"{folder.name}, {folder.kind_label}" + (f", {folder.reason}" if folder.reason else ", ready")
-        )
+        parts = (folder.name, folder.kind_label, folder.reason or "ready")
+        self.setAccessibleName(", ".join(part for part in parts if part))
 
 
 class LoadSessionsDialog(QDialog):
     """Queue any number of session folders and load them together."""
+
+    #: Set only with a Recent row. Qt sends events while the window is being built.
+    _remeasure: QTimer | None = None
 
     def __init__(
         self,
@@ -178,6 +198,7 @@ class LoadSessionsDialog(QDialog):
         parent: QWidget | None = None,
         *,
         loaded_paths: Iterable[str | Path] = (),
+        recent_paths: Iterable[str] = (),
     ) -> None:
         super().__init__(parent)
         self._loader = loader
@@ -190,7 +211,7 @@ class LoadSessionsDialog(QDialog):
         self.setWindowTitle(LOAD_SESSIONS_TITLE)
         self.setAcceptDrops(True)
         self.resize(760, 580)
-        self.setMinimumSize(560, 440)
+        self.setMinimumSize(MINIMUM_WIDTH, BASE_MINIMUM_HEIGHT)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -243,11 +264,19 @@ class LoadSessionsDialog(QDialog):
         self.browse_button.setIcon(themed_icon("folder-open"))
         self.browse_button.clicked.connect(self._browse)
         browse_row.addWidget(self.browse_button)
-        self.browse_hint = QLabel(BROWSE_HINT, self.drop_well)
+        self.browse_hint = ElidedLabel(BROWSE_HINT, parent=self.drop_well, prefer_full_width=True)
         self.browse_hint.setObjectName("dropWellHint")
+        self.browse_hint.setAccessibleName(BROWSE_HINT)
         browse_row.addWidget(self.browse_hint)
         browse_row.addStretch(1)
         well_text.addLayout(browse_row)
+        recent = recent_session_paths(recent_paths, excluded_keys=self._loaded_keys)[:RECENT_CHIPS]
+        self.recent_row = RecentSessionRow(recent, self.drop_well) if recent else None
+        if self.recent_row is not None:
+            self.recent_row.path_chosen.connect(self._add_recent)
+            self.recent_row.focus_released.connect(self.browse_button.setFocus)
+            self.drop_well.setProperty("hasRecent", True)
+            well_text.addWidget(self.recent_row)
         well_text.addStretch(1)
         well.addLayout(well_text)
         well.addStretch(1)
@@ -316,6 +345,80 @@ class LoadSessionsDialog(QDialog):
         outer.addWidget(footer)
 
         self._refresh()
+        if self.recent_row is not None:
+            self._hold_the_queue_area()
+            self._order_the_keyboard()
+
+    def _order_the_keyboard(self) -> None:
+        """Tab goes Browse, the chips, then on as before; queue rows come last.
+
+        Qt skips hidden and disabled chips itself, so fitting changes no order.
+        """
+
+        chain = (self.browse_button, *self.recent_row.chips, self.clear_button, self.scroll, self.cancel_button, self.load_button)
+        for first, second in zip(chain, chain[1:]):
+            QWidget.setTabOrder(first, second)
+        # Focus moves on to Browse or Load after a choice, or when a chip goes
+        # while its key is held; the key's repeats must not then act there.
+        self._held_enter = HeldEnterFilter(self, (self.browse_button, self.load_button, self))
+
+    def _hold_the_queue_area(self) -> None:
+        """Give the queue its room from the start, so that no chip ever moves.
+
+        If the well shrank when the first folder arrived, the chips would jump
+        and the second click of a double-click could land on Clear list.
+        """
+
+        policy = self.queue.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.queue.setSizePolicy(policy)
+        # Theme changes can arrive in several steps: measure once, after them all.
+        self._remeasure = QTimer(self)
+        self._remeasure.setSingleShot(True)
+        self._remeasure.setInterval(0)
+        self._remeasure.timeout.connect(self._fit_minimum_to_contents)
+        self._fit_minimum_to_contents()
+
+    def _queue_row_height(self) -> int:
+        """The tallest queue row, from the real row, with no folder looked at."""
+
+        heights = []
+        for folder in (
+            DroppedFolder("representative/collection", FolderCheck.READY, kind=SessionKind.COLLECTION),
+            DroppedFolder("representative/Session.dm", FolderCheck.SESSION_FILE, parent_folder="representative"),
+        ):
+            row = QueuedFolderRow(folder, self.list)
+            for widget in (row, *row.findChildren(QWidget)):
+                widget.ensurePolished()
+            heights.append(row.sizeHint().height())
+            row.setParent(None)
+            row.deleteLater()
+        return max(heights)
+
+    def _fit_minimum_to_contents(self) -> None:
+        """The well, the chips and one whole queue row must fit at the smallest size.
+
+        Measured, because text size decides it. Set again after a style change,
+        which also resets minimums on the styled widgets themselves.
+        """
+
+        for widget in (self, *self.findChildren(QWidget)):
+            widget.ensurePolished()
+        one_row = self._queue_row_height() + 2 * self.list.frameWidth()
+        self.scroll.setMinimumHeight(max(self.scroll.minimumSizeHint().height(), one_row))
+        # A hidden queue asks for no new layout by itself, so its old size stays cached.
+        self.queue.updateGeometry()
+        self.queue.parentWidget().updateGeometry()
+        layout = self.layout()
+        layout.invalidate()
+        self.setMinimumHeight(
+            max(BASE_MINIMUM_HEIGHT, layout.minimumSize().height(), layout.minimumHeightForWidth(MINIMUM_WIDTH))
+        )
+
+    def event(self, event) -> bool:  # noqa: D102 - Qt override
+        if self._remeasure is not None and event.type() in METRIC_CHANGE_EVENTS:
+            self._remeasure.start()
+        return super().event(event)
 
     # -- the queue ------------------------------------------------------------
 
@@ -336,6 +439,17 @@ class LoadSessionsDialog(QDialog):
                 known.add(path_identity_key(text))
                 self._paths.append(text)
         self._refresh()
+
+    def _add_recent(self, path: str, activation: Activation) -> None:
+        """Queue a recent folder. After the keyboard, Enter then loads it, or
+        Browse is offered if it will not load, even when other folders will."""
+
+        self.add_paths([path])
+        if activation is Activation.KEYBOARD:
+            key = path_identity_key(path)
+            folder = next((value for value in self._intake.folders if path_identity_key(value.path) == key), None)
+            target = self.load_button if folder is not None and folder.ready else self.browse_button
+            target.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def remove_path(self, path: str) -> None:
         key = path_identity_key(path)
@@ -365,6 +479,8 @@ class LoadSessionsDialog(QDialog):
         self._refresh()
 
     def _refresh(self) -> None:
+        # Before any chip changes: Qt moves focus on from a chip it turns off.
+        focus = self.focusWidget()
         self._intake = assess_paths(self._paths, self._loader.classify, loaded_keys=self._loaded_keys)
         for row in self.rows:
             row.deleteLater()
@@ -381,11 +497,15 @@ class LoadSessionsDialog(QDialog):
         ready = len(self._intake.ready)
         problems = len(self._intake.problems)
         self.queue.setVisible(bool(queued))
-        # With nothing queued the drop well takes the room the list would.
+        # With nothing queued the drop well takes the room the list would, unless
+        # it holds chips, which must stay where they are.
         self.drop_well.setSizePolicy(
             QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.Fixed if queued else QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed if queued or self.recent_row is not None else QSizePolicy.Policy.Expanding,
         )
+        if self.recent_row is not None:
+            self.recent_row.set_queued({path_identity_key(folder.path) for folder in self._intake.folders})
+            self._keep_focus(focus)
         self.ready_count.setText(f"{ready} ready")
         self.ready_count.setVisible(bool(ready))
         self.problem_count.setText(f"{problems} won’t load")
@@ -395,6 +515,19 @@ class LoadSessionsDialog(QDialog):
         # The arrow is drawn in the enabled label colour; a muted button drops it.
         self.load_button.setIcon(self._load_arrow if ready else QIcon())
         self.footer_note.setText(footer_note(queued, len(self._loaded_keys)))
+
+    def _keep_focus(self, focus: QWidget | None) -> None:
+        """Leave focus where it was; a chip that turned off hands it to Browse.
+
+        Qt would pass it to the next control, which can be Clear list.
+        """
+
+        if focus is None or self.focusWidget() is focus:
+            return
+        if focus.isVisible() and focus.isEnabled():
+            focus.setFocus(Qt.FocusReason.OtherFocusReason)
+        elif focus in self.recent_row.chips:
+            self.browse_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
     # -- browsing and dropping ------------------------------------------------------
 

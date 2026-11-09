@@ -2,13 +2,13 @@
 
 Tomography Session Browser is a desktop application for Thermo Fisher Tomography 5 session folders. Use it to review session images and metadata. Use it to find incomplete or failed tilt series. Use it to make PDF reports of a selected scope.
 
-The application also reads tomograms from Warp, IMOD and AreTomo3 processing folders. Use it to review the planes of a tomogram and to export a movie. See [Review tomograms](#review-tomograms).
+The application also reads tomograms from Warp, IMOD, AreTomo3 and Scipion processing folders. Use it to review the planes of a tomogram and to export a movie. See [Review tomograms](#review-tomograms).
 
 The application is read-only. It does not edit, repair, rename, move or change files in microscope-output folders or processing folders.
 
 Save PDF reports, images, snapshots and movies in a folder that is not in a loaded source folder. This rule applies to all loaded folders, also when they are not in the selected scope.
 
-This is version 1.0.1. The [change log](CHANGELOG.md) lists the changes in each release.
+This is version 1.1.0. The [change log](CHANGELOG.md) lists the changes in each release.
 
 ## Supported platforms
 
@@ -27,7 +27,7 @@ These items are necessary:
 - A 64-bit Windows, Linux or macOS computer with a graphical desktop.
 - [Git](https://git-scm.com/downloads). This is not necessary if you download a ZIP archive.
 - A Conda-compatible installer. See the [Conda installation instructions](https://docs.conda.io/projects/conda/en/stable/user-guide/install/).
-- An unchanged Thermo Fisher Tomography 5 session folder, or a supported Warp, IMOD or AreTomo3 processing folder. See [supported layouts](#1-load-a-processing-folder).
+- An unchanged Thermo Fisher Tomography 5 session folder, or a supported Warp, IMOD, AreTomo3 or Scipion processing folder. See [supported layouts](#1-load-a-processing-folder).
 
 If you do not have Conda, install it. Then close the terminal and open it again. To make sure that Conda is available, run this command:
 
@@ -199,6 +199,10 @@ Start the application. Drag one or more complete session folders from File Explo
 
 You can also select **Load sessions** (Ctrl+O). Drop folders on the window, or select **Browse folders…** one time for each folder. The list shows each folder as an atlas screening session or a data collection session. If a folder cannot load, the list tells the cause. You can add one or more atlas and data collection folders to the list. The application adds the loaded folders to the current project.
 
+Below **Browse folders…**, **Recent:** shows a maximum of three folders that you loaded before. It does not show folders that are in the project. Select a folder to add it to the list.
+
+The application examines the folder only when you select it. It loads the folder only when you select the **Load** button. When a folder is in the list, its **Recent:** button is not available.
+
 The application links sessions only when their recorded metadata supports the link. Loaded folders are read-only.
 
 ![Select complete session folders](docs/images/readme/01-select-session-folders.png)
@@ -280,11 +284,13 @@ Select **Include exposure thumbnails for each tilt series** to add an image of e
 
 The application keeps this selection.
 
+When processing folders are loaded, the dialog also shows them. Tick a folder and select **Include linked tomograms** to add a Tomograms section to each dataset. Select **Include central slices** to add one image of each linked tomogram. Tick only folders to make a folder report. A folder report shows all tomograms in the ticked folders. For each tomogram that has no link, it gives the cause.
+
 The report starts with a summary page. This page has count cards, a contents list and grouped warnings. The contents list has page numbers and the tilt-series outcomes of each dataset.
 
 Each dataset has its own pages after the summary page. Its atlas shows only batch-position status, as in the Atlas tab. The full atlas shows at fit zoom, adjacent to a larger area in which each position has a number. PDF bookmarks link to all datasets and their figure sections.
 
-Reports do not include workstation source paths. They keep session and dataset names. Tilt-series tables show the original pixel size and the MRC pixel size in Å/px. An asterisk shows a metadata estimate when MRC sampling is not available. Overview and search-map images do not show the template reference rectangle. Acquisition overlays stay on the images.
+Reports do not include workstation source paths. They keep session and dataset names. A report with tomograms includes the review tags, counts and notes as they were when the report dialog opened, also unsaved edits. The report does not remove names or paths that you wrote in a note. Tilt-series tables show the original pixel size and the MRC pixel size in Å/px. An asterisk shows a metadata estimate when MRC sampling is not available. Overview and search-map images do not show the template reference rectangle. Acquisition overlays stay on the images.
 
 ![Select report scope](docs/images/readme/04-report-scope.png)
 
@@ -294,16 +300,19 @@ The application reads reconstructed volumes from processing folders. It does not
 
 ### 1. Load a processing folder
 
-Select **Load sessions** (Ctrl+O), or drag the folder onto the project panel. Select the root folder of the processing project. The application reads these layouts:
+Select **Load sessions** (Ctrl+O), or drag the folder onto the project panel. Select the folder that the table gives for your source:
 
-| Source | The folder contains |
-|---|---|
-| Warp | `warp_tiltseries.settings`, or the `warp_tiltseries` and `tomostar` folders |
-| IMOD | `tilt.com`, `tilta.com` or `tiltb.com`, with an output path in the folder |
-| AreTomo3 | `MdocDone.txt` and `*_Vol.mrc` files |
-| Reconstruction folder | `.mrc`, `.rec` or `.map` files with the IMOD `TILT: Tomographic reconstruction` header label, or with MRC space group 1 |
+| Source | Select this folder | The folder contains |
+|---|---|---|
+| Warp | The Warp processing folder | `warp_tiltseries.settings`, or the `warp_tiltseries` and `tomostar` folders |
+| IMOD | The folder of the reconstruction | `tilt.com`, `tilta.com` or `tiltb.com`, with an output path in the folder |
+| AreTomo3 | The AreTomo3 output folder | `MdocDone.txt` and `*_Vol.mrc` files |
+| Scipion | One job folder, for example `Runs/000742_ProtImodTomoReconstruction`, or its `extra` folder | `extra` and `logs` folders; the tomograms are in `extra` |
+| Reconstruction folder | The folder of the volumes | `.mrc`, `.rec` or `.map` files with the IMOD `TILT: Tomographic reconstruction` header label, or with MRC space group 1 |
 
-A reconstruction folder can hold the files directly, or one folder for each tomogram. The application does not search other folders near the root folder. It shows a warning for each file that it cannot identify.
+A reconstruction folder can hold the files directly, or one folder for each tomogram. The application does not search other folders near the selected folder. It shows a warning for each file that it cannot identify.
+
+For Scipion, select one job at a time. The application does not load the project folder or its `Runs` folder, because it does not search the jobs in them. The job folder and its `extra` folder are the same source. The application keeps the full job folder unchanged, also its `logs` folder. Tomograms in `extra/<tilt series>/` get the name of their tilt series. In a cryoCARE job, the application reads `<tilt series>_denoised/<tilt series>_.mrc` as the denoised volume. Files that end in `_even` or `_odd` are the half sets of the tomogram of the same name.
 
 ### 2. Select a tomogram and read its planes
 
@@ -344,6 +353,15 @@ Select an output folder that is not in a source folder. To save the area that yo
 When you load the same source again, the application shows **Resume saved view**. It does not show the saved view until you select this.
 
 To keep tags, counts and notes, select **Create project…** or **Open project…** in the tag panel. This project file is not in your source folders. Type `#` in the tag field to start a new tag. The menu of the tag panel can export the tags as a CSV file.
+
+To save a snapshot linked to a specific tag:
+
+1. Select the tomogram, open or create its tag project, and add the tag to that tomogram.
+2. Set the view that you want to save: version, plane, angle, zoom and image settings.
+3. Right-click the assigned tag row and select **Snapshot and link**. If asked, choose an output folder outside all loaded source folders.
+4. Click the camera beside the tag to open its linked captures. The number beside the camera is the number of linked captures, not the observation count.
+
+Use **Link captures…** in the same menu to attach existing snapshots. When a tag has no linked captures, its camera shows only when you hover over or focus the tag row. Click that camera to open the menu containing **Snapshot and link**. The ordinary viewer camera and Ctrl+S save a snapshot without automatically linking it to a tag.
 
 ### 5. Export a movie
 

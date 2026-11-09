@@ -3,12 +3,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import time
 from types import MappingProxyType
 from typing import Literal
 from PySide6.QtCore import QThreadPool
 
 from tomography_session_browser.presentation.tomogram_capture_history import (CaptureEntry, HistoryContext,
                                                                             CapturePage, capture_page, scope_history)
+from tomography_session_browser.presentation.tomogram_movie import FrozenView
+from tomography_session_browser.presentation.tomogram_movie_history import MOVIE_KIND, MovieMark, newest_marks
+from tomography_session_browser.presentation.tomogram_state import TomogramViewState
+from tomography_session_browser.services.movie.models import MovieResult
 from tomography_session_browser.ui.tomograms.history_loading import HistoryJob, HistoryLoader
 
 
@@ -39,6 +44,9 @@ class CaptureHistory:
         self.unrecorded: dict[str, CaptureEntry] = {}
         self.opened_revision: dict[str, int] = {}
         self.count_snapshot: CountSnapshot | None = None
+        #: Saved movies from the last full-scope read, and this window's own exports since.
+        self.stored_movies: dict[str, MovieMark] = {}
+        self.local_movies: dict[str, MovieMark] = {}
         self.pending_counts: HistoryJob | None = None
         self.refresh_error = ""
 
@@ -58,6 +66,9 @@ class CaptureHistory:
         self.count_snapshot = CountSnapshot(page.total, MappingProxyType(dict(page.counts)))
         self.pending_counts, self.refresh_error = None, ""
         self.publish_review_counts(dict(page.counts))
+        if page.movies is not None:
+            self.stored_movies = dict(page.movies)
+            self.publish_movies()
         if recent != "keep":
             values = {} if recent == "replace" else {entry.id: entry for entry in self.entries}
             values.update((entry.id, entry) for entry in page.entries)
@@ -77,6 +88,19 @@ class CaptureHistory:
     def publish_review_counts(self, counts: Mapping[str, int] | None, note: str = "") -> None:
         self.tab.review_state.capture_counts((row.tomogram for row in self.tab.payload.rows),
                                               self.tab.payload.sources, counts, note)
+
+    def movie_saved(self, view: FrozenView, result: MovieResult) -> None:
+        """Mark the row at once, and record the export so the mark returns after a restart."""
+        output = result.movie or result.path
+        mark = MovieMark(time.time_ns(), output.name)
+        self.local_movies[view.row_key] = mark
+        self.publish_movies()
+        volume = view.volume
+        state = TomogramViewState(view.row_key, volume.id, volume_signature=(volume.fingerprint.size, volume.fingerprint.mtime_ns))
+        self.tab.persistence.write(MOVIE_KIND, str(output), state, output=str(output), created_ns=mark.created_ns)
+
+    def publish_movies(self) -> None:
+        self.tab.review_list.movie_marks.set_marks(newest_marks(self.stored_movies, self.local_movies))
 
     def cancel_counts(self, job: HistoryJob | None, *, replace: bool = False) -> None:
         if job is not None and self.pending_counts is job:
@@ -98,7 +122,7 @@ class CaptureHistory:
         repository, context, extra = self.tab.persistence.repository, self.context(), self.extras()
         writer = self.tab.persistence.writer
         job = self.recent_loader.request(lambda cancelled: writer.read(lambda: capture_page(
-            repository, context, limit=200, extra=extra, cancelled=cancelled)), stamp=stamp)
+            repository, context, limit=200, extra=extra, with_movies=True, cancelled=cancelled)), stamp=stamp)
         self.begin_counts(job)
 
     def refresh_captures(self) -> None:

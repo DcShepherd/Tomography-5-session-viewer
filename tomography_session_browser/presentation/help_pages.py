@@ -7,7 +7,7 @@ from tomography_session_browser.services.status_taxonomy import acquisition_stat
 
 START_SECTIONS = (
     HelpSection("start.intro", HelpPage.START, "Review a collection, then follow the evidence.",
-        ("Load a Tomography 5 session folder, or a Warp, IMOD or AreTomo3 processing folder. You can load several at once.",)),
+        ("Load a Tomography 5 session folder, or a Warp, IMOD, AreTomo3, Scipion job or reconstruction folder. You can load several at once.",)),
     HelpSection("start.load", HelpPage.START, "1 · Load your folders",
         ("Choose folders in Load sessions, or drop them onto Project. A folder that cannot be loaded is explained; the other loaded data remains available.",)),
     HelpSection("start.scope", HelpPage.START, "2 · Choose what to review",
@@ -15,7 +15,7 @@ START_SECTIONS = (
     HelpSection("start.links", HelpPage.START, "3 · Follow a verified relationship",
         ("Use Linked or Go to to open a related item. When no unique destination can be verified, the action explains why. Back returns to the view you left.",)),
     HelpSection("start.observations", HelpPage.START, "4 · Keep observations and export",
-        ("In Tomograms, add tags, optional counts and notes to a separate project file. A snapshot stays on the current tomogram; use the navigation controls to move on. Reports export the acquisition scope you select.",)),
+        ("In Tomograms, add tags, optional counts and notes to a separate project file. A snapshot stays on the current tomogram; use the navigation controls to move on. Reports export the sessions and processing folders you select. A report with tomograms also includes their tags, counts and notes.",)),
     HelpSection("start.help", HelpPage.START, "Help stays open while you work",
         ("F1 opens Keyboard and mouse at your active tab. Search covers all four Help pages.",)),
 )
@@ -31,8 +31,9 @@ FILES_SECTIONS = (
         ("Export movie (Ctrl+E) saves the planes of the view as it was when the dialog opened. Save an H.264 MP4 file, PNG frames, or both. A movie never replaces a file; with PNG frames, its folder also holds a manifest of the rendering recipe.",
          "The dialog keeps your settings for each tomogram until you close the app, also if you click Cancel. All versions of a tomogram share them, so you can export again at another quality, or make a matched movie of another version. Plane numbers and holds apply only if the two versions have the same grid; if not, the dialog says so.",
          "MP4 export needs FFmpeg with the H.264 encoder (libx264), for example the conda-forge GPL build. On Linux, install it in the app's environment. On Windows and macOS, install it in its own environment and add its program folder to PATH. The README has the commands. Without FFmpeg, you can save PNG frames. The app never downloads FFmpeg.")),
-    HelpSection("files.reports", HelpPage.FILES, "Acquisition reports and PNG images",
-        ("The report selection controls what enters the PDF. Reports may create missing parent folders. PNG export asks before replacing an image. Manual tags and notes do not enter acquisition reports or contact sheets.",)),
+    HelpSection("files.reports", HelpPage.FILES, "Reports and PNG images",
+        ("The report selection controls what enters the PDF. Reports may create missing parent folders. PNG export asks before replacing an image.",
+         "A report with linked tomograms, and a folder report, include review tags, counts and notes as they were when the report dialog opened, also unsaved edits. Notes print as you wrote them, with any names or paths in them. An acquisition report without tomograms and a contact sheet include no tags or notes.")),
     HelpSection("files.save-failure", HelpPage.FILES, "When saving fails",
         ("Keep the window open. Your edits stay available for Retry all or a project-specific Save As. Details and Copy preserve the diagnostic text. A saved project with a failed folder binding still needs attention.",)),
     HelpSection("files.moved", HelpPage.FILES, "When a folder has moved",
@@ -42,7 +43,7 @@ FILES_SECTIONS = (
 )
 
 PROJECT_EXPLANATIONS = {
-    "PR": "A loaded Warp, IMOD or AreTomo3 processing folder.",
+    "PR": "A loaded Warp, IMOD, AreTomo3, Scipion or reconstruction folder.",
     "LS": "A group with an atlas screening session and linked data collections.",
     "AT": "The group currently contains atlas screening without a linked data collection.",
     "DC": "A data collection without a linked atlas session in the current project.",

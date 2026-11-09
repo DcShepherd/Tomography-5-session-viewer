@@ -51,11 +51,11 @@ def summary_input(workspace: Workspace, scope: Scope, sort: str = 'Name',
     payload = prepare_tomogram_tab(workspace, scope)
     selection = payload.selection
     version = selection.version if selection else None
-    from tomography_session_browser.presentation.project_tree import ProjectTreeGroup
+    from tomography_session_browser.presentation.project_tree import ProjectTreeGroup, processing_group_key
     title = 'Tomograms'
     if isinstance(scope, FolderTomograms):
         source = next((source for source in payload.sources if source.id == scope.source_id), None)
-        title = workspace.group_names.get('processing:' + source.id, source.name) if source else 'Processing folder'
+        title = workspace.group_names.get(processing_group_key(source.id), source.name) if source else 'Processing folder'
     elif isinstance(scope, ProjectTreeGroup) and scope.processing_source is not None:
         title = scope.display_name
     if version:

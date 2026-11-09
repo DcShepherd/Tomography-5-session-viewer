@@ -33,6 +33,7 @@ def data_collection_section(
     include_exposure_thumbnails: bool = False,
     position: tuple[int, int] | None = None,
     anchor: str | None = None,
+    tomograms: list | None = None,
 ) -> list:
     anchor = anchor or f"dataset-{sample.id}"
     eyebrow = f"Dataset {position[0]} of {position[1]}" if position else "Dataset"
@@ -126,6 +127,10 @@ def data_collection_section(
             meta=tilt_outcome_sub_label(sample_validation_summary(sample, ctx)),
         ))
         flowables.extend(tilt_series_table(sample.tilt_series, ctx))
+
+    # ------- F. linked tomograms (D4), after the tilt-series table
+    if tomograms:
+        flowables.extend(tomograms)
 
     # ------- G. exposure thumbnails (optional)
     if include_thumbnails and include_exposure_thumbnails and sample.tilt_series:
