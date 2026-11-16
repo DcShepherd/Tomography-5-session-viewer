@@ -32,7 +32,7 @@ def acquisition_window_text(dashboard: DashboardModel) -> str | None:
     return None
 
 
-def session_kind_label(kind: SessionKind) -> str:
+def print_session_kind(kind: SessionKind) -> str:
     if kind == SessionKind.ATLAS_SCREENING:
         return "atlas screening"
     if kind in {SessionKind.COLLECTION, SessionKind.SINGLE_COLLECTION}:
@@ -168,8 +168,9 @@ def collect_expected_counts(
     seen: set[int] = set()
     for tilt in tilt_series:
         validation = validation_for(validations, tilt)
-        if validation is not None and validation.expected_count is not None and validation.expected_count > 0:
-            seen.add(int(validation.expected_count))
+        expected = validation.plan.expected_count if validation is not None else None
+        if expected is not None and expected > 0:
+            seen.add(int(expected))
     return sorted(seen)
 
 
@@ -181,7 +182,8 @@ def collect_observed_counts(
     for tilt in tilt_series:
         validation = validation_for(validations, tilt)
         if validation is not None:
-            seen.add(int(validation.actual_count))
+            if validation.observation.reported_count is not None:
+                seen.add(validation.observation.reported_count)
         elif tilt.sections:
             seen.add(len(tilt.sections))
         elif tilt.tilt_count and tilt.tilt_count > 0:

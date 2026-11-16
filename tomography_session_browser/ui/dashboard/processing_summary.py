@@ -85,7 +85,7 @@ class ProcessingSummaryPage(QWidget):
             card = CardBox(self)
             body = card_layout(card)
             chart_header, _ = card_header(chart_model.title, unit=chart_model.unit)
-            chart_header.addWidget(info(chart_model.description + ' All recorded metrics cover every tomogram, independent of version.', card))
+            chart_header.addWidget(info(chart_model.description, card))
             body.addLayout(chart_header)
             chart = IndexChart(chart_model, card, focus_frame=card)
             self.charts.append(chart)
@@ -106,8 +106,8 @@ class ProcessingSummaryPage(QWidget):
         body = card_layout(evidence)
         recorded = FoldingSection(f'All recorded values · {count_phrase(summary.tomogram_count, "row")}', evidence)
         recorded.setObjectName('recordedValuesSection')
-        recorded.layout_.addWidget(note('Recorded values and source fields across all tomograms, independent of version. '
-            'Alignment import is unverified; runs are not ranked across settings. Press Enter or double-click a row to inspect its evidence in Context.', recorded.body))
+        recorded.layout_.addWidget(note('Recorded values for all tomograms. Alignment import is not verified. '
+            'Press Enter or double-click a row to show its evidence.', recorded.body))
         rows = tuple(TableEntry((row.name, *row.values), frozenset((row.key,)), row.detail,
                                 (row.name, *row.sort_values)) for row in summary.metric_rows)
         table = EvidenceTable(('Tomogram', 'Alignment evidence', *(title for _, title in METRIC_COLUMNS)), rows, recorded.body)
@@ -121,7 +121,7 @@ class ProcessingSummaryPage(QWidget):
         volumes.setObjectName('processingVolumesSection')
         rows = tuple(TableEntry((row.label, *row.columns), row.row_keys, row.detail,
                                 (row.label, *row.sort_values)) for row in summary.volume_rows)
-        table = EvidenceTable(('Tomogram / geometry group', 'Size, physical voxels', 'Voxel X × Y × Z', 'Slab', 'Mode', 'On disk'), rows, volumes.body)
+        table = EvidenceTable(('Tomogram / geometry group', 'Size, physical voxels', 'Voxel spacing', 'Slab', 'Mode', 'On disk'), rows, volumes.body)
         table.setObjectName('processingVolumesTable')
         table.setAccessibleName('Reconstruction volumes, grouped by geometry above 24 tomograms')
         table.rows_requested.connect(lambda keys: self.route(keys, 'Reconstruction volume geometry'))

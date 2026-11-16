@@ -111,7 +111,9 @@ class FoldingSection(Fold):
         self.summary = ElidedLabel(parent=self)
         self.summary.setObjectName("tomogramSectionSummary")
         self.summary.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        header.addWidget(toggle)
+        # Left-aligned: with the summary hidden while open, a box layout centred the
+        # header and moved its arrow to the middle.
+        header.addWidget(toggle, 0, Qt.AlignmentFlag.AlignLeft)
         header.addWidget(self.summary, 1)
         self.column.addLayout(header)
         self.add_body(toggle, open_, (0, SPACE_S, 0, 0))

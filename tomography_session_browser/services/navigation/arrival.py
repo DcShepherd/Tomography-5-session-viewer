@@ -187,7 +187,7 @@ def marker_id_for_exposure_search_navigation(
 
 
 def marker_id_for_exposure_context_navigation(
-    target: Overview | SearchMap,
+    target: Overview | SearchMap | BatchPosition,
     source_marker: ImageMarker,
     *,
     markers: Iterable[ImageMarker],

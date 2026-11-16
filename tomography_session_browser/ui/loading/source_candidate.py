@@ -22,7 +22,8 @@ def source_candidate(current: Workspace, source: Session | ProcessingSource, rep
         processing = [item for item in processing if item.id != source.id]
         processing.append(source)
     workspace = Workspace.build(sessions, names, processing_sources=processing,
-                                link_confirmations=current.link_confirmations)
+                                link_confirmations=current.link_confirmations,
+                                alignment_confirmations=current.alignment_confirmations)
     scope = next((group for group in workspace.project_groups
                   if group.processing_source is source or any(item is source for item in group.sessions)), None)
     if not replace and isinstance(selected_scope, AllTomograms | FolderTomograms):

@@ -72,7 +72,7 @@ class Playback(QObject):
     def sync_rate(self, *_args) -> None:
         self.rate_button.setText(f"{self.speed.value()}/s")
         self.rate_button.setToolTip(f"{self.speed.value()} planes per second, {self.end.currentText().lower()}. "
-                                    "Click to change the speed and what occurs at the last plane.")
+                                    "Click to change.")
         for index, choice in enumerate(self.end_actions.actions()):
             choice.setChecked(index == self.end.currentIndex())
 
@@ -174,6 +174,6 @@ class Playback(QObject):
 
 
 LOCAL_KEYS = (
-    LocalBinding('playback.inspect-key', 'Playback', InteractionKind.KEYBOARD, ('Any key except Space',), 'Deliberate inspection pauses playback; Space over a pane keeps its play/pause command'),
-    LocalBinding('playback.inspect-pointer', 'Playback', InteractionKind.MOUSE, ('Click', 'Wheel'), 'Deliberate inspection pauses playback. Shift+wheel does not step planes while playback runs.'),
+    LocalBinding('playback.inspect-key', 'Playback', InteractionKind.KEYBOARD, ('Any key except Space',), 'Pause playback. Space still plays or pauses.'),
+    LocalBinding('playback.inspect-pointer', 'Playback', InteractionKind.MOUSE, ('Click', 'Wheel'), 'Pause playback'),
 )

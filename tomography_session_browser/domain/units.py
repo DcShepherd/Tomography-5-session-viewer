@@ -23,14 +23,7 @@ from typing import Final
 
 ANGSTROM: Final[str] = "Å"
 ANGSTROM_PER_PIXEL: Final[str] = "Å/px"
-ANGSTROM_PER_PIXEL_LONG: Final[str] = "Å/pixel"
 MICROMETRE: Final[str] = "µm"
-MICROMETRE_PER_PIXEL: Final[str] = "µm/px"
 NANOMETRE: Final[str] = "nm"
 NANOMETRE_PER_PIXEL: Final[str] = "nm/px"
 DEGREE: Final[str] = "°"
-ELECTRONS_PER_ANGSTROM_SQUARED: Final[str] = "e⁻/Å²"
-
-#: Spellings that must never reach the interface. Used by the regression
-#: test that scans user-facing modules for unit drift.
-DISALLOWED_UNIT_SPELLINGS: Final[tuple[str, ...]] = ("A/px", "A/pixel", "um", "deg")

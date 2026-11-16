@@ -1,26 +1,36 @@
 """Atlas lod items for the image viewer."""
 from __future__ import annotations
-from collections.abc import Callable
+from collections.abc import Callable, Hashable, Sequence
 import math
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QFrame, QGraphicsItem, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.domain.status import AtlasMarkerStatus
 from tomography_session_browser.services.status_taxonomy import acquisition_state
 from tomography_session_browser.services.batch_label_service import AtlasLabelPlacement
-from tomography_session_browser.services.atlas_marker_style import CLUSTER_HALO_WIDTH_DP, CLUSTER_INNER_GAP_DP, CLUSTER_SEGMENT_WIDTH_DP, IMAGE_STATUS_COLOURS, LABEL_CORNER_RADIUS_DP, LABEL_FONT_SIZE_DP, LEAF_DIAMETER_DP, LEAF_FAILED_GLYPH_WIDTH_DP, LEAF_FILL_RADIUS_DP, LEAF_HALO_WIDTH_DP, LEAF_HIT_RADIUS_DP, LEAF_RING_RADIUS_DP, LEAF_STATUS_WIDTH_DP, MARKER_INK, MARKER_LABEL_TEXT, MARKER_SELECTED, STATE_RING_OFFSET_DP, cluster_ring_segments
+from tomography_session_browser.services.atlas_marker_style import CLUSTER_HALO_WIDTH_DP, CLUSTER_INNER_GAP_DP, CLUSTER_SEGMENT_WIDTH_DP, IMAGE_STATUS_COLOURS, LABEL_CORNER_RADIUS_DP, LABEL_FONT_SIZE_DP, LEAF_DIAMETER_DP, LEAF_FAILED_GLYPH_WIDTH_DP, LEAF_FILL_RADIUS_DP, LEAF_HALO_WIDTH_DP, LEAF_HIT_RADIUS_DP, LEAF_RING_RADIUS_DP, LEAF_STATUS_WIDTH_DP, MARKER_INK, MARKER_LABEL_TEXT, MARKER_SELECTED, STATE_RING_OFFSET_DP, RingSegment, cluster_ring_segments, ring_segments
 from tomography_session_browser.ui.theme import current_palette
-from tomography_session_browser.presentation.design_tokens import CANVAS_CHROME, MONO_FONT_NAME, RADIUS_CARD, SANS_FONT_NAME
-from tomography_session_browser.ui.viewer.marker_paint import atlas_status_color
+from tomography_session_browser.presentation.design_tokens import CANVAS_CHROME, MONO_FONT_NAME, RADIUS_CARD
+from tomography_session_browser.services.atlas_lod import DASHED_GLYPH_KEYS, atlas_glyph_key, glyph_colour_status, is_unlinked_failure
+from tomography_session_browser.presentation.atlas_colouring import AtlasColouring
+from tomography_session_browser.ui.viewer.marker_paint import CLUSTER_NEUTRAL, atlas_status_color, key_colour
 
 
 class AtlasLodMarkerItem(QGraphicsItem):
-    """Fixed-screen-size Atlas glyph with an 11 dp interaction target."""
+    """Fixed-screen-size Atlas glyph with an 11 dp interaction target.
 
-    def __init__(self, marker: ImageMarker) -> None:
+    With a ``colouring`` (batch 4) the leaf takes its key's colour and keeps its
+    status shape, halo, dash and cross; a cluster's ring shows the mix of its
+    ``members``' keys around a neutral fill.
+    """
+
+    def __init__(self, marker: ImageMarker, colouring: AtlasColouring | None = None,
+                 members: Sequence[ImageMarker] = ()) -> None:
         super().__init__()
         self._marker = marker
+        self._colouring = colouring
+        self._members = tuple(members)
         self._hovered = False
         diameter = float(marker.metadata.get("diameter_px") or LEAF_DIAMETER_DP)
         self._radius = diameter / 2.0
@@ -91,13 +101,17 @@ class AtlasLodMarkerItem(QGraphicsItem):
         if self._marker.marker_type == MarkerType.BATCH_CLUSTER:
             self._paint_cluster(painter)
         else:
-            self._paint_leaf(painter, status)
+            self._paint_leaf(painter)
 
-    def _paint_leaf(self, painter: QPainter, status: str) -> None:
+    def _paint_leaf(self, painter: QPainter) -> None:
         navigable = bool(self._marker.metadata.get("navigation_enabled", True))
-        colour = atlas_status_color(status)
-        if not navigable and status != "unattributed":
-            colour = atlas_status_color("unattributed")
+        # One glyph rule (``atlas_glyph_key``): a failed tilt series no batch
+        # claims keeps its failed glyph with a dashed ring; a position with no
+        # unique destination is a dashed grey ring.
+        key = atlas_glyph_key(self._marker)
+        status = glyph_colour_status(key)
+        colouring = self._colouring
+        colour = atlas_status_color(status) if colouring is None else key_colour(colouring.key_for(self._marker))
         rect = QRectF(
             -LEAF_RING_RADIUS_DP,
             -LEAF_RING_RADIUS_DP,
@@ -105,7 +119,7 @@ class AtlasLodMarkerItem(QGraphicsItem):
             LEAF_RING_RADIUS_DP * 2,
         )
 
-        if navigable and status in {"collected", "failed"}:
+        if status in {"collected", "failed"}:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(colour)
             painter.drawEllipse(
@@ -113,7 +127,7 @@ class AtlasLodMarkerItem(QGraphicsItem):
                 LEAF_FILL_RADIUS_DP,
                 LEAF_FILL_RADIUS_DP,
             )
-        elif navigable and status == "partial":
+        elif status == "partial":
             fill_rect = QRectF(
                 -LEAF_FILL_RADIUS_DP,
                 -LEAF_FILL_RADIUS_DP,
@@ -134,7 +148,7 @@ class AtlasLodMarkerItem(QGraphicsItem):
         status_pen = QPen(colour, LEAF_STATUS_WIDTH_DP)
         status_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
         status_pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
-        if status == "unattributed":
+        if key in DASHED_GLYPH_KEYS:
             status_pen.setDashPattern(
                 [3.9 / LEAF_STATUS_WIDTH_DP, 2.4 / LEAF_STATUS_WIDTH_DP]
             )
@@ -143,7 +157,7 @@ class AtlasLodMarkerItem(QGraphicsItem):
         painter.setPen(status_pen)
         painter.drawEllipse(rect)
 
-        if navigable and status == "failed":
+        if status == "failed":
             glyph = LEAF_FILL_RADIUS_DP * 0.62
             cross_pen = QPen(QColor(MARKER_INK), LEAF_FAILED_GLYPH_WIDTH_DP)
             cross_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -156,7 +170,9 @@ class AtlasLodMarkerItem(QGraphicsItem):
     def _paint_cluster(self, painter: QPainter) -> None:
         diameter = self._radius * 2.0
         ring_radius = diameter / 2.0 - 2.3
-        colour = atlas_status_color(self._marker.status or "queued")
+        colouring = self._colouring
+        colour = (atlas_status_color(self._marker.status or "queued") if colouring is None
+                  else key_colour(CLUSTER_NEUTRAL))
         inner_radius = (
             ring_radius - CLUSTER_SEGMENT_WIDTH_DP / 2.0 - CLUSTER_INNER_GAP_DP
         )
@@ -177,10 +193,15 @@ class AtlasLodMarkerItem(QGraphicsItem):
         painter.drawEllipse(ring_rect)
 
         counts = self._marker.metadata.get("status_counts")
-        if isinstance(counts, dict):
-            for segment in cluster_ring_segments(counts):
+        segments: tuple[RingSegment[Hashable], ...] = ()
+        if colouring is not None:
+            segments = ring_segments(colouring.ring_counts(self._members))
+        elif isinstance(counts, dict):
+            segments = cluster_ring_segments(counts)
+        if segments:
+            for segment in segments:
                 pen = QPen(
-                    atlas_status_color(segment.status),
+                    key_colour(segment.key),
                     CLUSTER_SEGMENT_WIDTH_DP,
                 )
                 pen.setCapStyle(Qt.PenCapStyle.FlatCap)
@@ -321,179 +342,8 @@ class AtlasLodLabelItem(QGraphicsItem):
         painter.drawText(self._plate, Qt.AlignmentFlag.AlignCenter, text)
 
 
-class AtlasMarkerLegend(QWidget):
-    """Collapsed-by-default status legend anchored above the scale bar."""
-
-    _ROW_ORDER = (
-        ("collected", "Collected"),
-        ("partial", "Partial"),
-        ("queued", "Queued"),
-        ("failed", "Failed"),
-        ("unattributed", "Unattributed"),
-    )
-    WIDTH = 228
-    HEADER_HEIGHT = 34
-    EXPANDED_HEIGHT = 184
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._expanded = False
-        self._concealed = False
-        self._toggle_handler: Callable[[bool], None] | None = None
-        self._counts = {status: 0 for status, _label in self._ROW_ORDER}
-        self.setObjectName("atlasMarkerLegend")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Show or hide the Atlas batch-position marker legend")
-        self._sync_size()
-
-    @property
-    def expanded(self) -> bool:
-        return self._expanded
-
-    def set_expanded(self, expanded: bool) -> None:
-        """Open or close the legend at once."""
-
-        if expanded == self._expanded:
-            return
-        self._expanded = expanded
-        self._sync_size()
-        self.update()
-
-    def set_toggle_handler(self, handler: Callable[[bool], None] | None) -> None:
-        """Route a click through ``handler(expanded)``, which may animate it."""
-
-        self._toggle_handler = handler
-
-    def set_concealed(self, concealed: bool) -> None:
-        """Paint nothing while a reveal shows the legend's picture (plan F5.6)."""
-
-        if concealed != self._concealed:
-            self._concealed = concealed
-            self.update()
-
-    def picture(self) -> QPixmap:
-        """The open legend, its arrow showing the current state."""
-
-        ratio = self.devicePixelRatioF() or 1.0
-        pixmap = QPixmap(round(self.WIDTH * ratio), round(self.EXPANDED_HEIGHT * ratio))
-        pixmap.setDevicePixelRatio(ratio)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        try:
-            self._paint(painter, self.WIDTH, self.EXPANDED_HEIGHT, rows=True, arrow_up=self._expanded)
-        finally:
-            painter.end()
-        return pixmap
-
-    def set_markers(self, markers: list[ImageMarker]) -> None:
-        counts = {status: 0 for status, _label in self._ROW_ORDER}
-        for marker in markers:
-            if marker.metadata.get("atlas_lod_role") not in {
-                "batch_position",
-                "unattributed",
-            }:
-                continue
-            status = (
-                (marker.status or "queued").lower()
-                if bool(marker.metadata.get("navigation_enabled", True))
-                else "unattributed"
-            )
-            if status in counts:
-                counts[status] += 1
-        if counts != self._counts:
-            self._counts = counts
-            self.update()
-
-    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton:
-            if self._toggle_handler is not None:
-                self._toggle_handler(not self._expanded)
-            else:
-                self.set_expanded(not self._expanded)
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def _sync_size(self) -> None:
-        self.setFixedSize(self.WIDTH, self.EXPANDED_HEIGHT if self._expanded else self.HEADER_HEIGHT)
-
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt signature
-        super().paintEvent(event)
-        if self._concealed:
-            return
-        painter = QPainter(self)
-        try:
-            self._paint(painter, self.width(), self.height(), rows=self._expanded, arrow_up=self._expanded)
-        finally:
-            painter.end()
-
-    def _paint(self, painter: QPainter, width: int, height: int, *, rows: bool, arrow_up: bool) -> None:
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(CANVAS_CHROME.border_strong), 1.0))
-        painter.setBrush(QColor(CANVAS_CHROME.surface))
-        painter.drawRoundedRect(
-            QRectF(0.5, 0.5, width - 1.0, height - 1.0),
-            RADIUS_CARD,
-            RADIUS_CARD,
-        )
-        painter.setPen(QColor(CANVAS_CHROME.safe_text_light))
-        title_font = QFont(SANS_FONT_NAME)
-        title_font.setPixelSize(12)
-        painter.setFont(title_font)
-        painter.drawText(
-            QRectF(34.0, 0.0, 160.0, 34.0),
-            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-            "Marker legend",
-        )
-        paint_legend_cluster_glyph(painter, QPointF(17.0, 17.0))
-        painter.setPen(QColor(CANVAS_CHROME.text_muted))
-        painter.drawText(
-            QRectF(196.0, 0.0, 18.0, 34.0),
-            Qt.AlignmentFlag.AlignCenter,
-            "▴" if arrow_up else "▾",
-        )
-        if not rows:
-            return
-
-        y = 34.0
-        label_font = QFont(SANS_FONT_NAME)
-        label_font.setPixelSize(12)
-        count_font = QFont(MONO_FONT_NAME)
-        count_font.setPixelSize(11)
-        for status, label in self._ROW_ORDER:
-            paint_chrome_leaf_glyph(
-                painter,
-                QPointF(17.0, y + 12.0),
-                status,
-                diameter=12.0,
-                halo=True,
-            )
-            painter.setFont(label_font)
-            painter.setPen(QColor(MARKER_LABEL_TEXT))
-            painter.drawText(
-                QRectF(34.0, y, 140.0, 24.0),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                label,
-            )
-            painter.setFont(count_font)
-            painter.setPen(QColor(CANVAS_CHROME.text_muted))
-            painter.drawText(
-                QRectF(174.0, y, 38.0, 24.0),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                str(self._counts[status]),
-            )
-            y += 24.0
-
-        painter.setPen(QPen(QColor(CANVAS_CHROME.border_strong), 1.0))
-        painter.drawLine(QPointF(12.0, y + 1.0), QPointF(216.0, y + 1.0))
-        paint_legend_cluster_glyph(painter, QPointF(17.0, y + 15.0))
-        painter.setFont(label_font)
-        painter.setPen(QColor(CANVAS_CHROME.safe_text_light))
-        painter.drawText(
-            QRectF(34.0, y + 3.0, 178.0, 24.0),
-            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-            "n = members, ring = mix",
-        )
+#: The cluster popup's value column in a value mode (batch 4).
+POPUP_VALUE_WIDTH = 72.0
 
 
 class AtlasClusterRow(QPushButton):
@@ -501,9 +351,13 @@ class AtlasClusterRow(QPushButton):
         self,
         marker: ImageMarker,
         parent: QWidget | None = None,
+        colouring: AtlasColouring | None = None,
     ) -> None:
         super().__init__(parent)
         self._marker = marker
+        #: The value in a few characters (batch 4); the glyph keeps its status.
+        self._value = colouring.short_text(marker) if colouring is not None else ""
+        explanation = colouring.explanation_for(marker) if colouring is not None else ""
         self.setFixedHeight(24)
         self.setFlat(True)
         self.setCursor(
@@ -511,18 +365,22 @@ class AtlasClusterRow(QPushButton):
             if bool(marker.metadata.get("navigation_enabled", True))
             else Qt.CursorShape.ArrowCursor
         )
-        self.setToolTip(marker.tooltip or "")
+        self.setToolTip("\n".join(text for text in (marker.tooltip or "", explanation) if text))
         # The label is painted, not set, so this button has no text for a
         # screen reader to announce. Spell out the batch and its status, and
         # say when it cannot be opened rather than leaving it silently inert.
         navigable = bool(marker.metadata.get("navigation_enabled", True))
         name = marker.label or marker.linked_object_id or marker.id
-        self.setAccessibleName(f"Batch {name}, {acquisition_state(marker.status)}")
-        self.setAccessibleDescription(
+        if is_unlinked_failure(marker):
+            self.setAccessibleName(f"Tilt series {name}, {acquisition_state(marker.status)}, no batch link")
+        else:
+            self.setAccessibleName(f"Batch {name}, {acquisition_state(marker.status)}")
+        self.setAccessibleDescription(" ".join(text for text in (
             marker.tooltip
             if navigable
-            else f"Unavailable. {marker.tooltip or 'No unique destination.'}"
-        )
+            else f"Unavailable. {marker.tooltip or 'No unique destination.'}",
+            explanation,
+        ) if text))
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt signature
 
@@ -534,7 +392,7 @@ class AtlasClusterRow(QPushButton):
             paint_chrome_leaf_glyph(
                 painter,
                 QPointF(14.0, 12.0),
-                (self._marker.status or "queued").lower(),
+                atlas_glyph_key(self._marker),
                 diameter=10.0,
                 halo=False,
             )
@@ -560,6 +418,13 @@ class AtlasClusterRow(QPushButton):
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
                 ratio,
             )
+            if self._value:
+                painter.setPen(QColor(MARKER_LABEL_TEXT))
+                painter.drawText(
+                    QRectF(204.0, 0.0, POPUP_VALUE_WIDTH - 12.0, 24.0),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                    self._value,
+                )
         finally:
             painter.end()
 
@@ -573,11 +438,12 @@ class AtlasClusterPopup(QFrame):
         *,
         on_member_selected: Callable[[ImageMarker], None] | None,
         parent: QWidget,
+        colouring: AtlasColouring | None = None,
     ) -> None:
         super().__init__(parent)
 
         self.setObjectName("atlasClusterPopup")
-        self.setFixedWidth(216)
+        self.setFixedWidth(216 + (round(POPUP_VALUE_WIDTH) if colouring is not None else 0))
         self.setStyleSheet(
             f"#atlasClusterPopup {{ background: {CANVAS_CHROME.surface}; "
             f"border: 1px solid {CANVAS_CHROME.border_strong}; border-radius: {RADIUS_CARD}px; }}"
@@ -607,7 +473,7 @@ class AtlasClusterPopup(QFrame):
         rows_layout.setContentsMargins(0, 0, 0, 0)
         rows_layout.setSpacing(0)
         for member in members:
-            row = AtlasClusterRow(member, rows)
+            row = AtlasClusterRow(member, rows, colouring)
             if on_member_selected is not None:
                 row.clicked.connect(
                     lambda _checked=False, value=member: on_member_selected(value)
@@ -632,14 +498,16 @@ class AtlasClusterPopup(QFrame):
 def paint_chrome_leaf_glyph(
     painter: QPainter,
     center: QPointF,
-    status: str,
+    key: str,
     *,
     diameter: float,
     halo: bool,
 ) -> None:
-    """Paint a compact status glyph on known dark chrome."""
+    """Paint a compact glyph for an ``atlas_glyph_key`` on known dark chrome."""
 
     theme = current_palette()
+    dashed = key in DASHED_GLYPH_KEYS
+    status = glyph_colour_status(key)
     colour = QColor(
         {
             "collected": theme.atlas_marker_collected,
@@ -668,7 +536,7 @@ def paint_chrome_leaf_glyph(
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(ring_rect)
     pen = QPen(colour, 1.4)
-    if status == "unattributed":
+    if dashed:
         pen.setStyle(Qt.PenStyle.DashLine)
     painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)

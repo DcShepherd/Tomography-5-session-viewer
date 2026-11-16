@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 from PySide6.QtWidgets import QDialog, QFileDialog
 
 from tomography_session_browser.presentation.tomogram_report_scope import normalise_contact_sheet
-from tomography_session_browser.reports.tomogram_contact_sheet import build_contact_sheet
 from tomography_session_browser.services.volume.snapshot import SnapshotRequest
 from tomography_session_browser.ui.loading.tasks import BackgroundTask, TaskSignals
 from tomography_session_browser.ui.tomograms.history_dialog import CaptureHistoryDialog
@@ -80,6 +79,8 @@ class ContactSheetExport:
         cancelled = self.cancelled
         roots = self.tab.protected_roots()
         self.tab.status.message.setText(f"Exporting {len(scope.captures)} captures to contact sheet…")
+        # Imported here, not at module level: reportlab stays out of start-up.
+        from tomography_session_browser.reports.tomogram_contact_sheet import build_contact_sheet
         self.tab.captures.pool.start(BackgroundTask(lambda: build_contact_sheet(scope, output, roots, cancelled=cancelled.is_set),
             context=output, signals=self.signals, logger=logging.getLogger(__name__),
             failure_log="Tomogram contact sheet failed"))

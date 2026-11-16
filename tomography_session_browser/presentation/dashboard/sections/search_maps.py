@@ -88,7 +88,7 @@ def search_map_acquisition_rollup(
     # Two batches of one map can each verify a different physical series with
     # the same recorded ID. Retain both verdict keys; a map-wide single-target
     # lookup would discard their failed/incomplete outcomes.
-    resolved.extend(tilt for batch in linked_batches for tilt in batch_tilt_series(batch, tilts))
+    resolved.extend(tilt for batch in linked_batches for tilt in batch_tilt_series(batch, tilts, batch_positions=batches))
     keys_by_id: dict[str, list[str]] = {}
     for tilt in resolved:
         keys = keys_by_id.setdefault(tilt.id, [])

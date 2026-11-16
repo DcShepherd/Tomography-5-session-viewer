@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections import Counter
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from typing import Any
 from tomography_session_browser.domain.identity import canonical_entity_key, dedupe_entities
@@ -34,6 +35,7 @@ from tomography_session_browser.presentation.warnings import (
 from tomography_session_browser.presentation.workspace import (
     EntityKind,
     Workspace,
+    display_sample_name,
     session_entities,
     summary_atlas_pairs,
 )
@@ -80,8 +82,42 @@ def sample_group_key(label: str, samples: list[Sample]) -> str:
     return representative.id if representative is not None else batch_inference_key(label)
 
 
+def sample_row_label(label: str, samples: Sequence[Sample]) -> str:
+    """The name a sample group shows: its collection sample's recorded name
+    without the grid number, or the group's label when it has several.
+
+    The Samples table, the chart legends and the timeline lanes all use it,
+    so one sample reads the same in each (see :func:`sample_row_labels`)."""
+
+    collection = [sample for sample in samples if has_collection_data(sample)]
+    return display_sample_name(collection[0].name) if len(collection) == 1 else label
+
+
+def sample_row_labels(groups: Sequence[tuple[str, Sequence[Sample]]]) -> list[str]:
+    """:func:`sample_row_label` for groups shown together, in order.
+
+    When two groups with collection data would read the same, each keeps its
+    grid number, as the tree row shows it ("1. cryo_em", "3. cryo_em"). They
+    stay two series either way; only the text changes. If the recorded names
+    are the same too, the text stays the same."""
+
+    labels = [sample_row_label(label, samples) for label, samples in groups]
+    shown = Counter(
+        text for text, (_label, samples) in zip(labels, groups)
+        if any(has_collection_data(sample) for sample in samples)
+    )
+    for index, (text, (_label, samples)) in enumerate(zip(labels, groups)):
+        if shown[text] < 2:
+            continue
+        collection = [sample for sample in samples if has_collection_data(sample)]
+        recorded = collection[0].name.strip() if len(collection) == 1 else ""
+        if recorded:
+            labels[index] = recorded
+    return labels
+
+
 def _sample_groups_from_samples(samples: list[Sample]) -> list[tuple[str, list[Sample]]]:
-    return [(clean_sample_label(sample.name), [sample]) for sample in samples]
+    return [(display_sample_name(sample.name), [sample]) for sample in samples]
 
 
 def _linked_sample_groups_for_dashboard(sessions: list[Session], workspace: Workspace) -> list[tuple[str, list[Sample]]]:
@@ -139,16 +175,6 @@ def _representative_sample(samples: list[Sample]) -> Sample:
         None,
     )
     return atlas_sample or samples[0]
-
-
-def clean_sample_label(label: str) -> str:
-    text = re.sub(r"^\s*\d+\.\s*", "", label or "").strip()
-    if not text:
-        return "Sample"
-    if _is_generic_sample_label(text):
-        return text
-    text = text.replace("_", " ").strip()
-    return " ".join(part.capitalize() if part.islower() else part for part in text.split())
 
 
 def _full_sample_label(label: str) -> str:
@@ -254,7 +280,7 @@ def _scope_from_sample(sample: Sample) -> DashboardScope:
         batch_positions=list(sample.batch_positions),
         tilt_series=list(sample.tilt_series),
         samples=[sample],
-        sample_groups=[(clean_sample_label(sample.name), [sample])],
+        sample_groups=[(display_sample_name(sample.name), [sample])],
         warnings=[*attributed_warnings(sample.name, sample.warnings, sample), *entity_scope_warnings(sample, sample.name, set())],
         is_sample_scope=True,
     )

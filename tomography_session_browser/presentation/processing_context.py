@@ -7,20 +7,9 @@ from datetime import datetime
 from tomography_session_browser.domain.tomograms import ProcessingSource
 from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.presentation.dashboard.tomogram_summary_input import TomogramSummaryInput
+from tomography_session_browser.presentation.read_times import READ_INTO_APP, SourceReadTimes, read_time_text
 from tomography_session_browser.presentation.tomogram_context import ContextFile
 from tomography_session_browser.services.tomogram_links import COUNT_LABELS, link_step_counts
-
-
-@dataclass(frozen=True, slots=True)
-class SourceReadTimes:
-    entries: tuple[tuple[ProcessingSource, datetime], ...] = ()
-
-    def admitted(self, sources: tuple[ProcessingSource, ...], now: datetime) -> SourceReadTimes:
-        return SourceReadTimes(tuple((source, next((at for previous, at in self.entries if previous is source), now))
-                                     for source in sources))
-
-    def read_at(self, source: ProcessingSource) -> datetime | None:
-        return next((at for previous, at in self.entries if previous is source), None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +43,7 @@ class ProcessingContext:
             lines.append(self.notice)
         for value in self.sources:
             lines += [f'Processing folder: {value.source.path}', f'Pipeline: {value.source.pipeline}',
-                      f'Read into app: {read_time_text(value.read_at)}', 'Source version folders:',
+                      f'{READ_INTO_APP}: {read_time_text(value.read_at)}', 'Source version folders:',
                       *(f'  {file.label}: {file.path}' for file in value.versions)]
             if value.empty_note:
                 lines.append(value.empty_note)
@@ -63,10 +52,6 @@ class ProcessingContext:
         if self.warnings:
             lines += ['Warnings:', *self.warnings]
         return '\n'.join(lines)
-
-
-def read_time_text(value: datetime | None) -> str:
-    return value.isoformat(sep=' ', timespec='seconds') + ' · read-only' if value is not None else 'Not recorded'
 
 
 def processing_context(payload: TomogramSummaryInput, read_times: SourceReadTimes = SourceReadTimes()) -> ProcessingContext:

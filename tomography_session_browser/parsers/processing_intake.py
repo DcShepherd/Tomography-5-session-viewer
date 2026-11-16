@@ -4,6 +4,8 @@ IMOD command files are data, never executable input. AreTomo3 discovery uses
 its MdocDone marker and only full reconstructed *_Vol.mrc outputs at the root;
 *_EVN_Vol.mrc and *_ODD_Vol.mrc half sets are excluded.
 Neither adapter infers acquisition identity, registration or physical orientation.
+A Scipion alignment job (``scipion_jobs.ALIGNMENT_PROTOCOLS``) is an ``Alignment``
+source: no tomograms, one alignment offer for each series folder.
 """
 from __future__ import annotations
 
@@ -18,9 +20,9 @@ from tomography_session_browser.parsers.warp_intake import is_warp_source, load_
 from tomography_session_browser.parsers.acquisition_evidence import reconstruction_evidence
 from tomography_session_browser.domain.recorded_metrics import ProcessingEvidence
 from tomography_session_browser.parsers.imod_commands import literal_path, parameter, standard_input
-from tomography_session_browser.parsers.recorded_metrics import read_imod_processing_evidence
+from tomography_session_browser.parsers.recorded_metrics import read_alignment_offer, read_imod_processing_evidence
 from tomography_session_browser.parsers.reconstruction_intake import has_reconstructions, load_reconstructions
-from tomography_session_browser.parsers.scipion_jobs import processing_root, scipion_job
+from tomography_session_browser.parsers.scipion_jobs import ScipionJob, processing_root, scipion_job
 
 IMOD_COMMANDS = ("tilt.com", "tilta.com", "tiltb.com")
 ARETOMO_HALF_SETS = ("_evn_vol.mrc", "_odd_vol.mrc")
@@ -29,6 +31,9 @@ METADATA_LIMIT = 1024 * 1024
 
 def processing_pipelines(path: Path) -> tuple[str, ...]:
     path = processing_root(path)
+    job = scipion_job(path)
+    if job is not None and job.model_endings is not None:
+        return ("Alignment",)  # Alone: beside another marker it would read as ambiguous.
     found = []
     if is_warp_source(path):
         found.append("Warp")
@@ -70,6 +75,10 @@ def _load_source(root: Path) -> ProcessingSource:
     if len(pipelines) != 1:
         raise ValueError("Choose one processing folder with unambiguous Warp, IMOD, AreTomo3 or reconstruction metadata.")
     pipeline = pipelines[0]
+    if pipeline == "Alignment":
+        job = scipion_job(root)
+        assert job is not None
+        return load_alignment_job(root, job)
     if pipeline == "Warp":
         return load_warp_source(root)
     if pipeline == 'Reconstructions':
@@ -105,3 +114,25 @@ def _load_source(root: Path) -> ProcessingSource:
     if not tomograms:
         issues.append("No readable reconstruction files were found in the supported output layout.")
     return ProcessingSource(key, root.name, root, tuple(tomograms), pipeline, tuple(issues))
+
+
+def load_alignment_job(root: Path, job: ScipionJob) -> ProcessingSource:
+    """One offer for each ``<ts>/`` folder that holds ``<ts>.tlt`` or ``<ts>.xf``; nothing is a tomogram."""
+    assert job.model_endings is not None
+    offers, issues = [], []
+    try:
+        folders = sorted((entry for entry in root.iterdir() if entry.is_dir() and not entry.is_symlink()),
+                         key=lambda entry: natural_key(entry.name))
+    except OSError as exc:
+        folders, issues = [], [f"{root.name}: {exc}"]
+    for folder in folders:
+        stem = folder.name
+        try:
+            if (folder / f"{stem}.tlt").exists() or (folder / f"{stem}.xf").exists():
+                offers.append(read_alignment_offer(folder, stem, job.label, job.model_endings))
+        except OSError as exc:
+            issues.append(f"{stem}: {exc}")
+    if not offers:
+        issues.append("No alignment series were found in the supported layout.")
+    return ProcessingSource(path_identity_key(root), job.label, root, (), "Alignment", tuple(issues),
+                            alignments=tuple(offers))

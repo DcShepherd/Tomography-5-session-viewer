@@ -9,6 +9,7 @@ from PySide6.QtCore import QPointF, QRect, Qt
 from PySide6.QtGui import QImage, QKeyEvent, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtWidgets import QGraphicsView, QWidget
 from tomography_session_browser.domain.markers import ImageMarker
+from tomography_session_browser.ui.viewer.overlay_preferences import MarkerFrame
 from tomography_session_browser.ui.motion import MarkerPulse
 import logging
 LOGGER = logging.getLogger("tomography_session_browser.ui.image_viewer")
@@ -103,17 +104,11 @@ class ImagePreviewView(QGraphicsView):
     def set_pan_through_marker_types(self, marker_types: Iterable[str]) -> None:
         return self.parts.preview_interaction.set_pan_through_marker_types(marker_types)
 
-    def set_atlas_lod_option(self, key: str, enabled: bool) -> None:
-        return self.parts.marker_layer.set_atlas_lod_option(key, enabled)
-
     def atlas_lod_option(self, key: str) -> bool:
         return self.parts.marker_layer.atlas_lod_options[key]
 
-    def set_marker_type_visible(self, marker_type: str, visible: bool) -> None:
-        return self.parts.marker_layer.set_marker_type_visible(marker_type, visible)
-
-    def hide_all_markers(self) -> None:
-        return self.parts.marker_layer.hide_all_markers()
+    def apply_markers(self, frame: MarkerFrame) -> None:
+        return self.parts.marker_layer.apply(frame)
 
     def set_markers(self, markers: list[ImageMarker], selected_marker_id: str | None = None) -> None:
         return self.parts.marker_layer.set_markers(markers, selected_marker_id)

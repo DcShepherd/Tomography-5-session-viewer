@@ -10,10 +10,10 @@ from tomography_session_browser.services.tomogram_tags.session import SaveStatus
 from tomography_session_browser.services.tomogram_tags import binding
 from tomography_session_browser.services.tomogram_tags.binding import ProjectKey
 from tomography_session_browser.domain.display_names import count_phrase
-from tomography_session_browser.presentation.dashboard.tag_summary import number_text
+from tomography_session_browser.presentation.dashboard.tag_summary import dash_number_text
 from tomography_session_browser.presentation.messages import ActionPrompt, ActionRole, MessageAction, MessageContent, TextAccepted
 from tomography_session_browser.presentation.tomogram_tag_catalogue import catalogue_rows, merge_order, saved_text, selection_text
-from tomography_session_browser.presentation.tomogram_tag_changes import review_total, unmatched_count
+from tomography_session_browser.presentation.tomogram_tag_changes import review_total, unmatched
 from tomography_session_browser.presentation.tomogram_tag_messages import MoveAccepted
 from tomography_session_browser.ui.theme import TIER_SUPPORTING, apply_tier
 from tomography_session_browser.ui.widgets import message_sheet
@@ -119,7 +119,7 @@ class TagManager(QDialog):
             self.table.clearSelection()
             self.table.setRowCount(len(rows))
             for index, row in enumerate(rows):
-                for column, text in enumerate((row.name, str(row.tomograms), str(row.counted), number_text(row.total))):
+                for column, text in enumerate((row.name, str(row.tomograms), str(row.counted), dash_number_text(row.total))):
                     item = QTableWidgetItem(text)
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     item.setData(Qt.ItemDataRole.UserRole, row.tag_id)
@@ -133,10 +133,11 @@ class TagManager(QDialog):
         review = proposal.rows if proposal else ()
         self.review_button.setText(review_total(review))
         self.review_button.setVisible(bool(review))
-        unmatched = unmatched_count(project, self.owner.tab.payload.loaded_sources)
-        verb = "is" if unmatched == 1 else "are"
-        self.show_notice(f"{count_phrase(unmatched, 'tomogram')} {verb} not in the loaded folders. Find moved folder…" if unmatched else "")
-        self.move_button.setVisible(bool(unmatched))
+        missing = unmatched(project, self.owner.tab.payload.loaded_sources)
+        verb = "is" if missing.count == 1 else "are"
+        hint = " Find moved folder…" if missing.movable else ""
+        self.show_notice(f"{count_phrase(missing.count, 'tomogram')} {verb} not in the loaded folders.{hint}" if missing.count else "")
+        self.move_button.setVisible(missing.movable)
         path = self.session.store.path
         self.project_file.setText(f"Project file · {path}")
         self.project_file.setToolTip(str(path))

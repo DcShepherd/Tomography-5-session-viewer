@@ -17,7 +17,6 @@ from tomography_session_browser.diagnostics.profiling import record_aggregate_ph
 
 LOGGER = logging.getLogger(__name__)
 MRC_HEADER_BYTES = 1024
-PARSER_NAME = "tomography_session_browser.mrc_metadata"
 PARSER_VERSION = "0.3"
 OLE_DATE_EPOCH = datetime(1899, 12, 30)
 
@@ -90,7 +89,7 @@ def parse_mrc_metadata(path: Path) -> ParsedMrcMetadata:
     if nx is None or ny is None or nz is None or mode is None:
         record_aggregate_phase("parse_mrc_header", time.perf_counter() - header_started)
         raise ValueError("; ".join(warnings) or "MRC header dimensions are not plausible.")
-    dtype = _numpy_dtype(mode, endian)
+    dtype = mrc_numpy_dtype(mode, endian)
     nsymbt = _int_at(header, 92, endian, warnings)
     exttyp = _extended_header_type(header)
     mapc, mapr, maps = _axis_mapping(header, endian)
@@ -152,6 +151,7 @@ def parse_mrc_metadata(path: Path) -> ParsedMrcMetadata:
     return parsed
 
 
+# Read by tools/inspect_mrc_metadata.py, which ships in the public release.
 def format_mrc_metadata_report(metadata_or_path: ParsedMrcMetadata | Path | str, frame_index: int | None = None, all_frames: bool = False) -> str:
     metadata = parse_mrc_metadata(Path(metadata_or_path)) if isinstance(metadata_or_path, str | Path) else metadata_or_path
     main = metadata.main_header
@@ -775,7 +775,34 @@ def _voxel_size(header: bytes, endian: str, nx: int, ny: int, nz: int) -> tuple[
     )
 
 
-def _numpy_dtype(mode: int, endian: str) -> np.dtype | None:
+def fei_spot_index(metadata: Any, warnings: list[str], source: str) -> str | None:
+    """The one spot index recorded in an MRC's FEI extended header, as text.
+
+    Frames that disagree give a warning that starts with ``source`` and no
+    value. The field is read as a signed 32-bit integer, so only a positive
+    ``int`` counts.
+    """
+
+    values: set[int] = set()
+    for frame in getattr(metadata, "frame_metadata", None) or []:
+        raw_fields = frame.get("raw_fields") if isinstance(frame, dict) else None
+        if not isinstance(raw_fields, dict):
+            continue
+        value = raw_fields.get("spot_index")
+        if isinstance(value, int) and value > 0:
+            values.add(value)
+    if not values:
+        return None
+    if len(values) > 1:
+        text = ", ".join(str(value) for value in sorted(values))
+        warnings.append(f"{source} FEI extended header has inconsistent spot_index values: {text}.")
+        return None
+    return str(next(iter(values)))
+
+
+def mrc_numpy_dtype(mode: int, endian: str) -> np.dtype | None:
+    """The NumPy type of an MRC data mode, or ``None`` for a mode the app does not read."""
+
     code_by_mode = {0: "i1", 1: "i2", 2: "f4", 6: "u2"}
     code = code_by_mode.get(mode)
     if code is None:

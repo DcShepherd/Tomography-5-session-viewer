@@ -58,7 +58,7 @@ def atlas_image_block(
             batch_positions=tuple(scope_batch_positions),
             tilt_series=tuple(scope_tilt_series),
             failed_tilt_ids=failed_tilt_ids,
-            grid_validations=grid_validations if grid_validations is not None else GridValidations(),
+            grid_validations=grid_validations if grid_validations is not None else GridValidations(ungridded=scope_tilt_series),
         )
         raw_markers = atlas_lod_markers(
             atlas,

@@ -364,7 +364,7 @@ QToolButton#tableLink {{
 /* These base rules follow the colour-only focus rules to reserve the border;
    a pseudo-state still has greater specificity than its base selector. */
 QPushButton#primaryButton:focus {{
-    border-color: {primary_text};
+    border-color: {text_strong};
 }}
 
 QTreeWidget#viewerList::item {{

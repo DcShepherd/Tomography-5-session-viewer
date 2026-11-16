@@ -40,6 +40,17 @@ def number_text(value: float | None, unit: str | None = None) -> str:
     return f"{value:g}{suffix}"
 
 
+def format_tilt_angle(angle: float) -> str:
+    """A tilt angle as recorded, to at most two decimals, with its degree sign.
+
+    Every tilt angle on the screen uses it: "-40.01°", "12°", "-0.02°". No
+    "+" on positive angles; a value that rounds to zero is "0°", never "-0°".
+    The PDF keeps its own formats."""
+
+    text = f"{round(angle, 2):.2f}".rstrip("0").rstrip(".")
+    return f"{'0' if text in {'-0', ''} else text}{DEGREE}"
+
+
 def angle_range_text(value: tuple[float, float] | None) -> str:
     """Format a tilt range the way the validation section already does.
 
@@ -50,7 +61,7 @@ def angle_range_text(value: tuple[float, float] | None) -> str:
 
     if value is None:
         return "unknown"
-    return f"{value[0]:g}{DEGREE} to {value[1]:g}{DEGREE}"
+    return f"{format_tilt_angle(value[0])} to {format_tilt_angle(value[1])}"
 
 
 def binning_text(value: int | None) -> str:

@@ -21,6 +21,36 @@ def metric_number(metric: RecordedMetric, factor: float = 1.) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class Ambiguous:
+    """A tomogram records more than one value of a definition; no value is chosen."""
+    count: int
+
+
+def single_metric(item: Tomogram, definition: str) -> RecordedMetric | Ambiguous | None:
+    """The one recorded metric of ``definition``: ``Ambiguous`` when there are several, ``None`` when none.
+
+    The one rule for the metrics table, the context tiles and the Atlas colouring.
+    """
+    candidates = [metric for metric in item.processing.metrics if metric.definition == definition]
+    if len(candidates) == 1:
+        return candidates[0]
+    return Ambiguous(len(candidates)) if candidates else None
+
+
+def display_factor(metric: RecordedMetric) -> tuple[float, str]:
+    """The factor and unit a metric is displayed in: Warp specimen thickness in Å shows in nm."""
+    if metric.definition == 'warp.ctf_specimen_thickness' and metric.unit == 'Å':
+        return .1, 'nm'
+    return 1., metric.unit
+
+
+def display_value(metric: RecordedMetric) -> tuple[str, float]:
+    """``(unit, value)`` after the shared display rule."""
+    factor, unit = display_factor(metric)
+    return unit, metric.value * factor
+
+
+@dataclass(frozen=True, slots=True)
 class MetricRow:
     key: str
     name: str
@@ -44,9 +74,9 @@ def metric_row(item: Tomogram) -> MetricRow:
     evidence = item.processing
     values, numbers = [], []
     for definition, _ in METRIC_COLUMNS:
-        candidates = [metric for metric in evidence.metrics if metric.definition == definition]
-        metric = candidates[0] if len(candidates) == 1 else None
-        values.append(f"{metric_number(metric)} {metric.unit}" if metric else "Ambiguous recorded values" if candidates else "Not recorded")
+        found = single_metric(item, definition)
+        metric = found if isinstance(found, RecordedMetric) else None
+        values.append(f"{metric_number(metric)} {metric.unit}" if metric else "Ambiguous recorded values" if found else "Not recorded")
         numbers.append((metric.unit, metric.value) if metric else None)
     lines = [f"Alignment evidence: {evidence.alignment}"]
     for metric in evidence.metrics:

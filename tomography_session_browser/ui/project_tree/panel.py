@@ -41,7 +41,9 @@ from tomography_session_browser.ui.project_tree.widgets import (
     ProjectTreeWidget,
 )
 from tomography_session_browser.ui.widgets.project_badge_legend import ProjectBadgeLegend
-from tomography_session_browser.ui.widgets.session_drop import ProjectDropHint
+from tomography_session_browser.ui.widgets.link_button import link_button
+from tomography_session_browser.ui.widgets.session_drop import ProjectDropHint, announce_politely
+from tomography_session_browser.ui.filter_key import with_filter_key
 
 #: Qt's QWIDGETSIZE_MAX: "no maximum" for a widget's size.
 _QWIDGETSIZE_MAX = (1 << 24) - 1
@@ -51,6 +53,10 @@ _QWIDGETSIZE_MAX = (1 << 24) - 1
 PROJECT_BADGE_LEGEND_TOOLTIP = "\n".join(
     f"{badge} — {meaning}" for badge, meaning in PROJECT_BADGE_MEANINGS.items()
 )
+
+
+#: What the Project panel says when the filter matches nothing (W4a).
+NO_MATCH_TEXT = "No project items match this filter."
 
 
 class ProjectTreePanel:
@@ -93,7 +99,7 @@ class ProjectTreePanel:
         self.filter.setPlaceholderText("Filter project...")
         self.filter.setAccessibleName("Filter project")
         self.filter.setClearButtonEnabled(True)
-        self.filter.setToolTip("Filter project groups, sessions, samples, and acquisition items")
+        self.filter.setToolTip(with_filter_key("Filter project groups, sessions, samples, and acquisition items"))
         self._clear_filter_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self.filter)
         self._clear_filter_shortcut.setProperty("helpBindingId", "project.filter.clear")
         self._clear_filter_shortcut.setWhatsThis("Clear the project filter")
@@ -175,6 +181,23 @@ class ProjectTreePanel:
         layout.addWidget(tree, stretch=1)
         self.drop_hint = ProjectDropHint(panel)
         layout.addWidget(self.drop_hint, stretch=1)
+        # A filter that matches nothing says so in the tree's place (W4a).
+        self.no_match = QWidget(panel)
+        self.no_match.setObjectName("projectNoMatch")
+        no_match_layout = QVBoxLayout(self.no_match)
+        no_match_layout.setContentsMargins(inset, SPACE_S, inset, SPACE_S)
+        no_match_layout.setSpacing(SPACE_S)
+        self.no_match_text = QLabel(NO_MATCH_TEXT, self.no_match)
+        self.no_match_text.setObjectName("mutedLabel")
+        self.no_match_text.setWordWrap(True)
+        no_match_layout.addWidget(self.no_match_text)
+        self.clear_filter_button = link_button("Clear filter", self.no_match)
+        self.clear_filter_button.clicked.connect(self.clear_filter)
+        no_match_layout.addWidget(self.clear_filter_button, 0, Qt.AlignmentFlag.AlignLeft)
+        no_match_layout.addStretch(1)
+        layout.addWidget(self.no_match, stretch=1)
+        self.no_match.hide()
+        self._no_match_announced = False
 
     # -- what the tree holds -------------------------------------------------
 
@@ -280,7 +303,12 @@ class ProjectTreePanel:
         empty = not self._has_sessions()
         self.drop_hint.setVisible(empty)
         rows = self.tree.topLevelItemCount()
-        self.tree.setVisible(bool(rows) or not empty)
+        no_match = self.filter_matches_nothing()
+        self.no_match.setVisible(no_match)
+        self.tree.setVisible((bool(rows) or not empty) and not no_match)
+        if no_match and not self._no_match_announced:
+            announce_politely(self.no_match, NO_MATCH_TEXT)
+        self._no_match_announced = no_match
         if empty and rows:
             self.tree.setMaximumHeight(self._content_height())
         else:
@@ -374,6 +402,20 @@ class ProjectTreePanel:
         if not query and self._filter_expanded_ids is not None:
             self.restore_expanded_node_ids(self._filter_expanded_ids)
             self._filter_expanded_ids = None
+        self.sync_empty_state()
+
+    def filter_matches_nothing(self) -> bool:
+        """A query with sessions loaded, and no row left to show."""
+
+        if not self.filter.text().strip() or not self._has_sessions():
+            return False
+        return all(self.tree.topLevelItem(index).isHidden() for index in range(self.tree.topLevelItemCount()))
+
+    def clear_filter(self) -> None:
+        """Clear filter: the rows come back and focus goes to the filter, not to the hidden link."""
+
+        self.filter.clear()
+        self.filter.setFocus(Qt.FocusReason.OtherFocusReason)
 
     # -- finding rows ----------------------------------------------------------
 

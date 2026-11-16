@@ -138,10 +138,14 @@ def _run_child(args: argparse.Namespace) -> int:
     from tomography_session_browser.ui import main_window as main_window_module
     from tomography_session_browser.ui.motion import TICKER, motion_enabled
     from tomography_session_browser.presentation.design_tokens import palette_for
-    from tomography_session_browser.ui.theme import apply_theme
+    from tomography_session_browser.ui.theme import style_application
 
     app = QApplication(sys.argv[:1])
-    apply_theme(app, palette_for(args.theme))
+    # The application as it ships: the proxy style and the theme, once, at
+    # start-up (as app.py). The theme switches below restyle through the
+    # window's own theme action. Until 12 November 2026 this called
+    # apply_theme only, so earlier verdicts were measured without the proxy.
+    style_application(app, palette_for(args.theme))
     # Never touch the reviewer's real settings file.
     window = main_window_module.MainWindow(settings=Settings(theme=args.theme), save_settings=lambda _settings: None)
     overlay = window.ui.loading_overlay

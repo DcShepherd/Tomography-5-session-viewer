@@ -143,16 +143,6 @@ def resolve_atlas_for_sample(
     return AtlasLinkResolution(candidates=matched, method=ATLAS_MATCH_SUFFIX, ambiguous=True)
 
 
-def matching_atlas_sample(sample: Sample, atlas_lookup: list[tuple[str, Sample]]) -> Sample | None:
-    """The unique atlas sample an AtlasId names, or ``None``.
-
-    A thin accessor over :func:`resolve_atlas_for_sample` for callers that only
-    need the decided answer and not the candidate list behind it.
-    """
-
-    return resolve_atlas_for_sample(sample, atlas_lookup).sample
-
-
 def _dedupe_samples(samples) -> tuple[Sample, ...]:
     """Collapse repeated sample objects, preserving first-seen order.
 

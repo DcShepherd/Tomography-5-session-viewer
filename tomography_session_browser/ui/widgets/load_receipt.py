@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 
 from tomography_session_browser.presentation.design_tokens import SPACE_M, SPACE_S, SPACE_XS
 from tomography_session_browser.presentation.load_results import LoadResultContent
+from tomography_session_browser.ui.widgets.copy_feedback import CopyFeedback
 from tomography_session_browser.ui.widgets.session_drop import Glyph, GlyphButton
 
 
@@ -53,6 +54,7 @@ class LoadReceipt(QFrame):
         self.retry_button.setAccessibleName("Retry failed folders")
         self.retry_button.clicked.connect(self.retry_requested)
         self.copy_button = QPushButton("Copy details", self)
+        self.copy_feedback = CopyFeedback(self.copy_button)
         self.copy_button.clicked.connect(self.copy_details)
         actions.addWidget(self.retry_button)
         actions.addWidget(self.copy_button)
@@ -73,6 +75,7 @@ class LoadReceipt(QFrame):
 
     def show_receipt(self, content: LoadResultContent) -> None:
         self._details = content.details
+        self.copy_feedback.reset()
         self.title.setText(content.title)
         while self.sections.count():
             item = self.sections.takeAt(0)
@@ -123,6 +126,7 @@ class LoadReceipt(QFrame):
 
     def copy_details(self) -> None:
         QApplication.clipboard().setText(self._details)
+        self.copy_feedback.confirm()
 
     def dismiss(self) -> None:
         self.hide()

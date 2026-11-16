@@ -78,6 +78,18 @@ def bind_row(project: TagProject, folder: ProcessingSource, row: Tomogram) -> Ro
     return _bind(source, folder, row, lambda key: next((r for r in project.tomograms if row_key(r) == key), None))
 
 
+def row_binder(project: TagProject, folder: ProcessingSource) -> Callable[[Tomogram], RowBinding] | None:
+    """``bind_row`` for many rows of one folder: the source is found and the saved rows indexed once.
+
+    ``None`` when the project does not list the folder.
+    """
+    source = tag_source(project, folder.path)
+    if source is None:
+        return None
+    saved = {row_key(r): r for r in project.tomograms}
+    return lambda row: _bind(source, folder, row, saved.get)
+
+
 def bind_rows(project: TagProject, folders: Iterable[ProcessingSource]) -> tuple[BoundRow, ...]:
     saved = {(r.ref.source, r.ref.relative): r for r in project.tomograms}
     sources = {path_identity_key(s.path): s for s in project.sources}

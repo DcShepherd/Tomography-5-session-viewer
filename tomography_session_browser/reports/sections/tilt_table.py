@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 from reportlab.platypus import Paragraph, Spacer, Table
-from tomography_session_browser.services.tilt_series_validation import validation_for
+from tomography_session_browser.services.tilt_series_validation import tilt_range_evidence, validation_for
 from tomography_session_browser.domain.models import TiltSeries
 from tomography_session_browser.domain.status import ValidationStatus
 from tomography_session_browser.reports import graphics, styles
@@ -123,14 +123,15 @@ def tilt_table_header(label: str) -> list:
 
 def tilt_row(tilt: TiltSeries, ctx: SessionContext) -> TiltRow:
     validation = validation_for(ctx.validations, tilt)
-    actual = validation.actual_count if validation else len(tilt.sections)
-    expected = validation.expected_count if validation else None
+    actual = validation.observation.reported_count if validation else len(tilt.sections)
+    expected = validation.plan.expected_count if validation else None
     status = validation.status if validation else ValidationStatus.UNKNOWN
 
     # Degrees are in the column heading.
     tilt_range_text = "n/a"
-    if validation and validation.min_tilt is not None and validation.max_tilt is not None:
-        tilt_range_text = f"{validation.min_tilt:g} to {validation.max_tilt:g}"
+    low, high, _step = tilt_range_evidence(validation)[1] if validation else (None, None, None)
+    if low is not None and high is not None:
+        tilt_range_text = f"{low:g} to {high:g}"
     elif tilt.tilt_range is not None:
         tilt_range_text = f"{tilt.tilt_range[0]:g} to {tilt.tilt_range[1]:g}"
 
@@ -141,7 +142,8 @@ def tilt_row(tilt: TiltSeries, ctx: SessionContext) -> TiltRow:
     )
     # The unit is in the column heading: the same formatter, without it.
     target_def = format_target_defocus_values([tilt.target_defocus], unit="").strip()
-    images = f"{actual} / {expected}" if expected is not None else f"{actual} / —"
+    shown = "?" if actual is None else actual
+    images = f"{shown} / {expected}" if expected is not None else f"{shown} / —"
     return TiltRow(
         name=tilt.name or tilt.id,
         status_label=display_status_label(status),

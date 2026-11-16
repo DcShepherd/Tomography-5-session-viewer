@@ -20,6 +20,7 @@ from tomography_session_browser.domain.units import (
 from tomography_session_browser.parsers.xml_parser import find_first
 from tomography_session_browser.presentation.formatting import (
     angle_range_text,
+    format_tilt_angle,
     binning_text,
     common_text,
     display_value,
@@ -38,11 +39,11 @@ from tomography_session_browser.services.item_status import display_status_label
 from tomography_session_browser.services.tilt_series_validation import (
     HARD_FAILURE_THRESHOLD,
     SOURCE_INFERRED_MAJORITY,
-    SOURCE_MDOC,
     SOURCE_MRC_EXTENDED,
     SOURCE_SESSION_METADATA,
     UNREADABLE_STACK_REASON,
     TiltSeriesValidation,
+    tilt_range_evidence,
 )
 
 
@@ -74,7 +75,6 @@ def microscope_state_lines(metadata: dict[str, Any]) -> list[str]:
 
 _EXPECTED_SOURCE_PHRASES = {
     SOURCE_SESSION_METADATA: "session metadata",
-    SOURCE_MDOC: "the MDOC file",
     SOURCE_MRC_EXTENDED: "the MRC extended header",
     SOURCE_INFERRED_MAJORITY: "the inferred session majority",
 }
@@ -102,28 +102,24 @@ def tilt_series_validation_lines(
         # ("Complete", not "COMPLETE"): the context panel draws it as the
         # same pill (harmonisation C1).
         lines.append(f"Status: {display_status_label(validation.status)}")
-    source = _EXPECTED_SOURCE_PHRASES.get(validation.evidence_source or "")
-    if validation.expected_count is None:
+    source = _EXPECTED_SOURCE_PHRASES.get(validation.plan.source)
+    expected = validation.plan.expected_count
+    if expected is None:
         lines.append("Expected: unknown")
     elif source:
-        lines.append(f"Expected: {validation.expected_count}, from {source}")
+        lines.append(f"Expected: {expected}, from {source}")
     else:
-        lines.append(f"Expected: {validation.expected_count}")
-    if validation.min_tilt is not None and validation.max_tilt is not None:
-        range_label = (
-            "Planned range"
-            if validation.evidence_source in {SOURCE_SESSION_METADATA, SOURCE_MRC_EXTENDED}
-            else "Observed range"
-        )
-        if validation.tilt_increment is not None:
+        lines.append(f"Expected: {expected}")
+    planned, (low, high, step) = tilt_range_evidence(validation)
+    if low is not None and high is not None:
+        range_label = "Planned range" if planned else "Observed range"
+        if step is not None:
             lines.append(
-                f"{range_label}: {validation.min_tilt:g}° to {validation.max_tilt:g}° "
-                f"at {validation.tilt_increment:g}°"
+                f"{range_label}: {format_tilt_angle(low)} to {format_tilt_angle(high)} "
+                f"at {format_tilt_angle(step)}"
             )
         else:
-            lines.append(
-                f"{range_label}: {validation.min_tilt:g}° to {validation.max_tilt:g}°"
-            )
+            lines.append(f"{range_label}: {format_tilt_angle(low)} to {format_tilt_angle(high)}")
     lines.extend(_validation_rule_lines(validation))
     return lines
 
@@ -137,10 +133,14 @@ def _validation_rule_lines(validation: TiltSeriesValidation) -> list[str]:
     unreadable one keeps the validator's own explanation.
     """
 
-    if validation.actual_count == 0 or validation.reason == UNREADABLE_STACK_REASON:
+    actual = validation.observation.reported_count
+    if not actual or UNREADABLE_STACK_REASON in validation.reason:
         return [f"Reason: {validation.reason}"] if validation.reason else []
-    if validation.status == ValidationStatus.FAILED and validation.actual_count < HARD_FAILURE_THRESHOLD:
+    if validation.status == ValidationStatus.FAILED and actual < HARD_FAILURE_THRESHOLD:
         return [f"Rule: fewer than {HARD_FAILURE_THRESHOLD} tilt images"]
+    if (validation.interrupted or validation.diagnostics
+            or (validation.coverage is not None and validation.status != ValidationStatus.COMPLETE)):
+        return [f"Reason: {validation.reason}"] if validation.reason else []
     return []
 
 
@@ -165,8 +165,11 @@ def tilt_series_quality_lines(
         return lines  # everything else needs the stack
 
     # Sections vs. expected
-    expected = validation.expected_count
-    actual = validation.actual_count
+    expected = validation.plan.expected_count
+    actual = validation.observation.reported_count
+    if actual is None:
+        lines.append("Coverage: unknown. The stack is unreadable.")
+        return lines
     # The Summary and Validation sections already state the image count and
     # the expected count. This block is about the judgement drawn from them,
     # so it leads with that rather than printing the same ratio a third time
@@ -419,7 +422,7 @@ def tilt_increment_text(tilt_series: TiltSeries) -> str:
     increments = [round(abs(next_angle - angle), 2) for angle, next_angle in zip(angles, angles[1:]) if next_angle != angle]
     if not increments:
         return "unknown"
-    return f"{median(increments):g}{DEGREE}"
+    return format_tilt_angle(median(increments))
 
 
 def combined_tilt_range_text(tilt_series: list[TiltSeries]) -> str:

@@ -8,12 +8,15 @@ from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QWidget
 from tomography_session_browser.presentation.tomogram_context import TomogramContext
 from tomography_session_browser.presentation.design_tokens import SPACE_S, SPACE_XS
 from tomography_session_browser.ui.context.fields import ContextScroll, copy_button, evidence_row, file_row, section, text_label, value_row
-from tomography_session_browser.ui.dashboard.common import CardBox, card_layout
+from tomography_session_browser.ui.dashboard.common import CardBox, card_layout, pill
+from tomography_session_browser.ui.widgets.metadata_callout import MetadataCallout
 from tomography_session_browser.ui.dashboard.layout import ResponsiveCardGrid
 
 
 class TomogramDetails(ContextScroll):
     parent_requested = Signal(str)
+    #: (row key, 'confirm' or 'unlink') from the alignment warning card's link.
+    alignment_requested = Signal(str, str)
 
     def __init__(self, parent: QWidget, warning_tone: Callable[[str], str]) -> None:
         super().__init__(parent, warning_tone)
@@ -65,6 +68,11 @@ class TomogramDetails(ContextScroll):
                 number.setAccessibleDescription(value.detail)
                 number.setProperty('valueState', value.state)
                 layout.addWidget(number)
+                if value.tag:
+                    tag = pill(value.tag, '')
+                    tag.setParent(card)
+                    tag.setToolTip(value.qualifier)
+                    layout.addWidget(tag, alignment=Qt.AlignmentFlag.AlignLeft)
             layout.addStretch(1)
             cards.append(card)
         self.layout_.addWidget(ResponsiveCardGrid(cards, breakpoints=((240, 2),)))
@@ -75,6 +83,8 @@ class TomogramDetails(ContextScroll):
         for file in model.files:
             self.layout_.addWidget(file_row(file, self.body))
         found = self.fold('How each value was found')
+        if model.provenance:
+            found.layout_.addWidget(text_label(model.provenance, found.body))
         found.layout_.addWidget(text_label(model.alignment, found.body))
         for value in (*[value for tile in model.tiles for value in tile.values], *model.other_values):
             found.layout_.addWidget(evidence_row(value, found.body))
@@ -84,5 +94,17 @@ class TomogramDetails(ContextScroll):
         if not model.header:
             header.layout_.addWidget(text_label('Absent: no reconstruction selected.', header.body))
         self.warnings(model.warnings)
+        if (action := model.alignment_action) is not None:
+            self.add_alignment_action(action, model.row_key)
         self.layout_.addStretch(1)
         self.verticalScrollBar().setValue(0)
+
+    def add_alignment_action(self, action, row_key: str) -> None:
+        cards = [card for card in self.body.findChildren(MetadataCallout) if card.warning == action.card]
+        if len(cards) != 1:
+            return
+        self.alignment_button = link_button(parent=cards[0])
+        self.alignment_button.setText(action.label)
+        self.alignment_button.setToolTip(action.card)
+        self.alignment_button.clicked.connect(lambda: self.alignment_requested.emit(row_key, action.kind))
+        cards[0].add_action(self.alignment_button)

@@ -6,55 +6,20 @@ from collections import OrderedDict
 import logging
 from typing import Any
 from PySide6.QtCore import QElapsedTimer, QTimer
-from tomography_session_browser.domain.models import Sample, Session
 from tomography_session_browser.presentation.scope_identity import dashboard_key
 from tomography_session_browser.presentation.context_stack import ContextStack
-from tomography_session_browser.presentation.dashboard.models import DashboardEntityScope, DashboardModel, LinkedAtlasDashboardScope
+from tomography_session_browser.presentation.dashboard.models import DashboardModel
 from tomography_session_browser.presentation.dashboard.dashboard import session_dashboard_model
-from tomography_session_browser.presentation.project_tree import ProjectTreeGroup
-from tomography_session_browser.presentation.scopes import LinkedSampleGroup
 from tomography_session_browser.presentation.workspace import Workspace
 from tomography_session_browser.presentation.dashboard.scope_value import (
     DashboardScopeValue,
-    timeline_from_tilt_series,
+    timeline_for_scope_value,
 )
-from tomography_session_browser.services.timeline_service import SessionTimeline, build_session_timeline
+from tomography_session_browser.services.timeline_service import SessionTimeline
 from tomography_session_browser.ui.loading.instrumentation import LoadInstrumentation
 from tomography_session_browser.ui.dashboard.widget import SessionDashboard
 
 LOGGER = logging.getLogger("tomography_session_browser.ui.main_window")
-
-def timeline_for_scope(scope_value: DashboardScopeValue) -> SessionTimeline | None:
-    """Build a timeline appropriate for ``scope_value`` so the strip in the
-    dashboard reflects the same scope as the rest of the cards."""
-
-    try:
-        if isinstance(scope_value, Session):
-            return build_session_timeline(scope_value)
-        if isinstance(scope_value, list):
-            # Concatenate per-session timelines into a single SessionTimeline.
-            segments: list = []
-            pauses: list = []
-            for session in scope_value:
-                tl = build_session_timeline(session)
-                segments.extend(tl.segments)
-                pauses.extend(tl.pauses)
-            return SessionTimeline(segments=tuple(segments), pauses=tuple(pauses))
-        if isinstance(scope_value, Sample):
-            tilt_series = list(scope_value.tilt_series)
-            return timeline_from_tilt_series(tilt_series)
-        if isinstance(scope_value, LinkedSampleGroup):
-            return timeline_from_tilt_series(list(scope_value.tilt_series))
-        if isinstance(scope_value, DashboardEntityScope):
-            return timeline_from_tilt_series(list(scope_value.tilt_series))
-        if isinstance(scope_value, LinkedAtlasDashboardScope):
-            return timeline_for_scope(scope_value.source)
-        if isinstance(scope_value, ProjectTreeGroup):
-            return timeline_for_scope(list(scope_value.sessions))
-    except Exception:  # pragma: no cover — defensive
-        return None
-    return None
-
 
 class DashboardHost:
     def __init__(
@@ -141,7 +106,7 @@ class DashboardHost:
                     model_ms = model_timer.elapsed()
                     timeline_timer = QElapsedTimer()
                     timeline_timer.start()
-                    timeline = timeline_for_scope(scope_value)
+                    timeline = timeline_for_scope_value(scope_value)
                     timeline_ms = timeline_timer.elapsed()
                     self.model_cache[cache_key] = (model, timeline)
             else:

@@ -98,10 +98,6 @@ def attributed_linked_sample_group_warnings(group: LinkedSampleGroup) -> list[At
     return warnings
 
 
-def linked_sample_group_warnings(group: LinkedSampleGroup) -> list[str]:
-    return [warning.text for warning in attributed_linked_sample_group_warnings(group)]
-
-
 def attributed_warnings(prefix: str, warnings: Iterable[str], source: Any | None) -> list[AttributedWarning]:
     """``source``'s own warnings, prefixed with where they came from and
     attributed to ``source``. Without a source they stay unattributed."""

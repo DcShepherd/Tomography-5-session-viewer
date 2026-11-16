@@ -14,9 +14,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QTreeWidgetItem,
 )
-from tomography_session_browser.ui.dashboard_host import (
-    timeline_for_scope,
-)
 from tomography_session_browser.domain.enums import (
     SessionKind,
 )
@@ -26,6 +23,7 @@ from tomography_session_browser.domain.display_names import (
 )
 from tomography_session_browser.domain.identity import (
     dedupe_entities,
+    entity_key_text,
     path_identity_key,
 )
 from tomography_session_browser.domain.models import (
@@ -45,7 +43,7 @@ from tomography_session_browser.presentation.workspace import (
     EntityKind,
     Scope,
 )
-from tomography_session_browser.services.markers.context import MarkerContext
+from tomography_session_browser.services.markers.atlas_display import AtlasDisplayFilter
 from tomography_session_browser.services.entity_links import (
     batch_search_maps_with_shared_tilts,
     batch_tilt_series,
@@ -53,12 +51,10 @@ from tomography_session_browser.services.entity_links import (
     search_map_tilt_series,
 )
 from tomography_session_browser.ui.viewer.models import AtlasCollectionOverlayOption
-from tomography_session_browser.services.timeline_service import (
-    SessionTimeline,
-)
 from tomography_session_browser.presentation.project_tree import (
     ProjectTreeGroup,
     session_key,
+    window_title,
 )
 from tomography_session_browser.ui.project_tree.items import (
     ProjectTreeItems,
@@ -214,6 +210,8 @@ class ScopeQueries(QObject):
 
 
     def populate_tree(self, *, open_user_group: str | None = None) -> None:
+        # Every change to the loaded groups or their names rebuilds the tree.
+        self.window.setWindowTitle(window_title(self.parts.scopes.project_groups()))
         self.parts.project_panel.populate(
             ProjectTreeItems(self.state.review.workspace, self.parts.scopes.label_for),
             self.parts.scopes.project_groups(),
@@ -309,7 +307,8 @@ class ScopeQueries(QObject):
                 kind="search map",
             )
         batches = [value]
-        tilts = batch_tilt_series(value, self.state.review.workspace.entities(EntityKind.TILT_SERIES, context))
+        tilts = batch_tilt_series(value, self.state.review.workspace.entities(EntityKind.TILT_SERIES, context),
+                                  batch_positions=self.state.review.workspace.entities(EntityKind.BATCH_POSITION, context))
         return DashboardEntityScope(
             source=value,
             search_maps=batch_search_maps_with_shared_tilts(
@@ -342,10 +341,6 @@ class ScopeQueries(QObject):
         if item is None:
             return False
         return item.data(0, OBJECT_ROLE) is self.state.dashboard.dashboard_focus_value
-
-
-    def build_timeline_for_scope(self, scope_value: DashboardScopeValue) -> SessionTimeline | None:
-        return timeline_for_scope(scope_value)
 
 
     def tree_item_scope_context(self, item: QTreeWidgetItem | None) -> tuple[bool, Scope]:
@@ -595,59 +590,40 @@ class ScopeQueries(QObject):
         return options
 
 
-    def atlas_marker_context_for_collection_scope(
+    def atlas_display_filter_for_collection_scope(
         self,
         atlas: Atlas,
-        base: MarkerContext,
         context: Scope,
-    ) -> MarkerContext:
+    ) -> AtlasDisplayFilter | None:
+        """The batch positions and tilt series the Atlas tab draws for ``context``.
+
+        ``None`` when the atlas has no collection sessions: draw everything.
+        Markers are still built from the whole grid (``atlas_lod_markers``), so
+        hiding a collection never changes a visible position's status.
+        """
+
         available = self.parts.scopes.atlas_collection_sessions(atlas)
         if not available:
-            return base
+            return None
         scope_sessions = self.parts.scopes.atlas_collection_sessions_for_scope(
             atlas,
             context,
         )
         scope_key = self.parts.scopes.atlas_collection_scope_key(context)
-        visible_sessions = [
-            session
-            for session in scope_sessions
-            if self.state.viewer.atlas_collection_visibility.get(
+        batch_keys: set[str] = set()
+        tilt_keys: set[str] = set()
+        for session in scope_sessions:
+            if not self.state.viewer.atlas_collection_visibility.get(
                 (scope_key, session_key(session)),
                 True,
-            )
-        ]
-        visible_batches: list[BatchPosition] = []
-        visible_tilts: list[TiltSeries] = []
-        for session in visible_sessions:
+            ):
+                continue
             batches, tilts = self.parts.scopes.atlas_collection_entities_for_session(
                 atlas,
                 session,
                 context,
             )
-            visible_batches.extend(batches)
-            visible_tilts.extend(tilts)
-        batch_object_ids = {id(value) for value in visible_batches}
-        tilt_object_ids = {id(value) for value in visible_tilts}
-        scoped_tilts = tuple(
-            value
-            for value in base.tilt_series
-            if id(value) in tilt_object_ids
-        )
-        scoped_tilt_ids = {tilt.id for tilt in scoped_tilts}
-        return MarkerContext(
-            overviews=base.overviews,
-            search_maps=base.search_maps,
-            batch_positions=tuple(
-                value
-                for value in base.batch_positions
-                if id(value) in batch_object_ids
-            ),
-            tilt_series=scoped_tilts,
-            failed_tilt_ids=frozenset(
-                tilt_id
-                for tilt_id in base.failed_tilt_ids
-                if tilt_id in scoped_tilt_ids
-            ),
-        )
+            batch_keys.update(entity_key_text(value) for value in batches)
+            tilt_keys.update(entity_key_text(value) for value in tilts)
+        return AtlasDisplayFilter(frozenset(batch_keys), frozenset(tilt_keys))
 

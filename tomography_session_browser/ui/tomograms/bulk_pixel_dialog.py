@@ -233,7 +233,7 @@ class BulkPixelDialog(QDialog):
         self.cancel_button = self.button("Cancel", self.reject)
         self.update_button = self.button("Update the list", self.update_list)
         self.update_button.setObjectName("primaryButton")
-        self.update_button.setToolTip("Show the list without the versions that changed. The app applies nothing.")
+        self.update_button.setToolTip("Remove the changed versions from the list. Nothing is applied.")
         self.update_button.hide()
         self.all_button = self.button("Apply to all", self.apply_all)
         self.selected_button = self.button("Apply to selected", self.apply_selected)

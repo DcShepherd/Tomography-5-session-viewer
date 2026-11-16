@@ -26,9 +26,8 @@ from tomography_session_browser.services.batch_inference import (
 from tomography_session_browser.services.entity_links import (
     batch_tilt_series,
     explicitly_linked_tilt_ids,
-    planned_exposures_for_batch_position,
 )
-from tomography_session_browser.services.item_status import BatchPositionStatusCounts, batch_position_status_from_counts
+from tomography_session_browser.services.item_status import batch_outcome, build_item_status_context
 from tomography_session_browser.services.timeline_service import datetime_sort_key
 
 
@@ -61,34 +60,16 @@ def batch_position_progress_rows(
 
     rows: list[BatchPositionProgressModel] = []
     inferred_batch_groups = inferred_batch_groups or []
+    context = build_item_status_context(
+        batch_positions=batch_positions, tilt_series=tilt_series, validations=validation_by_id,
+    )
     for batch in batch_positions:
-        inferred_tilts = inferred_tilts_for_batch(batch, inferred_batch_groups)
-        linked_tilts = dedupe_tilt_series(tilt_series_for_batch(batch, tilt_series) + inferred_tilts)
-        exposure_count = planned_exposures_for_batch_position(batch, linked_tilts)
-        complete, warning, failed, queued = tilt_status_counts(linked_tilts, validation_by_id)
-
-        planned_remainder = max(exposure_count - len(linked_tilts), 0)
-        if planned_remainder:
-            queued += planned_remainder
-
-        batch_status = batch_position_status(batch)
-        if batch_status == TILE_STATUS_FAILED and failed == 0:
-            if queued > 0:
-                queued -= 1
-            failed = 1
-        elif not linked_tilts and exposure_count == 0:
-            if batch_status == TILE_STATUS_COMPLETE:
-                complete = 1
-            elif batch_status == TILE_STATUS_WARNING:
-                warning = 1
-            elif batch_status == TILE_STATUS_FAILED:
-                failed = 1
-            else:
-                queued = 1
-
-        acquisition_status = batch_position_status_from_counts(
-            batch, BatchPositionStatusCounts(exposure_count, complete, warning, failed, queued, 0)
-        ).status
+        outcome = batch_outcome(batch, context)
+        counts = outcome.counts
+        exposure_count = counts.planned
+        complete, warning, failed = counts.complete, counts.incomplete, counts.failed
+        queued = counts.missing + counts.unknown
+        acquisition_status = outcome.status
         status = {
             "done": TILE_STATUS_COMPLETE,
             "failed": TILE_STATUS_FAILED,
@@ -101,7 +82,7 @@ def batch_position_progress_rows(
                 id=batch.id,
                 label=label,
                 exposure_count=exposure_count,
-                tilt_series=len(linked_tilts),
+                tilt_series=outcome.member_count,
                 complete=complete,
                 warning=warning,
                 failed=failed,
@@ -110,22 +91,16 @@ def batch_position_progress_rows(
                 tooltip=_batch_position_progress_tooltip(
                     label=label,
                     exposure_count=exposure_count,
-                    linked_tilts=len(linked_tilts),
+                    linked_tilts=outcome.member_count,
                     complete=complete,
                     warning=warning,
                     failed=failed,
                     queued=queued,
-                    batch_status=batch_status,
-                    frame_text=group_tilt_series_frame_text(linked_tilts, validation_by_id)
-                    if inferred_tilts
-                    else None,
-                    inferred=bool(inferred_tilts),
+                    batch_status=batch_position_status(batch),
                 ),
             )
         )
     for group in inferred_batch_groups:
-        if group_matches_any_batch(group, batch_positions):
-            continue
         complete, warning, failed, queued = tilt_status_counts(group.tilt_series, validation_by_id)
         status = _dominant_batch_row_status(
             batch_status=TILE_STATUS_NEUTRAL,
@@ -168,8 +143,9 @@ def batch_position_progress_rows(
 def tilt_series_for_batch(
     batch: BatchPosition,
     tilt_series: list[TiltSeries],
+    batch_positions: list[BatchPosition],
 ) -> list[TiltSeries]:
-    linked = batch_tilt_series(batch, tilt_series)
+    linked = batch_tilt_series(batch, tilt_series, batch_positions=batch_positions)
     linked.sort(
         key=lambda tilt: (
             *datetime_sort_key(tilt.acquisition_time_start),
@@ -235,25 +211,6 @@ def inferred_failed_batch_groups(
             if inferred_label_matches_batch(group.label, batch, tilt_id=first, owners=owners)
         )
     return list(grouped.values())
-
-
-def inferred_tilts_for_batch(
-    batch: BatchPosition,
-    inferred_groups: list[InferredBatchGroup],
-) -> list[TiltSeries]:
-    return [
-        tilt
-        for group in inferred_groups
-        if batch.id in group.batch_ids
-        for tilt in group.tilt_series
-    ]
-
-
-def group_matches_any_batch(
-    group: InferredBatchGroup,
-    batch_positions: list[BatchPosition],
-) -> bool:
-    return any(batch.id in group.batch_ids for batch in batch_positions)
 
 
 def batch_position_label(batch: BatchPosition) -> str:

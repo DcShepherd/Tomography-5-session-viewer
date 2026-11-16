@@ -9,18 +9,15 @@ from tomography_session_browser.presentation.dashboard.models import (
     DashboardScope,
     InferredBatchGroup,
     TILE_STATUS_FAILED,
-    TILE_STATUS_NEUTRAL,
     TimelineItemModel,
 )
-from tomography_session_browser.presentation.dashboard.scopes import sample_group_key
+from tomography_session_browser.presentation.dashboard.scopes import sample_group_key, sample_row_labels
 from tomography_session_browser.presentation.dashboard.sections.batches import (
     batch_position_label,
     dedupe_tilt_series,
-    group_matches_any_batch,
-    inferred_tilts_for_batch,
     tilt_series_for_batch,
 )
-from tomography_session_browser.presentation.dashboard.sections.status import batch_position_status, tilt_status_counts
+from tomography_session_browser.presentation.dashboard.sections.status import tilt_status_counts
 from tomography_session_browser.presentation.dashboard.sections.tilt_labels import (
     format_names_for_tooltip,
     group_tilt_series_frame_text,
@@ -47,13 +44,11 @@ def timeline_items_for_scope(
     assigned_tilt_ids: set[str] = set()
     inferred_batch_groups = inferred_batch_groups or []
     for batch in batch_positions:
-        inferred_tilts = inferred_tilts_for_batch(batch, inferred_batch_groups)
-        linked_tilts = dedupe_tilt_series(tilt_series_for_batch(batch, tilt_series) + inferred_tilts)
+        linked_tilts = tilt_series_for_batch(batch, tilt_series, batch_positions)
         if not linked_tilts:
             continue
         label = batch_position_label(batch)
         exposure_count = planned_exposures_for_batch_position(batch, linked_tilts)
-        batch_status = batch_position_status(batch)
         complete, warning, failed, queued = tilt_status_counts(linked_tilts, validation_by_id)
         failed_names = tilt_names_with_status(linked_tilts, validation_by_id, TILE_STATUS_FAILED)
         tooltip = _timeline_group_tooltip(
@@ -64,12 +59,12 @@ def timeline_items_for_scope(
             failed=failed,
             queued=queued,
             frame_text=group_tilt_series_frame_text(linked_tilts, validation_by_id),
-            inferred=bool(inferred_tilts),
+            inferred=False,
             failed_names=failed_names,
         )
         for tilt in linked_tilts:
             validation = validation_for(validation_by_id, tilt)
-            status = timeline_status_for(batch_status, validation)
+            status = timeline_status_for(validation)
             assigned_tilt_ids.add(tilt.id)
             items[tilt.id] = TimelineItemModel(
                 tilt_series_id=tilt.id,
@@ -79,8 +74,6 @@ def timeline_items_for_scope(
                 status=status,
             )
     for group in inferred_batch_groups:
-        if group_matches_any_batch(group, batch_positions):
-            continue
         complete, warning, failed, queued = tilt_status_counts(group.tilt_series, validation_by_id)
         failed_names = tilt_names_with_status(group.tilt_series, validation_by_id, TILE_STATUS_FAILED)
         tooltip = _timeline_group_tooltip(
@@ -102,13 +95,13 @@ def timeline_items_for_scope(
                 lane_key=f"inferred:{inferred_group_token(group.label, group.owner)}",
                 lane_label=group.label,
                 tooltip=tooltip,
-                status=timeline_status_for(TILE_STATUS_NEUTRAL, validation),
+                status=timeline_status_for(validation),
             )
     for tilt in tilt_series:
         if tilt.id in assigned_tilt_ids:
             continue
         validation = validation_for(validation_by_id, tilt)
-        status = timeline_status_for(TILE_STATUS_NEUTRAL, validation)
+        status = timeline_status_for(validation)
         label = tilt.name or tilt.id
         items[tilt.id] = TimelineItemModel(
             tilt_series_id=tilt.id,
@@ -133,14 +126,17 @@ def timeline_items_by_sample(
     """
 
     items: dict[str, TimelineItemModel] = {}
-    for label, samples in sample_groups:
+    # A lane reads as the sample's Samples-table row and legend entry; its key
+    # is the sample identity and does not depend on the text.
+    names = sample_row_labels(sample_groups)
+    for (label, samples), name in zip(sample_groups, names):
         tilts = dedupe_tilt_series([tilt for sample in samples for tilt in sample.tilt_series])
         if not tilts:
             continue
         complete, warning, failed, queued = tilt_status_counts(tilts, validation_by_id)
         failed_names = tilt_names_with_status(tilts, validation_by_id, TILE_STATUS_FAILED)
         tooltip_lines = [
-            label,
+            name,
             f"Tilt series: {len(tilts)}",
             f"Complete: {complete}",
             f"Incomplete: {warning}",
@@ -157,9 +153,9 @@ def timeline_items_by_sample(
             items[tilt.id] = TimelineItemModel(
                 tilt_series_id=tilt.id,
                 lane_key=key,
-                lane_label=label,
+                lane_label=name,
                 tooltip=tooltip,
-                status=timeline_status_for(TILE_STATUS_NEUTRAL, validation),
+                status=timeline_status_for(validation),
             )
     return items
 

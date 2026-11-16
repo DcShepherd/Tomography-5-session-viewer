@@ -143,6 +143,10 @@ class TomogramFocus(QObject):
         rect.moveTop(max(area.top(), min(rect.top(), area.bottom()-rect.height()+1)))
         self.window.setGeometry(rect)
 
+    def fit_layout(self) -> None:
+        self.refit.stop()
+        self.fit()
+
     def fit(self) -> None:
         saved = self.saved
         tab = self.ui.tomogram_tab

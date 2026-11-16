@@ -9,6 +9,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from PySide6.QtWidgets import QWidget
+
 from tomography_session_browser.domain.markers import MarkerType
 from tomography_session_browser.presentation.context_stack import ENTITY_DISPLAY_LABELS
 from tomography_session_browser.presentation.tab_keys import TabKey
@@ -22,8 +24,8 @@ if TYPE_CHECKING:
     from tomography_session_browser.ui.window_parts.contracts import WindowParts, WindowUi
 
 
-def create_summary_tab(label: TabKey, ui: WindowUi, parts: WindowParts) -> SessionDashboard:
-    ui.session_dashboard = SessionDashboard()
+def create_summary_tab(label: TabKey, ui: WindowUi, parts: WindowParts, page: QWidget) -> SessionDashboard:
+    ui.session_dashboard = SessionDashboard(page)
     def connect_summary() -> None:
         ui.session_dashboard.navigate_requested.connect(parts.dashboard.navigate_to_tab)
         ui.session_dashboard.tomograms_requested.connect(parts.dashboard.open_tomograms_summary)
@@ -40,7 +42,7 @@ def create_summary_tab(label: TabKey, ui: WindowUi, parts: WindowParts) -> Sessi
     return ui.session_dashboard
 
 
-def create_image_tab(label: TabKey, ui: WindowUi, parts: WindowParts) -> ViewerTab:
+def create_image_tab(label: TabKey, ui: WindowUi, parts: WindowParts, page: QWidget) -> ViewerTab:
     display_label = ENTITY_DISPLAY_LABELS.get(label, label)
     viewer_tab = ViewerTab(
         f"Open a session to browse {display_label.lower()} previews.",
@@ -79,20 +81,22 @@ def create_image_tab(label: TabKey, ui: WindowUi, parts: WindowParts) -> ViewerT
         on_navigation_requested=parts.navigation.viewer_navigation_requested
         if label in {TabKey.OVERVIEW, TabKey.SEARCH, TabKey.SEARCH_MAP, TabKey.BATCH_POSITION, TabKey.TILT_SERIES}
         else None,
+        parent=page,
     )
     return viewer_tab
 
 
-def create_tomogram_tab(label: TabKey, ui: WindowUi, parts: WindowParts) -> TomogramTab:
+def create_tomogram_tab(label: TabKey, ui: WindowUi, parts: WindowParts, page: QWidget) -> TomogramTab:
     state = parts.shell.state
     navigation = TomogramNavigation(parts)
     from tomography_session_browser.ui.window_parts.tag_projects import TagProjects
     parts.tag_projects = TagProjects(parts.shell.window, lambda: ui.tomogram_tab.protected_roots())
     parts.tag_projects.loaded_sources = lambda: state.review.workspace.processing_sources
+    parts.viewers.atlas_overlay.tags_provider = parts.tag_projects.atlas_tags
     tab = TomogramTab(settings=state.review.settings, save_settings=state.review.save_settings,
                       review_state=state.review.tomogram_review,
                       navigation_actions_for=navigation.actions, tag_projects=parts.tag_projects,
-                      protected_roots=lambda: state.review.workspace.source_roots)
+                      protected_roots=lambda: state.review.workspace.source_roots, parent=page)
     ui.tomogram_tab = tab
     def connect_tomograms() -> None:
         def refresh_metadata() -> None:
@@ -107,6 +111,8 @@ def create_tomogram_tab(label: TabKey, ui: WindowUi, parts: WindowParts) -> Tomo
         ui.context_panel_action.toggled.connect(lambda checked: refresh_metadata() if checked else None)
         tab.query_changed.connect(lambda _query: parts.context.refresh_context_header())
         tab.review_metadata_changed.connect(parts.dashboard.request_processing_summary_refresh)
+        # Every tag edit and every project change reaches this signal (``TagOwner.changed``).
+        tab.review_metadata_changed.connect(parts.viewers.atlas_tags_changed)
         tab.review_list.opened_changed.connect(parts.dashboard.request_processing_summary_refresh)
         def sort_changed() -> None:
             state.review.tomogram_sort = tab.review_list.sort.currentText()
@@ -117,6 +123,7 @@ def create_tomogram_tab(label: TabKey, ui: WindowUi, parts: WindowParts) -> Tomo
         tab.focus_requested.connect(parts.shell.tomogram_focus.set_enabled)
         tab.focus_preparing.connect(parts.shell.tomogram_focus.prepare)
         tab.focus_refit_requested.connect(parts.shell.tomogram_focus.request_refit)
+        tab.stage_transition.fit_focused_window = parts.shell.tomogram_focus.fit_layout
         ui.project_panel_action.triggered.connect(lambda checked: parts.shell.tomogram_focus.panel_invoked(checked, "project"))
         ui.context_panel_action.triggered.connect(lambda checked: parts.shell.tomogram_focus.panel_invoked(checked, "context"))
         tab.load_requested.connect(parts.loading.open_session)
@@ -133,7 +140,9 @@ def create_tomogram_tab(label: TabKey, ui: WindowUi, parts: WindowParts) -> Tomo
 class TabSpec:
     key: TabKey
     label: str
-    factory: Callable[[TabKey, WindowUi, WindowParts], SessionDashboard | ViewerTab | TomogramTab]
+    #: Builds the tab's content as a child of ``page``, which is already in
+    #: the tab widget and the window.
+    factory: Callable[[TabKey, WindowUi, WindowParts, QWidget], SessionDashboard | ViewerTab | TomogramTab]
 
 
 TAB_SPECS: tuple[TabSpec, ...] = (

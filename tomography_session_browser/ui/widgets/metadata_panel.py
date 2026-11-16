@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.motion import SmoothScroller
 from tomography_session_browser.presentation.design_tokens import SPACE_M, SPACE_S, SPACE_XS
+from tomography_session_browser.ui.widgets.copy_feedback import CopyFeedback
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 from tomography_session_browser.ui.widgets.metadata_text import display_value, clean_copied_text
 from tomography_session_browser.ui.widgets.metadata_callout import MetadataCallout
@@ -344,28 +345,20 @@ class _PathRow(QWidget):
         copy_button.setCursor(Qt.CursorShape.PointingHandCursor)
         copy_button.setFixedSize(28, 28)
         self._copy_button = copy_button
+        self._copy_feedback = CopyFeedback(copy_button)
         copy_button.clicked.connect(self._copy_to_clipboard)
         layout.addWidget(copy_button, alignment=Qt.AlignmentFlag.AlignTop)
 
     def set_value(self, value: str) -> None:
         if self._value.text_full() != value:
             self._value.setText(value)
+            self._copy_feedback.reset()
 
     def _copy_to_clipboard(self) -> None:
         clipboard = QGuiApplication.clipboard()
         if clipboard is not None:
             copy_text(self._value.text_full())
-            original_tooltip = self._copy_button.toolTip()
-            self._copy_button.setToolTip("Copied")
-            QToolTip.showText(
-                self._copy_button.mapToGlobal(self._copy_button.rect().bottomLeft()),
-                "Copied",
-                self._copy_button,
-            )
-            QTimer.singleShot(
-                1200,
-                lambda button=self._copy_button, tooltip=original_tooltip: button.setToolTip(tooltip),
-            )
+            self._copy_feedback.confirm()
 
 
 class _KeyValueRow(QWidget):

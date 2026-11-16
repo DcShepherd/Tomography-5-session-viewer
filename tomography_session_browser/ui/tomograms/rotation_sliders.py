@@ -172,8 +172,7 @@ class RotationSliders(QWidget):
             name = QLabel(axis, self)
             slider = RotationSlider(self)
             slider.setAccessibleName(f"{axis} rotation in degrees")
-            slider.setToolTip(f"Turn the view about the {axis} axis. Drag: one increment for each pixel. "
-                              "Wheel: one increment for each step. Right-click to set the increment, or use < and >.")
+            slider.setToolTip(f"Turn the view about the {axis} axis. Right-click or < > sets the increment.")
             value = QLabel(self)
             value.setObjectName("tomogramRotationValue")
             slider.valueChanged.connect(lambda tenths, i=index, s=slider: self.changed.emit(i, tenths / 10, s.isSliderDown()))

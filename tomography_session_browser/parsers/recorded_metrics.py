@@ -5,18 +5,34 @@ alignment output does not establish that any reconstruction imported it.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 from pathlib import Path, PureWindowsPath
 import re
 from xml.etree import ElementTree
 
+from tomography_session_browser.domain.alignment import AlignmentOffer, AlignmentUnavailable, RecordedAlignment
 from tomography_session_browser.domain.recorded_metrics import ProcessingEvidence, RecordedMetric
 from tomography_session_browser.parsers.volume_header import fingerprint, is_cloud_placeholder, read_volume
 from tomography_session_browser.parsers.imod_commands import literal_path, parameter, standard_input
+from tomography_session_browser.parsers.imod_transforms import parse_transforms
 from tomography_session_browser.parsers.tomopitch import parse_tomopitch, positive
 
 METADATA_LIMIT = 8 * 1024 * 1024
 THICKNESS_FIELD = "CTFSpecimenThicknessAngstrom"
+UNVERIFIED = "Import into this reconstruction is unverified; values are not ranked across runs."
+
+
+def matched_from(job_label: str) -> str:
+    """The qualification of alignment that a reconstruction's own angles and transforms prove."""
+    return (f"Matched to this reconstruction by its tilt angles and transforms; alignment from {job_label}. "
+            "Values are not ranked across runs.")
+
+
+def by_name_from(job_label: str) -> str:
+    """The qualification of alignment that the user linked on the series name alone."""
+    return (f"Linked by name only; the user confirmed it. Alignment from {job_label}. "
+            "The tilt angles and transforms were not compared. Values are not ranked across runs.")
 
 
 def _read(path: Path) -> str | None:
@@ -33,6 +49,10 @@ def _read(path: Path) -> str | None:
     if len(data) > METADATA_LIMIT or (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
         raise ValueError("Metadata changed while reading or exceeds the size limit.")
     return data.decode("utf-8-sig")
+
+
+#: The bounded metadata read (size limit, placeholder refusal, changed-while-reading), for other parsers.
+read_metadata = _read
 
 
 def _number(raw: str) -> float:
@@ -89,10 +109,29 @@ def _positioning_spacing(folder: Path, stem: str, scale: float) -> tuple[float, 
     return pixel_nm, note
 
 
-def _tomopitch(folder: Path, stem: str, source_root: Path) -> ProcessingEvidence:
+@dataclass(frozen=True, slots=True)
+class Lent:
+    """Evidence that one job's folder gives to another job's reconstruction.
+
+    The metric source is the file's absolute path, so the context panel opens
+    it; warnings name the file as ``place`` (the job and the series folder),
+    the form the PDF prints (ruling R1).
+    """
+
+    qualification: str
+    place: str
+
+
+def _tomopitch(folder: Path, stem: str, source_root: Path, lent: Lent | None = None) -> ProcessingEvidence:
+    """The positioning thickness in ``folder``.
+
+    When ``lent``, a value known only in pixels is withheld, because Etomo's
+    positioning pixels are not the other reconstruction's voxels (ruling R2).
+    """
     folder, source_root = folder.absolute(), source_root.absolute()
     log = folder / 'tomopitch.log'
-    source = log.relative_to(source_root).as_posix()
+    source = str(log) if lent is not None else log.relative_to(source_root).as_posix()
+    named = f'{lent.place}/{log.name}' if lent is not None else source
     try:
         stamp = fingerprint(log) if log.exists() else None
         text = _read(log)
@@ -103,6 +142,8 @@ def _tomopitch(folder: Path, stem: str, source_root: Path) -> ProcessingEvidence
             f'Final {result.field} recommendation: {result.pixels} pixels; unrounded {result.computed_pixels:g} pixels. '
             f'Includes ExtraThickness={result.border:g} pixels on each surface and FFT rounding. '
             f'Recorded ScaleFactor={result.scale:g}.')
+        if lent is not None:
+            qualification = f'{lent.qualification} {qualification}'
         warnings = ()
         value, unit = float(result.pixels), 'pixels'
         try:
@@ -112,6 +153,9 @@ def _tomopitch(folder: Path, stem: str, source_root: Path) -> ProcessingEvidence
                 raise ValueError('Converted thickness is not finite.')
             qualification += ' ' + note
         except (OSError, ValueError) as exc:
+            if lent is not None:
+                return ProcessingEvidence(warnings=(f'{named}: IMOD positioning thickness withheld; it is known only '
+                                                    f"in Etomo positioning pixels, not in this reconstruction's voxels. {exc}",))
             value, unit = float(result.pixels), 'pixels'
             warnings = (f'{source}: {exc}',)
             qualification += ' Physical conversion unavailable: ' + str(exc)
@@ -121,7 +165,7 @@ def _tomopitch(folder: Path, stem: str, source_root: Path) -> ProcessingEvidence
                                 source, f'Final aggregate {result.field}: set to', qualification)
         return ProcessingEvidence(metrics=(metric,), warnings=warnings)
     except (OSError, ValueError) as exc:
-        return ProcessingEvidence(warnings=(f'{source}: {exc}',))
+        return ProcessingEvidence(warnings=(f'{named}: {exc}',))
 
 
 def read_imod_processing_evidence(root: Path, output: Path) -> ProcessingEvidence:
@@ -189,7 +233,8 @@ def _warp(text: str, source: str) -> ProcessingEvidence:
     return ProcessingEvidence(metrics=tuple(metrics), warnings=tuple(warnings))
 
 
-def _imod(text: str, source: str, stem: str) -> tuple[str, tuple[RecordedMetric, ...]]:
+def _imod(text: str, source: str, stem: str, qualification: str = UNVERIFIED,
+          model_stems: tuple[str, ...] = ()) -> tuple[str, tuple[RecordedMetric, ...]]:
     header = "*** Entries to program tiltalign ***"
     if text.count(header) != 1 or not text.rstrip().endswith("SUCCESSFULLY COMPLETED"):
         raise ValueError("Expected one completed IMOD tiltalign run.")
@@ -198,10 +243,9 @@ def _imod(text: str, source: str, stem: str) -> tuple[str, tuple[RecordedMetric,
         raise ValueError("Alignment log has an incomplete parameter block.")
     block = body.split("*** End of entries ***", 1)[0]
     models = re.findall(r"^\s*ModelFile\s*=\s*(.+?)\s*$", block, re.MULTILINE)
-    if len(models) != 1 or PureWindowsPath(models[0]).stem != stem:
+    if len(models) != 1 or PureWindowsPath(models[0]).stem not in (model_stems or (stem,)):
         raise ValueError("Alignment log does not identify this tomogram uniquely.")
     local = re.findall(r"^\s*LocalAlignments\s*=\s*(\S+)\s*$", block, re.MULTILINE)
-    qualification = "Import into this reconstruction is unverified; values are not ranked across runs."
     alignment = f"IMOD tiltalign output found\nAlignment log: {source}\n{qualification}"
     if local != ["0"]:
         return alignment + " Residuals unavailable: global-only alignment is not established.", ()
@@ -229,6 +273,45 @@ def _imod(text: str, source: str, stem: str) -> tuple[str, tuple[RecordedMetric,
         metrics.append(RecordedMetric(f"imod.tiltalign.{key}", label, value, unit,
                                      source, field, detail))
     return alignment, tuple(metrics)
+
+
+def read_own_alignment(folder: Path, stem: str) -> RecordedAlignment:
+    """The ``<stem>.tlt`` and ``<stem>.xf`` in ``folder``; a problem is the record, never a warning."""
+    try:
+        return parse_transforms(_read(folder / f"{stem}.tlt"), _read(folder / f"{stem}.xf"))
+    except (OSError, ValueError) as exc:
+        return AlignmentUnavailable('unreadable', str(exc))
+
+
+def read_alignment_offer(folder: Path, stem: str, job_label: str, model_endings: tuple[str, ...]) -> AlignmentOffer:
+    """One alignment job series folder: its transforms, residuals and positioning thickness, qualified as matched.
+
+    Sources are absolute paths, so a value shown on another job's
+    reconstruction names the file it came from. ``model_endings`` are the
+    job's own fiducial model names after the series name (``""`` is ``<ts>.fid``).
+    """
+    names = (f"{stem}.tlt", f"{stem}.xf", "align.log", "tomopitch.log")
+    stamps = tuple(fingerprint(path) for path in (folder / name for name in names) if path.is_file())
+    place = f"{job_label}, {folder.name}"
+    return AlignmentOffer(stem, read_own_alignment(folder, stem),
+                          _lent_evidence(folder, stem, Lent(matched_from(job_label), place), model_endings),
+                          _lent_evidence(folder, stem, Lent(by_name_from(job_label), place), model_endings), stamps)
+
+
+def _lent_evidence(folder: Path, stem: str, lent: Lent, model_endings: tuple[str, ...]) -> ProcessingEvidence:
+    log = (folder / "align.log").absolute()
+    residuals = ProcessingEvidence()
+    try:
+        text = _read(log)
+        if text is not None:
+            summary, metrics = _imod(text, str(log), stem, lent.qualification,
+                                     tuple(stem + ending for ending in model_endings))
+            residuals = ProcessingEvidence(summary, metrics)
+    except (OSError, ValueError) as exc:
+        residuals = ProcessingEvidence(warnings=(f"{lent.place}/{log.name}: {exc}",))
+    positioning = _tomopitch(folder, stem, folder, lent)  # Etomo jobs only write tomopitch.log.
+    return ProcessingEvidence(residuals.alignment, (*residuals.metrics, *positioning.metrics),
+                              (*residuals.warnings, *positioning.warnings))
 
 
 def read_processing_evidence(root: Path, stem: str) -> ProcessingEvidence:

@@ -9,9 +9,8 @@ from tomography_session_browser.domain.status import ValidationStatus
 from tomography_session_browser.domain.traversal import has_collection_data
 from tomography_session_browser.presentation.dashboard.analysis import ScopeAnalysis
 from tomography_session_browser.presentation.dashboard.models import DashboardScope
-from tomography_session_browser.presentation.dashboard.sections.batches import group_matches_any_batch
 from tomography_session_browser.presentation.dashboard.sections.status import search_map_is_incomplete
-from tomography_session_browser.presentation.workspace import display_sample_name
+from tomography_session_browser.presentation.dashboard.scopes import sample_row_labels
 from tomography_session_browser.services.item_status import ItemStatusContext
 
 
@@ -57,19 +56,15 @@ def by_sample_rows(
     scope's own verdicts. A group with none (an atlas slot never collected on)
     is the atlas page's to list; every counted entity implies collection data,
     so the rows still add up to the scope. The row is named for its collection
-    sample ("violet"), or the group's label when there are several."""
+    sample ("violet"), or the group's label when there are several
+    (:func:`sample_row_label`)."""
 
-    orphan_groups = [
-        group
-        for group in analysis.inferred_batch_groups
-        if not group_matches_any_batch(group, scope.batch_positions)
-    ]
+    orphan_groups = analysis.inferred_batch_groups
     rows: list[BySampleRowModel] = []
-    for group_label, samples in scope.sample_groups:
+    for (_group_label, samples), label in zip(scope.sample_groups, sample_row_labels(scope.sample_groups)):
         collection = [sample for sample in samples if has_collection_data(sample)]
         if not collection:
             continue
-        label = display_sample_name(collection[0].name) if len(collection) == 1 else group_label
         grids = {str(sample.path) for sample in samples}
         tilts = _in_scope(samples, analysis)
         statuses = [analysis.validation_by_key[tilt_id].status for tilt_id in tilts]

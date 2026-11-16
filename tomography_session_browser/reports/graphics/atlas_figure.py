@@ -8,7 +8,8 @@ from reportlab.lib import colors
 from reportlab.platypus import Flowable, KeepTogether, Paragraph, Spacer
 from tomography_session_browser.domain.markers import ImageMarker
 from tomography_session_browser.reports import styles
-from tomography_session_browser.services.atlas_lod import AtlasBatchView
+from tomography_session_browser.presentation.status_meanings import ATLAS_GLYPH_LABELS
+from tomography_session_browser.services.atlas_lod import ATLAS_GLYPH_KEYS, DASHED_GLYPH_KEYS, AtlasBatchView, atlas_glyph_key, glyph_colour_status
 from tomography_session_browser.services.atlas_marker_style import CLUSTER_HALO_WIDTH_DP, CLUSTER_INNER_GAP_DP, CLUSTER_SEGMENT_WIDTH_DP, IMAGE_STATUS_COLOURS, LABEL_CORNER_RADIUS_DP, LABEL_FONT_SIZE_DP, LEAF_DIAMETER_DP, LEAF_FAILED_GLYPH_WIDTH_DP, LEAF_FILL_RADIUS_DP, LEAF_HALO_WIDTH_DP, LEAF_RING_RADIUS_DP, LEAF_STATUS_WIDTH_DP, MARKER_INK, MARKER_LABEL_TEXT, PRINT_STATUS_COLOURS, cluster_diameter_dp, cluster_ring_segments
 from tomography_session_browser.reports.graphics.overlays import LOGGER
 from tomography_session_browser.reports.graphics.text import caption_width, draw_caption
@@ -24,13 +25,7 @@ class AtlasMarkerPrintLegend(Flowable):
     GLYPH = 8.5
     CLUSTER = 10.5
     TEXT_SIZE = styles.TYPE_CAPTION + 0.2
-    _ROWS = (
-        ("collected", "Collected"),
-        ("partial", "Partial"),
-        ("queued", "Queued"),
-        ("failed", "Failed"),
-        ("unattributed", "Unattributed"),
-    )
+    _ROWS = tuple((key, ATLAS_GLYPH_LABELS[key]) for key in ATLAS_GLYPH_KEYS)
     _CLUSTER_LABEL = "Nearby positions (count)"
     _TITLE = "Batch position status"
     _GAP = 9.0
@@ -62,8 +57,7 @@ class AtlasMarkerPrintLegend(Flowable):
                     c,
                     x + self.GLYPH / 2,
                     cy,
-                    status=status,
-                    navigable=True,
+                    key=status,
                     colours_by_status=PRINT_STATUS_COLOURS,
                     halo=False,
                     diameter=self.GLYPH,
@@ -128,7 +122,7 @@ def draw_pdf_cluster(
             canvas.circle(cx, cy, ring_radius, stroke=1, fill=0)
         canvas.setLineWidth(CLUSTER_SEGMENT_WIDTH_DP * scale)
         for segment in cluster_ring_segments(status_counts):
-            canvas.setStrokeColor(colour(segment.status))
+            canvas.setStrokeColor(colour(segment.key))
             # Segments start at 12 o'clock and run clockwise; ReportLab's
             # angles, like Qt's, run counter-clockwise from 3 o'clock.
             canvas.arc(
@@ -350,8 +344,7 @@ class AtlasStatusFigure(Flowable):
                 c,
                 cx,
                 cy,
-                status=(leaf.status or "queued").lower(),
-                navigable=bool(leaf.metadata.get("navigation_enabled", True)),
+                key=atlas_glyph_key(leaf),
                 colours_by_status=IMAGE_STATUS_COLOURS,
                 halo=True,
                 diameter=leaf_size,
@@ -417,7 +410,7 @@ class AtlasStatusFigure(Flowable):
     ) -> None:
         """A plate naming a cluster's members, beside the ring where it is free."""
 
-        labels = sorted({member.label for member in members if member.label}, key=natural_key)
+        labels = sorted({member.label for member in members if member.label}, key=case_sensitive_natural_key)
         if not labels:
             return
         k = PT_PER_DP
@@ -451,28 +444,30 @@ def draw_pdf_atlas_leaf(
     cx: float,
     cy: float,
     *,
-    status: str,
-    navigable: bool,
+    key: str,
     colours_by_status: dict[str, str],
     halo: bool,
     diameter: float,
     failed_glyph_color: str = MARKER_INK,
 ) -> None:
-    """ReportLab counterpart of the QPainter leaf-marker geometry."""
+    """ReportLab counterpart of the QPainter leaf-marker geometry.
+
+    ``key`` comes from ``atlas_glyph_key``. An unlinked failure is a failed
+    tilt series that no batch position claims: the failed glyph with a dashed
+    ring. An unresolved link is a dashed grey ring with no fill.
+    """
 
     scale = diameter / 14.0
     ring_radius = LEAF_RING_RADIUS_DP * scale
     fill_radius = LEAF_FILL_RADIUS_DP * scale
-    colour_key = status if status in colours_by_status else "queued"
-    if not navigable and status != "unattributed":
-        colour_key = "unattributed"
-    colour = colors.HexColor(colours_by_status[colour_key])
+    status = glyph_colour_status(key)
+    colour = colors.HexColor(colours_by_status.get(status, colours_by_status["queued"]))
     canvas.saveState()
     try:
-        if navigable and status in {"collected", "failed"}:
+        if status in {"collected", "failed"}:
             canvas.setFillColor(colour)
             canvas.circle(cx, cy, fill_radius, stroke=0, fill=1)
-        elif navigable and status == "partial":
+        elif status == "partial":
             path = canvas.beginPath()
             path.moveTo(cx, cy)
             path.arc(
@@ -496,13 +491,13 @@ def draw_pdf_atlas_leaf(
             canvas.circle(cx, cy, ring_radius, stroke=1, fill=0)
         canvas.setStrokeColor(colour)
         canvas.setLineWidth(LEAF_STATUS_WIDTH_DP * scale)
-        if status == "unattributed":
+        if key in DASHED_GLYPH_KEYS:
             canvas.setDash([3.9 * scale, 2.4 * scale], 0)
         else:
             canvas.setDash()
         canvas.circle(cx, cy, ring_radius, stroke=1, fill=0)
 
-        if navigable and status == "failed":
+        if status == "failed":
             glyph = fill_radius * 0.62
             canvas.setDash()
             canvas.setStrokeColor(colors.HexColor(failed_glyph_color))
@@ -529,6 +524,6 @@ def overlaps(a: tuple[float, float, float, float], b: tuple[float, float, float,
     return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
 
 
-def natural_key(text: str) -> tuple:
+def case_sensitive_natural_key(text: str) -> tuple:
     return tuple(int(part) if part.isdigit() else part for part in re.split(r"(\d+)", text))
 

@@ -12,13 +12,15 @@ from tomography_session_browser.services.atlas_marker_style import LEAF_DIAMETER
 from tomography_session_browser.services.marker_clustering import NO_CLUSTER_ABOVE_ZOOM, PER_EXPOSURE_MIN_SCREEN_PX, SEARCH_MAP_FOOTPRINT_MIN_SCREEN_PX, SEARCH_MAP_TILE_MIN_SCREEN_PX, ZOOM_DEBOUNCE_MS, MarkerCluster, ScreenTransform, cluster_markers, marker_set_fingerprint, screen_extent_visible, zoom_bucket
 from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.presentation.design_tokens import SANS_FONT_NAME
+from tomography_session_browser.presentation.atlas_colouring import AtlasColouring
 from tomography_session_browser.presentation.marker_palette import FRAME_HALO
 from tomography_session_browser.ui.viewer.atlas_lod_items import AtlasLodLabelItem, AtlasLodMarkerItem
-from tomography_session_browser.ui.viewer.constants import ATLAS_LOD_CLUSTER, ATLAS_LOD_DEFAULTS, ATLAS_LOD_EXPOSURES, ATLAS_LOD_LABELS, ATLAS_LOD_TILE_GRIDS, DEFAULT_VISIBLE_MARKER_TYPES, EXPOSURE_MARKER_HIGHLIGHT_WIDTH, HIGH_DETAIL_SCALE, MEDIUM_DETAIL_SCALE, ROWLESS_MARKER_TYPE_ROWS
+from tomography_session_browser.ui.viewer.constants import ATLAS_HIGHLIGHT_DIM_OPACITY, ATLAS_LOD_CLUSTER, ATLAS_LOD_DEFAULTS, ATLAS_LOD_EXPOSURES, ATLAS_LOD_LABELS, ATLAS_LOD_TILE_GRIDS, DEFAULT_VISIBLE_MARKER_TYPES, EXPOSURE_MARKER_HIGHLIGHT_WIDTH, HIGH_DETAIL_SCALE, MEDIUM_DETAIL_SCALE
 from tomography_session_browser.ui.viewer.marker_paint import batch_label_color, batch_label_scene_origin, batch_label_text_path, exposure_highlight_color, marker_colors, marker_label_anchor, marker_outline, marker_scene_extent, metadata_box, metadata_point
 from tomography_session_browser.ui.viewer.marker_goo import GooBlob, MarkerGoo, blobs_from_markers, start_goo
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
+    from tomography_session_browser.ui.viewer.overlay_preferences import MarkerFrame
     from tomography_session_browser.ui.viewer.preview_camera import PreviewCamera
     from tomography_session_browser.ui.viewer.preview_image import PreviewImage
     from tomography_session_browser.ui.viewer.preview_interaction import PreviewInteraction
@@ -58,49 +60,89 @@ class MarkerLayer:
         self.marker_redraw_debounce.timeout.connect(self.redraw_markers)
         self.input_markers: list[ImageMarker] | None = None
         self.intrinsic_selection: frozenset[str] = frozenset()
-        #: Row-less marker types Remove all overlays hid (``ROWLESS_MARKER_TYPE_ROWS``).
-        self.rowless_hidden: set[str] = set()
+        #: The colouring of the last frame (batch 4); ``None`` draws status colours.
+        self.colouring: AtlasColouring | None = None
+        #: The selection the last frame asked for, kept when a frame has no item.
+        self.last_frame_selected_id: str | None = None
         #: The Atlas batch glyphs last drawn, with what they were drawn from and at
         #: which zoom, for the next regroup (``marker_goo``); and that regroup.
         self.goo_layout: tuple[tuple[object, ...], int, list[GooBlob]] | None = None
         self.goo: MarkerGoo | None = None
+        #: The marker ids a colour key entry points at (batch 5); ``None`` shows every glyph in full.
+        self.highlight: frozenset[str] | None = None
+
+    def set_highlight(self, ids: frozenset[str] | None) -> None:
+        """Dim the Atlas batch glyphs outside ``ids``; ``None`` shows them all in full.
+
+        Display only: the colouring, the clusters and the selection do not
+        change, and nothing is redrawn. A cluster with a member in ``ids``
+        stays bright. A new colouring or a new marker list clears it.
+        """
+
+        if ids == self.highlight:
+            return
+        self.highlight = ids
+        if ids is not None:
+            # A regroup fades glyphs in by their opacity: end it before dimming.
+            self.dismiss_goo()
+        self.apply_highlight()
+
+    def apply_highlight(self) -> None:
+        ids = self.highlight
+        for item in self.marker_items:
+            marker = item.data(0)
+            if not isinstance(marker, ImageMarker) or not (
+                isinstance(item, AtlasLodMarkerItem) or item.data(1) == "atlas_batch_label"
+            ):
+                continue
+            lit = ids is None or marker.id in ids or (
+                marker.marker_type == MarkerType.BATCH_CLUSTER
+                and any(member in ids for member in marker.metadata.get("member_ids", ()))
+            )
+            item.setOpacity(1.0 if lit else ATLAS_HIGHLIGHT_DIM_OPACITY)
 
     def set_atlas_lod_enabled(self, enabled: bool) -> None:
         self.atlas_lod_enabled = bool(enabled)
         self.cluster_cache.clear()
         self.redraw_markers()
 
-    def set_atlas_lod_option(self, key: str, enabled: bool) -> None:
-        if key not in self.atlas_lod_options:
-            raise KeyError(f"Unknown Atlas LOD option: {key}")
-        self.atlas_lod_options[key] = bool(enabled)
-        self.cluster_cache.clear()
-        self.redraw_markers()
+    def apply(self, frame: MarkerFrame) -> None:
+        """Draw ``frame``: its markers, visible types, Atlas options and selection.
 
-    def set_marker_type_visible(self, marker_type: str, visible: bool) -> None:
-        if (marker_type in self.visible_marker_types) == visible:
-            # Unchanged. The availability pass sets every type on each item
-            # it shows, and a redraw per type cost a tab its first switch.
-            return
-        if visible:
-            self.visible_marker_types.add(marker_type)
-            # Layers without a row that Remove all overlays hid come back with
-            # the row they are drawn with; nothing else could show them again.
-            returning = {key for key in self.rowless_hidden if ROWLESS_MARKER_TYPE_ROWS[key] == marker_type}
-            self.visible_marker_types.update(returning)
-            self.rowless_hidden.difference_update(returning)
+        The one way markers reach the layer (``TabSelection.publish``). It
+        compares the frame with what it drew last: the same markers and the
+        same look only reselect; anything else redraws once.
+        """
+
+        self.last_frame_selected_id = frame.selected_id
+        lod = {key: key in frame.lod for key in ATLAS_LOD_DEFAULTS}
+        look_changed = (
+            set(frame.effective_types) != self.visible_marker_types
+            or lod != self.atlas_lod_options
+            or frame.colouring is not self.colouring
+        )
+        if look_changed:
+            if not frame.effective_types.issuperset(self.visible_marker_types):
+                self.interaction.close_cluster_popup()
+            self.visible_marker_types = set(frame.effective_types)
+            self.atlas_lod_options = lod
+            if frame.colouring is not self.colouring:
+                # The key's entries belong to the old colouring.
+                self.highlight = None
+            self.colouring = frame.colouring
+        same_markers = frame.markers is self.input_markers or (not frame.markers and not self.input_markers)
+        if not same_markers:
+            self.set_markers(frame.markers, frame.selected_id)
+        elif not look_changed:
+            self.select_marker(frame.selected_id)
         else:
-            self.visible_marker_types.discard(marker_type)
-        self.redraw_markers()
-
-    def hide_all_markers(self) -> None:
-        """Hide every marker layer without discarding its source markers."""
-        self.interaction.close_cluster_popup()
-        self.rowless_hidden.update(self.visible_marker_types.intersection(ROWLESS_MARKER_TYPE_ROWS))
-        self.visible_marker_types.clear()
-        self.redraw_markers()
+            # The clusters are keyed by content, so a new look reuses them.
+            self.mark_selected(frame.selected_id)
+            self.redraw_markers()
 
     def set_markers(self, markers: list[ImageMarker], selected_marker_id: str | None = None) -> None:
+        if markers is not self.input_markers:
+            self.highlight = None
         self.input_markers = markers
         self.intrinsic_selection = frozenset(marker.id for marker in markers if marker.selected)
         self.interaction.close_cluster_popup()
@@ -134,14 +176,20 @@ class MarkerLayer:
         ]
         self.redraw_markers()
 
-    def select_marker(self, selected_marker_id: str | None) -> None:
-        """Change selection without replacing geometry or invalidating clusters."""
+    def mark_selected(self, selected_marker_id: str | None) -> set[str]:
+        """Set which source markers are selected; return the ids that changed. No redraw."""
+
         changed: set[str] = set()
         for marker in self.source_markers:
             selected = marker.id in self.intrinsic_selection or marker.id == selected_marker_id
             if marker.selected != selected:
                 marker.selected = selected
                 changed.add(marker.id)
+        return changed
+
+    def select_marker(self, selected_marker_id: str | None) -> None:
+        """Change selection without replacing geometry or invalidating clusters."""
+        changed = self.mark_selected(selected_marker_id)
         if changed:
             self.redraw_markers(None if self.atlas_lod_enabled else changed)
 
@@ -195,15 +243,21 @@ class MarkerLayer:
             self.last_display_markers = [replace(marker, selected=selected[marker.id])
                 if marker.id in selected else marker for marker in self.last_display_markers]
             display_markers = [marker for marker in self.last_display_markers if marker.id in changed_ids]
+        colouring = self.colouring
+        by_id = {marker.id: marker for marker in self.source_markers} if colouring is not None else {}
         for marker in display_markers:
             if (
                 marker.marker_type == MarkerType.BATCH_CLUSTER
                 or marker.metadata.get("atlas_lod_role") in {"batch_position", "unattributed"}
             ):
-                shape = AtlasLodMarkerItem(marker)
+                members = ([by_id[member] for member in marker.metadata.get("member_ids", ()) if member in by_id]
+                           if colouring is not None and marker.marker_type == MarkerType.BATCH_CLUSTER else ())
+                shape = AtlasLodMarkerItem(marker, colouring, members)
                 shape.setPos(float(marker.x or 0.0), float(marker.y or 0.0))
                 shape.setData(0, marker)
-                shape.setToolTip(marker.tooltip or marker.label or marker.marker_type)
+                explanation = colouring.explanation_for(marker) if colouring is not None else ""
+                shape.setToolTip("\n".join(text for text in (marker.tooltip or marker.label or marker.marker_type,
+                                                               explanation) if text))
                 self.image.scene.addItem(shape)
                 self.marker_items.append(shape)
                 if marker.label and marker.marker_type != MarkerType.BATCH_CLUSTER:
@@ -335,6 +389,8 @@ class MarkerLayer:
                 item.setPen(pen)
         if changed_ids is None:
             self.regroup(self.marker_items[first_new_item:])
+        if self.highlight is not None:
+            self.apply_highlight()
         self.update_marker_detail()
 
     def regroup(self, new_items: list[QGraphicsItem]) -> None:
@@ -346,16 +402,17 @@ class MarkerLayer:
         image = self.image
         basis = (
             id(self.source_markers),
+            id(self.colouring),
             frozenset(self.visible_marker_types),
             tuple(sorted(self.atlas_lod_options.items())),
             image.current_image_key,
             image.current_image_shape,
         )
         zoom = zoom_bucket(self.camera.transform_scale())
-        blobs = blobs_from_markers(self.last_display_markers)
+        blobs = blobs_from_markers(self.last_display_markers, self.colouring)
         previous = self.goo_layout
         self.goo_layout = (basis, zoom, blobs)
-        if previous is None or previous[0] != basis or previous[1] == zoom:
+        if previous is None or previous[0] != basis or previous[1] == zoom or self.highlight is not None:
             return
         items_by_key: dict[str, list[QGraphicsItem]] = {}
         for item in new_items:
@@ -476,7 +533,6 @@ class MarkerLayer:
             if marker.visible
             and not marker.unresolved
             and marker.marker_type in self.visible_marker_types
-            and (marker.marker_type != MarkerType.LINK_LINE or MarkerType.EXPOSURE_AREA in self.visible_marker_types)
             and (marker.x is not None or marker.bbox is not None or marker.polygon)
         ]
         if not self.atlas_lod_enabled:

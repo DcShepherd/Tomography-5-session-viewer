@@ -110,9 +110,6 @@ ARRIVAL_FRAME_SHARE = 0.4
 VIEWPORT_MEMORY_LIMIT = 32
 
 
-ATLAS_COLLECTION_LIST_MAX_PX = 180
-
-
 #: The swatch beside an Overlays row's label.
 SWATCH_WIDTH_PX = 22
 SWATCH_HEIGHT_PX = 14
@@ -281,6 +278,11 @@ MARKER_TYPE_LABELS = {
 ATLAS_LOD_CLUSTER = "cluster_batch_positions"
 
 
+#: The opacity of the Atlas batch glyphs outside a colour key entry the pointer
+#: or the keyboard is on (batch 5). The glyphs inside stay at full opacity.
+ATLAS_HIGHLIGHT_DIM_OPACITY = 0.25
+
+
 ATLAS_LOD_LABELS = "batch_position_labels"
 
 
@@ -304,29 +306,24 @@ ATLAS_LOD_DEFAULTS = {
 #: keys its box sets; the panel is built from this and nothing else lists them.
 OVERLAY_SECTIONS = (
     OverlaySection(
-        "Acquisition areas",
+        "Layers",
         (
             OverlayControl("Overview", (MarkerType.OVERVIEW,), swatch="overview"),
             OverlayControl("Search map", (MarkerType.SEARCH_MAP,), swatch="search_map"),
             OverlayControl("Tile grids", (ATLAS_LOD_TILE_GRIDS,), parent="Search map", swatch="tile_grids"),
             OverlayControl("Batch position", (MarkerType.BATCH_POSITION,), hint="Coloured by status", swatch="batch_position"),
             OverlayControl("Per-exposure markers", (ATLAS_LOD_EXPOSURES,), parent="Batch position", swatch="per_exposure"),
-        ),
-    ),
-    OverlaySection(
-        "Beam and camera",
-        (
             OverlayControl("Exposure area", (MarkerType.EXPOSURE_AREA,), swatch="exposure_area"),
             OverlayControl("Camera FOV", (MarkerType.CAMERA_FOV,), swatch="camera_fov"),
             OverlayControl("Focus and tracking", (MarkerType.FOCUS_AREA, MarkerType.TRACKING_AREA), swatch="focus_and_tracking"),
         ),
     ),
     OverlaySection(
-        "Labels and grouping",
+        "Labels",
         (
-            OverlayControl("Batch position numbers", (ATLAS_LOD_LABELS,), hint="Shown once zoomed in", swatch="position_numbers"),
-            OverlayControl("Cluster nearby positions", (ATLAS_LOD_CLUSTER,), hint="Merged while zoomed out", swatch="cluster"),
-            OverlayControl("Batch and exposure names", (MarkerType.BATCH_LABEL,), swatch="names"),
+            OverlayControl("Position numbers", (ATLAS_LOD_LABELS,), tooltip="Shown when you zoom in", swatch="position_numbers"),
+            OverlayControl("Cluster nearby positions", (ATLAS_LOD_CLUSTER,), tooltip="Merged when you zoom out", swatch="cluster"),
+            OverlayControl("Names", (MarkerType.BATCH_LABEL,), tooltip="Batch and exposure names", swatch="names"),
         ),
     ),
 )

@@ -18,6 +18,8 @@ class LoadBatch:
         self.requests = {request.key: request for request in requests}
         self.admission_skips = admission_skips
         self._queue = deque(self.requests)
+        #: The folders of this pass, in order: every request, then a retry's own.
+        self._pass: tuple[str, ...] = tuple(self.requests)
         self._attempt_numbers: dict[str, int] = {}
         self._outcomes: dict[str, LoadOutcome] = {}
         self.current: LoadAttempt | None = None
@@ -69,8 +71,20 @@ class LoadBatch:
     def retry(self) -> bool:
         if self.closed or self.running:
             return False
-        self._queue.extend(key for key in self.requests if self._outcomes[key].retryable)
+        self._pass = tuple(key for key in self.requests if self._outcomes[key].retryable)
+        self._queue.extend(self._pass)
         return bool(self._queue)
+
+    def pass_position(self, attempt: LoadAttempt) -> tuple[int, int]:
+        """Where an attempt sits in its pass: (number from 1, folders in the pass).
+
+        A retry is its own pass. A folder found to be a duplicate while it
+        loads keeps its place; folders refused before the load are not
+        requests, so they are not counted.
+        """
+
+        key = attempt.request.key
+        return (self._pass.index(key) + 1, len(self._pass)) if key in self._pass else (1, 1)
 
     @property
     def result(self) -> LoadBatchResult:

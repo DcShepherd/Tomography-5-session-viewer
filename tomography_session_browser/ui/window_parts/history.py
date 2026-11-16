@@ -1,5 +1,8 @@
 """HistoryController owns its window interaction responsibilities."""
 from __future__ import annotations
+from tomography_session_browser.presentation.tomogram_arrival import TomogramArrival
+from tomography_session_browser.presentation.tomogram_list_filter import ListFilter
+from tomography_session_browser.presentation.tab_keys import TabKey
 from tomography_session_browser.presentation.scope_identity import resolve_scope_key
 from tomography_session_browser.presentation.tomogram_selection import AllTomograms, FolderTomograms, TomogramLocation
 from typing import (
@@ -9,6 +12,7 @@ from PySide6.QtCore import (
     QObject,
     QSignalBlocker,
 )
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow,
 )
@@ -17,7 +21,9 @@ from tomography_session_browser.ui.shell.chrome import (
 )
 from tomography_session_browser.ui.tomograms.tab import TomogramTab
 from tomography_session_browser.presentation.navigation_history import (
+    IDLE_TEXT,
     HistoryLocation,
+    destination_text,
 )
 from tomography_session_browser.presentation.workspace import (
     Scope,
@@ -38,7 +44,6 @@ class HistoryController(QObject):
     def __init__(self, window: QMainWindow, state: WindowState, ui: WindowUi, parts: WindowParts) -> None:
         super().__init__(window)
         self.window, self.state, self.ui, self.parts = window, state, ui, parts
-        self.pending_restore: tuple[int, HistoryLocation] | None = None
 
     def current_history_location(self) -> HistoryLocation | None:
         """Snapshot the current destination as identifiers only."""
@@ -47,15 +52,21 @@ class HistoryController(QObject):
         viewer_tab = self.ui.review_tabs.get(tab)
         scope = self.parts.scopes.viewer_tab_context()
         selection = TomogramLocation.capture(scope) if isinstance(scope, AllTomograms | FolderTomograms) else None
+        scope_label = self.parts.scopes.label_for(scope) if scope is not None else ""
         if isinstance(viewer_tab, TomogramTab):
             volume_state = viewer_tab.capture_view_state()
             value = viewer_tab.current_object()
+            listing = viewer_tab.review_list
+            anchor, offset = listing.capture_anchor()
             return HistoryLocation(self.parts.viewers.viewer_state_scope_key(), tab,
                                    object_type="Tomogram", object_key=volume_state.row_key or "",
                                    filter_text=volume_state.query, label=value.name if value else "",
-                                   filter_keys=(frozenset(viewer_tab.review_list.ordered_keys) if viewer_tab.review_list.tag_filter.active else viewer_tab.review_list.route_keys),
-                                   filter_scope_label=("restored selection · " + viewer_tab.tags.filters.description() if viewer_tab.review_list.tag_filter.active else viewer_tab.review_list.scope_label),
-                                   tag_filter=viewer_tab.review_list.tag_filter,
+                                   scope_label=scope_label,
+                                   filter_keys=listing.route_keys, filter_scope_label=listing.scope_label,
+                                   tag_filter=listing.tag_filter, list_membership=listing.membership,
+                                   list_population=frozenset(listing.rows),
+                                   list_population_scope=viewer_tab.population_scope,
+                                   list_anchor_key=anchor, list_anchor_offset=offset,
                                    tomogram_state=volume_state, tomogram_selection=selection)
         state = viewer_tab.capture_view_state() if viewer_tab is not None else None
         current = viewer_tab.current_object() if viewer_tab is not None else None
@@ -71,6 +82,7 @@ class HistoryController(QObject):
             filter_keys=state.filter_keys if state is not None else None,
             filter_scope_label=state.filter_scope_label if state is not None else "",
             label=self.parts.scopes.label_for(current) if current is not None else "",
+            scope_label=scope_label,
             list_anchor_key=(state.list_anchor_key if state is not None else "") or "",
             list_anchor_offset=state.list_anchor_offset if state is not None else 0,
         )
@@ -123,21 +135,74 @@ class HistoryController(QObject):
 
 
     def update_history_actions(self) -> None:
-        self.ui.back_action.setEnabled(self.state.history.history.can_go_back)
-        self.ui.forward_action.setEnabled(self.state.history.history.can_go_forward)
+        history = self.state.history.history
+        entries = history.entries
+        index = self.requested_history_index()
+        back = entries[index - 1] if index > 0 else None
+        forward = entries[index + 1] if 0 <= index < len(entries) - 1 else None
+        self.ui.back_action.setEnabled(back is not None)
+        self.ui.forward_action.setEnabled(forward is not None)
+        for action, direction, location in ((self.ui.back_action, "Back", back),
+                                             (self.ui.forward_action, "Forward", forward)):
+            self.parts.history.describe_history_action(action, direction, location)
+
+
+    def describe_history_action(self, action: QAction, direction: str, location: HistoryLocation | None) -> None:
+        text = destination_text(direction, location) if location is not None else IDLE_TEXT[direction]
+        hint = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+        action.setToolTip(f"{text}  ({hint})" if hint else text)
+        button = self.ui.main_toolbar.widgetForAction(action)
+        if button is not None:
+            button.setAccessibleDescription(text)
 
 
     def navigate_history_back(self) -> bool:
         """Return to the previous explicit navigation step."""
 
-        return self.parts.history.apply_history_location(self.state.history.history.back(), direction="Back")
+        return self.navigate_history(-1, "Back")
 
 
     def navigate_history_forward(self) -> bool:
         """Move forward again after going back."""
 
-        return self.parts.history.apply_history_location(self.state.history.history.forward(), direction="Forward")
+        return self.navigate_history(1, "Forward")
 
+
+    def requested_history_index(self) -> int:
+        history = self.state.history.history
+        owner = self.parts.viewers.scope_preparation
+        request = owner.pending or owner.running
+        arrival = request.arrival if request is not None and request.generation == owner.generation else None
+        if arrival is not None and arrival.history_revision == history.revision and arrival.history_index is not None:
+            return arrival.history_index
+        return history.index
+
+    def navigate_history(self, delta: int, direction: str) -> bool:
+        history = self.state.history.history
+        index = self.requested_history_index() + delta
+        entries = history.entries
+        if not 0 <= index < len(entries):
+            return False
+        location = entries[index]
+        if location.tab == TabKey.TOMOGRAMS and location.tomogram_state is not None and location.object_key:
+            scope = self.scope_for_location(location)
+            if scope is None and location.scope_key != "none":
+                self.parts.context.post_navigation_message("The saved tomogram scope is no longer available.")
+                return False
+            view = location.tomogram_state
+            filters = ListFilter(location.filter_text, view.segment, view.sort, location.filter_keys,
+                                 location.filter_scope_label, location.tag_filter)
+            intent = TomogramArrival(location.object_key, None, filters, location.list_membership,
+                                     location.list_population, view, (location.list_anchor_key, location.list_anchor_offset),
+                                     index, history.revision, location.list_population_scope,
+                                     location.tomogram_selection.version if location.tomogram_selection else None)
+            self.parts.viewers.request_scope(scope, location.scope_label or "tomograms",
+                                              destination_tab=TabKey.TOMOGRAMS, arrival=intent)
+            self.update_history_actions()
+            return True
+        self.parts.viewers.cancel_scope_preparation()
+        history.commit_cursor(index, history.revision)
+        return self.apply_history_location(location, direction=direction)
 
     def apply_history_location(
         self,
@@ -152,12 +217,7 @@ class HistoryController(QObject):
         self.state.history.suppress_history_record = True
         try:
             scope = self.scope_for_location(location)
-            if location.tomogram_selection is not None and scope is not None:
-                # Preparation owns version normalisation and publication just as on a tree request.
-                self.parts.viewers.request_scope(scope, self.parts.scopes.label_for(scope), destination_tab=location.tab)
-                self.pending_restore = (self.parts.viewers.scope_preparation.generation, location)
-                return True
-            if scope is not None and scope is not self.state.review.scope:
+            if (scope is not None or location.scope_key == "none") and scope is not self.state.review.scope:
                 # The tabs list what the project tree shows, so its row follows
                 # the scope (without announcing a selection), then the views.
                 with QSignalBlocker(self.ui.tree):
@@ -199,19 +259,9 @@ class HistoryController(QObject):
                     viewer_tab.restore_list_anchor(
                         location.list_anchor_key, location.list_anchor_offset
                     )
-                if location.marker_id:
-                    viewer_tab.select_marker(location.marker_id, arrive=True)
+                viewer_tab.select_marker(location.marker_id or None, arrive=True)
                 if location.frame_index is not None:
                     viewer_tab.select_frame(location.frame_index)
-
-    def finish_scope_restore(self, generation: int) -> None:
-        pending = self.pending_restore
-        self.pending_restore = None
-        if pending is None or pending[0] != generation:
-            return
-        location = pending[1]
-        self.restore_tab_location(location)
-        self.update_history_actions()
 
     def scope_for_location(self, location: HistoryLocation) -> Scope:
         if location.tomogram_selection is not None:

@@ -204,6 +204,6 @@ class TagEntry(QFrame):
 
 LOCAL_KEYS = (
     LocalBinding('tags.choose', 'Tag suggestions', InteractionKind.KEYBOARD, ('Up', 'Down'), 'Move between matching tags'),
-    LocalBinding('tags.accept', 'Tag entry', InteractionKind.KEYBOARD, ('Enter', 'Return', 'Tab'), 'Choose the highlighted tag, then commit its optional count. Invalid counts stay in the field for correction. From an empty field, Tab moves to the next control.'),
+    LocalBinding('tags.accept', 'Tag entry', InteractionKind.KEYBOARD, ('Enter', 'Return', 'Tab'), 'Choose the highlighted tag and its count. From an empty field, Tab moves on.'),
     LocalBinding('tags.cancel', 'Tag entry', InteractionKind.KEYBOARD, ('Esc',), 'Cancel the draft; press again from an empty field to close Tags'),
 )

@@ -1,6 +1,7 @@
 """Explanatory copy beside the app's three distinct typed status vocabularies."""
 from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.domain.status import AtlasMarkerStatus, RowStatus, ValidationStatus
+from tomography_session_browser.services.atlas_lod import UNLINKED_FAILED_KEY, UNRESOLVED_LINK_KEY
 from tomography_session_browser.services.tilt_series_validation import HARD_FAILURE_THRESHOLD
 
 VALIDATION_MEANINGS: dict[ValidationStatus, str] = {
@@ -27,6 +28,16 @@ ATLAS_MARKER_MEANINGS: dict[AtlasMarkerStatus, str] = {
     AtlasMarkerStatus.COLLECTED: "The batch-position marker represents completed acquisition.",
     AtlasMarkerStatus.QUEUED: "A queued or not-yet-acquired batch position.",
     AtlasMarkerStatus.PARTIAL: "The batch position's acquisition is partial.",
-    AtlasMarkerStatus.UNATTRIBUTED: "Failed tilt series with no attributable batch position. The acquisition relationship remains unresolved.",
-    AtlasMarkerStatus.FAILED: "The batch position has failed acquisition.",
+    AtlasMarkerStatus.UNATTRIBUTED: "The batch position has no unique destination. You cannot open it from the Atlas.",
+    AtlasMarkerStatus.FAILED: "The batch position has failed acquisition. A dashed ring shows a failed tilt series that has no confident batch-position link.",
+}
+
+#: The Atlas glyph keys (``services.atlas_lod.atlas_glyph_key``) as a legend or card names them.
+ATLAS_GLYPH_LABELS: dict[str, str] = {
+    "collected": "Collected",
+    "partial": "Partial",
+    "queued": "Queued",
+    "failed": "Failed",
+    UNLINKED_FAILED_KEY: "Failed, no batch link",
+    UNRESOLVED_LINK_KEY: "Unresolved link",
 }

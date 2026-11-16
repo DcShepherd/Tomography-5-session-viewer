@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from tomography_session_browser.domain.models import BatchPosition
 from tomography_session_browser.domain.status import AtlasMarkerStatus, RowStatus, marker_severity
 from tomography_session_browser.services.item_status import (
+    BatchOutcome,
     ItemStatusContext,
-    batch_position_status_counts,
-    item_list_status,
+    batch_outcome,
 )
 
 
@@ -28,20 +28,17 @@ def aggregate_batch_position_status(
     batch: BatchPosition,
     context: ItemStatusContext,
 ) -> BatchPositionOverlayStatus:
-    """Map existing validation/item-status evidence to Atlas marker status.
+    """Map the shared batch outcome to Atlas marker status."""
+    return overlay_status_from_outcome(batch, batch_outcome(batch, context))
 
-    Inferred orphan labels are intentionally excluded. They are useful display
-    context elsewhere, but are not strong enough to attach a failed tilt series
-    to a neighbouring batch in the Atlas overlay.
-    """
 
-    counts = batch_position_status_counts(batch, context, include_inferred=False)
+def overlay_status_from_outcome(batch: BatchPosition, outcome: BatchOutcome) -> BatchPositionOverlayStatus:
+    """The Atlas marker status of ``batch`` from its already computed outcome."""
+    counts = outcome.counts
     acquired = counts.acquired
-    source_status = item_list_status(batch, context, include_inferred=False).status
-    failed_count = counts.failed
+    source_status = outcome.status
     if source_status == RowStatus.FAILED:
         status = AtlasMarkerStatus.FAILED
-        failed_count = max(failed_count, 1)
     elif acquired <= 0:
         status = AtlasMarkerStatus.QUEUED
     elif source_status == RowStatus.DONE:
@@ -55,7 +52,7 @@ def aggregate_batch_position_status(
         acquired=acquired,
         complete=counts.complete,
         incomplete=counts.incomplete,
-        failed=failed_count,
+        failed=counts.failed,
         missing=counts.missing,
         unknown=counts.unknown,
     )

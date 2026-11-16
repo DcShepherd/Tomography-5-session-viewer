@@ -98,5 +98,5 @@ class KeyboardTooltips(QObject):
 
 LOCAL_KEYS = (
     LocalBinding('tooltip.traverse', 'Tomograms controls', InteractionKind.KEYBOARD, ('Tab', 'Shift+Tab'), 'Move between controls and show their keyboard tooltip'),
-    LocalBinding('tooltip.close', 'Keyboard tooltip', InteractionKind.KEYBOARD, ('Esc',), 'Close the tooltip before changing the underlying view'),
+    LocalBinding('tooltip.close', 'Keyboard tooltip', InteractionKind.KEYBOARD, ('Esc',), 'Close the keyboard tooltip'),
 )

@@ -2,35 +2,19 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from pathlib import Path
 from typing import Final
 
-from PySide6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from tomography_session_browser.presentation.design_tokens import MONO_FONT_NAME, SANS_FONT_NAME, palette_for
+from tomography_session_browser.ui.stack_mark import draw_stack_mark
 from tomography_session_browser.ui.theme import current_palette
 
 
 _BRAND_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "assets" / "branding"
-_MARK_GEOMETRY: Final[tuple[tuple[float, float, float, bool], ...]] = (
-    (3.0, 0.42, 0.55, False),
-    (6.0, 0.65, 0.75, False),
-    (9.0, 0.84, 0.90, False),
-    (11.6, 1.00, 1.00, True),
-    (14.2, 0.84, 0.90, False),
-    (17.2, 0.65, 0.70, False),
-    (20.0, 0.42, 0.50, False),
-)
-_MARK_CENTER: Final[float] = 11.0
-_MARK_MAX_WIDTH: Final[float] = 18.0
-# The asset-sheet geometry is intentionally preserved, but its visible stroke
-# envelope is centred at y=11.5 inside the 22-unit viewBox. UI containers need
-# the visible mark, not the nominal viewBox, centred in their local frame.
-_MARK_VISUAL_OFFSET_Y: Final[float] = -0.5
 
 # Sizes mirror the asset sheet's in-context title bar, which renders the
 # Stack lockup at scale 0.85 (mark 18.7, wordmark 18.7, tag 8.075). We use
@@ -63,12 +47,6 @@ def brand_asset_path(name: str) -> Path:
     """Return an absolute path to a branding SVG asset."""
 
     return _BRAND_DIR / name
-
-
-def mark_asset_name(theme_name: str) -> str:
-    """Return the theme-appropriate mark-only asset."""
-
-    return "tomo_mark_light.svg" if theme_name == "light" else "tomo_mark_dark.svg"
 
 
 class TitleBarLockup(QWidget):
@@ -199,78 +177,7 @@ class TitleBarLockup(QWidget):
         self.update()
 
 
-def brand_pixmap(asset_name: str, logical_size: QSize) -> QPixmap:
-    """Rasterise a branding SVG at the current device-pixel ratio."""
-
-    renderer = _renderer(asset_name)
-    source = renderer.defaultSize()
-    if source.isEmpty():
-        source = QSize(22, 22)
-    scale = min(logical_size.width() / source.width(), logical_size.height() / source.height())
-    target = QSize(max(1, int(source.width() * scale)), max(1, int(source.height() * scale)))
-    dpr = _device_pixel_ratio()
-    physical = QSize(max(1, round(target.width() * dpr)), max(1, round(target.height() * dpr)))
-    pixmap = QPixmap(physical)
-    pixmap.setDevicePixelRatio(dpr)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    try:
-        renderer.render(painter, QRectF(0, 0, physical.width(), physical.height()))
-    finally:
-        painter.end()
-    return pixmap
-
-
-def draw_stack_mark(painter: QPainter, rect: QRectF, theme_name: str) -> None:
-    """Paint the Stack mark centred in ``rect`` using asset-sheet geometry."""
-
-    palette = palette_for(theme_name)
-    accent = palette.accent
-    mid = palette.text_strong
-    scale = min(rect.width(), rect.height()) / 22.0
-    painter.save()
-    painter.translate(
-        rect.left() + (rect.width() - 22 * scale) / 2,
-        rect.top() + (rect.height() - 22 * scale) / 2 + _MARK_VISUAL_OFFSET_Y * scale,
-    )
-    painter.scale(scale, scale)
-    try:
-        for y, half_width, opacity, is_mid in _MARK_GEOMETRY:
-            length = _MARK_MAX_WIDTH * half_width
-            pen = QPen(QColor(mid if is_mid else accent), 1.6 if is_mid else 1.4)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
-            painter.setOpacity(1.0 if is_mid else opacity)
-            painter.drawLine(
-                QPointF(_MARK_CENTER - length / 2, y),
-                QPointF(_MARK_CENTER + length / 2, y),
-            )
-    finally:
-        painter.restore()
-
-
-def centered_pixmap_rect(center: QPointF, pixmap: QPixmap) -> QRectF:
-    """Return a logical target rect that centres a HiDPI pixmap at ``center``."""
-
-    size = pixmap.deviceIndependentSize()
-    return QRectF(center.x() - size.width() / 2, center.y() - size.height() / 2, size.width(), size.height())
-
-
 def brand_window_icon() -> QIcon:
     """Return the slate app icon from the centered source SVG."""
 
     return QIcon(str(brand_asset_path("tomo_icon_slate.svg")))
-
-
-def _device_pixel_ratio() -> float:
-    app = QGuiApplication.instance()
-    screen = app.primaryScreen() if app is not None else None
-    return max(1.0, float(screen.devicePixelRatio()) if screen is not None else 1.0)
-
-
-@lru_cache(maxsize=8)
-def _renderer(asset_name: str) -> QSvgRenderer:
-    path = brand_asset_path(asset_name)
-    raw = path.read_bytes()
-    return QSvgRenderer(QByteArray(raw))

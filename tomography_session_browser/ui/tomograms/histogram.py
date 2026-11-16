@@ -17,8 +17,7 @@ class HistogramControl(QWidget):
         self.setMaximumHeight(140)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName("Intensity histogram and black/white limits")
-        self.setToolTip("The values in this plane. Drag B or W to set black or white. The Left and Right keys "
-                        "move the selected line. Tab selects the other line.")
+        self.setToolTip("Drag B or W to set black or white")
         self.data: Histogram | None = None
         self.black, self.white, self.handle = 0., 1., 0
         self.dragging = False

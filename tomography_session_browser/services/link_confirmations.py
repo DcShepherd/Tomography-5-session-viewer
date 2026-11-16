@@ -1,4 +1,5 @@
 """Atomic app-owned decisions with a bounded read and revision conflict refusal."""
+from __future__ import annotations
 from dataclasses import asdict
 import hashlib
 import json
@@ -9,6 +10,7 @@ from tomography_session_browser.domain.link_confirmations import ConfirmationSna
 from tomography_session_browser.services.atomic_files import atomic_write, bounded_read, exclusive, FileChanged, FileTooLarge
 from tomography_session_browser.services.settings_service import settings_path
 from tomography_session_browser.services.output_boundary import check_output_path
+from tomography_session_browser.domain.alignment import AlignmentOffer
 from tomography_session_browser.domain.tomograms import Tomogram
 from tomography_session_browser.services.acquisition_index import SeriesEvidence
 
@@ -23,6 +25,17 @@ def verify_confirmation_sources(items: tuple[Tomogram, ...], targets: tuple[Seri
     evidence += [value for target in targets for value in target.provenance]
     evidence += [target.stack_file for target in targets if target.stack_file is not None]
     stamps.update((value.path, value.size, value.mtime_ns) for value in evidence)
+    verify_stamps(stamps)
+
+
+def verify_alignment_sources(items: tuple[Tomogram, ...], offers: tuple[AlignmentOffer, ...]) -> None:
+    """The files a by-name alignment decision was made on are unchanged."""
+    verify_stamps({*((volume.path, volume.fingerprint.size, volume.fingerprint.mtime_ns)
+                     for item in items for volume in item.volumes),
+                   *((stamp.path, stamp.size, stamp.mtime_ns) for offer in offers for stamp in offer.stamps)})
+
+
+def verify_stamps(stamps: set[tuple[Path, int, int]]) -> None:
     for path, size, mtime in stamps:
         stat = path.stat()
         if (stat.st_size, stat.st_mtime_ns) != (size, mtime):
@@ -30,8 +43,14 @@ def verify_confirmation_sources(items: tuple[Tomogram, ...], targets: tuple[Seri
 
 
 class LinkConfirmationStore:
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: Path | None = None, subject: str = 'Name-link decisions'):
         self.path = path or settings_path().with_name('link_confirmations.json')
+        self.subject = subject
+
+    @classmethod
+    def alignment(cls) -> LinkConfirmationStore:
+        """By-name alignment decisions: a file of their own, so a tomogram can hold one of each kind."""
+        return cls(settings_path().with_name('alignment_confirmations.json'), 'Alignment decisions')
 
     def read(self) -> ConfirmationSnapshot:
         try:
@@ -62,7 +81,7 @@ class LinkConfirmationStore:
                 records.append(record)
             return ConfirmationSnapshot(tuple(records), data['revision'], hashlib.sha256(content).hexdigest())
         except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
-            return ConfirmationSnapshot(issue=f'Name-link decisions unavailable: {exc}')
+            return ConfirmationSnapshot(issue=f'{self.subject} unavailable: {exc}')
 
     def write(self, expected: ConfirmationSnapshot, changes: tuple[LinkConfirmation, ...],
               protected_roots: tuple[Path, ...] = ()) -> ConfirmationSnapshot:
@@ -70,15 +89,15 @@ class LinkConfirmationStore:
         if len(keys) != len(changes) or any(record.decision not in ('confirmed', 'dismissed', 'revoked') or
             re.fullmatch('[a-f0-9]{64}', record.signature) is None or
             not all((record.source_id, record.tomogram_id, record.target_key)) for record in changes):
-            raise ValueError('Duplicate or invalid name-link decisions; nothing was saved.')
+            raise ValueError(f'Duplicate or invalid {self.subject.lower()}; nothing was saved.')
         lock = self.path.with_suffix('.lock')
         for path in (self.path, lock):
             check_output_path(path, protected_roots)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with exclusive(lock, 'Name-link decisions are being saved by another window. Try again after it finishes.'):
+        with exclusive(lock, f'{self.subject} are being saved by another window. Try again after it finishes.'):
             current = self.read()
             if current.issue or expected.issue or (current.revision, current.digest) != (expected.revision, expected.digest):
-                raise ValueError(current.issue or 'Name-link decisions changed in another window. Reload Review and try again.')
+                raise ValueError(current.issue or f'{self.subject} changed in another window. Reload Review and try again.')
             records = {(record.source_id, record.tomogram_id): record for record in current.records}
             records.update(((record.source_id, record.tomogram_id), record) for record in changes)
             data = dict(schema=1, revision=current.revision + 1,

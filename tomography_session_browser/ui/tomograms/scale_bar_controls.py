@@ -111,7 +111,7 @@ class ScaleBarControls(QWidget):
             field.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             field.setFixedWidth(INSET_WIDTH)
             field.setAccessibleName(f"Scale bar inset {axis}")
-            field.setToolTip(f"Distance from the {'left or right' if axis == 'X' else 'top or bottom'} edge of the image, in screen pixels")
+            field.setToolTip(f"Distance from the {'left or right' if axis == 'X' else 'top or bottom'} edge, in screen pixels")
             field.valueChanged.connect(self.changed)
             inset.addWidget(QLabel(axis, self))
             inset.addWidget(field)
@@ -123,7 +123,7 @@ class ScaleBarControls(QWidget):
         self.length = Versions(self)
         self.length.addItems(("Auto", "Exact"))
         self.length.setAccessibleName("Scale bar length")
-        self.length.setItemData(0, "Use the shortest length of 1, 2 or 5 × 10ⁿ nm that is not shorter than Min length",
+        self.length.setItemData(0, "Use the next 1, 2 or 5 × 10ⁿ nm at or above Min length",
                                 Qt.ItemDataRole.ToolTipRole)
         self.length.setItemData(1, "Use the length that you type", Qt.ItemDataRole.ToolTipRole)
         self.length.rebuild()
@@ -138,7 +138,7 @@ class ScaleBarControls(QWidget):
         plain_field(self.exact)
         self.exact.setKeyboardTracking(False)
         self.exact.setAccessibleName("Scale bar exact length")
-        self.exact.setToolTip("The bar length in nanometres. If the bar is too long for the view, the app shows a message. It does not make the bar shorter.")
+        self.exact.setToolTip("The bar length in nm. The app does not make a long bar shorter.")
         self.exact.valueChanged.connect(self.changed)
         self.exact_row = QWidget(self)
         self.exact_row.setLayout(inline_row("Exact length", self.exact, unit("nm", self.exact_row), parent=self.exact_row, stretch=True))
@@ -154,7 +154,7 @@ class ScaleBarControls(QWidget):
         self.text.setMaxLength(80)
         self.text.setPlaceholderText("Distance")
         self.text.setAccessibleName("Scale bar label text")
-        self.text.setToolTip("Type a different label, or keep it empty to show the distance. Snapshots always record the distance.")
+        self.text.setToolTip("Type a label, or leave it empty to show the distance")
         self.text.editingFinished.connect(self.changed)
         self.label = Switch(self, name="Show scale bar label")
         self.label.setToolTip("Show the label")
@@ -203,7 +203,7 @@ class ScaleBarControls(QWidget):
         blockers = [QSignalBlocker(control) for control in controls]
         preset = next((index for index, (_, colour) in enumerate(BAR_COLOURS) if colour == style.colour), None)
         self.custom.colour = None if preset is not None else style.colour
-        self.custom.setToolTip("Select a colour" if preset is not None else f"Colour {style.colour}. Click to select a different colour.")
+        self.custom.setToolTip("Select a colour" if preset is not None else f"Colour {style.colour}. Click to change.")
         self.colours.button(len(BAR_COLOURS) if preset is None else preset).setChecked(True)
         # A dragged bar sits at no corner: no cell is selected until one is chosen.
         self.corners.setExclusive(False)
@@ -211,7 +211,7 @@ class ScaleBarControls(QWidget):
             cell.setChecked(style.position is None and key == style.corner)
         self.corners.setExclusive(True)
         self.corner_buttons["br"].parentWidget().setToolTip(
-            "You moved the bar on the image. Click a corner to put it there." if style.position is not None
+            "Click a corner to move the bar there" if style.position is not None
             else "Click a corner, or drag the bar on the image")
         self.inset_x.setValue(style.inset_x)
         self.inset_y.setValue(style.inset_y)

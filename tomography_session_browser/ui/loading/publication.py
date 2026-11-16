@@ -9,7 +9,7 @@ from tomography_session_browser.presentation.workspace import Scope, Workspace
 from tomography_session_browser.presentation.navigation_history import NavigationHistory
 from tomography_session_browser.ui.viewer.models import ViewerViewState
 from tomography_session_browser.presentation.tomogram_state import TomogramViewState
-from tomography_session_browser.presentation.processing_context import SourceReadTimes
+from tomography_session_browser.presentation.read_times import SourceReadTimes
 from tomography_session_browser.ui.window_parts.contracts import WindowParts, WindowUi
 from tomography_session_browser.ui.window_parts.state import WindowState
 

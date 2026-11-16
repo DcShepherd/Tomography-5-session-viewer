@@ -8,6 +8,7 @@ from typing import Any
 
 from tomography_session_browser.domain.coerce import text_or_none
 from tomography_session_browser.domain.models import BatchPosition
+from tomography_session_browser.parsers.mrc_metadata_parser import fei_spot_index
 from tomography_session_browser.parsers.mrc_parser import read_mrc_metadata
 from tomography_session_browser.parsers.path_utils import safe_id, sorted_paths
 from tomography_session_browser.parsers.xml_parser import parse_xml_file
@@ -155,7 +156,7 @@ def _apply_global_settings_file(path: Path, positions: list[BatchPosition], *, o
     if not path.exists():
         return
     data = parse_xml_file(path)
-    _append_xml_warning(path, data, positions)
+    _copy_xml_warning_to_positions(path, data, positions)
     _apply_exposure_beam_diameter(data, positions, source=path.name, overwrite=overwrite)
     settings = extract_acquisition_settings(data, source=path.name)
     if not settings:
@@ -168,7 +169,7 @@ def _apply_batch_settings_file(path: Path, positions: list[BatchPosition], *, ov
     if not path.exists():
         return
     data = parse_xml_file(path)
-    _append_xml_warning(path, data, positions)
+    _copy_xml_warning_to_positions(path, data, positions)
     _apply_exposure_beam_diameter(data, positions, source=path.name, overwrite=overwrite)
     global_settings, per_position = extract_batch_position_settings(data, source=path.name)
     by_name = {position.name: position for position in positions if position.name}
@@ -226,7 +227,7 @@ def _apply_exposure_mrc_beam_diameter(positions: list[BatchPosition]) -> None:
 
 def _apply_mrc_spot_indices(positions: list[BatchPosition]) -> None:
     for position in positions:
-        search_spot = _mrc_spot_index(position.search_mrc_metadata, position.warnings, "search MRC")
+        search_spot = fei_spot_index(position.search_mrc_metadata, position.warnings, "search MRC")
         if search_spot is not None:
             setting = AcquisitionSetting(
                 label=SEARCH_SPOT_LABEL,
@@ -241,7 +242,7 @@ def _apply_mrc_spot_indices(positions: list[BatchPosition]) -> None:
             )
             _apply_position_setting(position, setting, overwrite=False)
 
-        acquisition_spot = _mrc_spot_index(position.exposure_mrc_metadata, position.warnings, "exposure MRC")
+        acquisition_spot = fei_spot_index(position.exposure_mrc_metadata, position.warnings, "exposure MRC")
         if acquisition_spot is not None:
             setting = AcquisitionSetting(
                 label=ACQUISITION_SPOT_LABEL,
@@ -329,26 +330,6 @@ def _apply_position_setting(
             )
         position.warnings.append(message)
     apply_acquisition_settings(position.metadata, {setting.label: setting}, overwrite=overwrite)
-
-
-def _mrc_spot_index(metadata: Any, warnings: list[str], context: str) -> str | None:
-    if metadata is None:
-        return None
-    values: set[int] = set()
-    for frame in getattr(metadata, "frame_metadata", None) or []:
-        raw_fields = frame.get("raw_fields") if isinstance(frame, dict) else None
-        if not isinstance(raw_fields, dict):
-            continue
-        parsed = _positive_int(raw_fields.get("spot_index"))
-        if parsed is not None:
-            values.add(parsed)
-    if not values:
-        return None
-    if len(values) > 1:
-        text = ", ".join(str(value) for value in sorted(values))
-        warnings.append(f"{context} FEI extended header has inconsistent spot_index values: {text}.")
-        return None
-    return str(next(iter(values)))
 
 
 def _mrc_probe_mode_code(metadata: Any, warnings: list[str], context: str) -> int | None:
@@ -514,15 +495,7 @@ def _beam_diameter_value(value: Any) -> float | str | None:
     return value
 
 
-def _positive_int(value: Any) -> int | None:
-    try:
-        numeric = int(value)
-    except (TypeError, ValueError):
-        return None
-    return numeric if numeric > 0 else None
-
-
-def _append_xml_warning(path: Path, data: dict[str, Any], positions: list[BatchPosition]) -> None:
+def _copy_xml_warning_to_positions(path: Path, data: dict[str, Any], positions: list[BatchPosition]) -> None:
     warning = _xml_warning(path, data)
     if not warning:
         return

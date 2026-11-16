@@ -122,3 +122,10 @@ def load_result_state(result: LoadBatchResult) -> EmptyState:
             + (EmptyStateAction("Copy details", COMMAND_COPY_DETAILS),),
         evidence=tuple(f"{line.name} — {line.reason}" for section in content.sections for line in section.lines),
         copyable_details=content.details)
+
+
+def folder_progress_detail(name: str, position: tuple[int, int]) -> str:
+    """The loader's detail line: "Folder 2 of 4 · Grid_B", or the name alone for one folder."""
+
+    number, total = position
+    return f"Folder {number} of {total} · {name}" if total > 1 else name

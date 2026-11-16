@@ -42,7 +42,7 @@ from tomography_session_browser.presentation.tomogram_state import TomogramViewS
 from tomography_session_browser.presentation.project_folders import UserGroup
 from tomography_session_browser.domain.tomograms import ProcessingSource
 from tomography_session_browser.presentation.tomogram_review_state import TomogramReviewState
-from tomography_session_browser.presentation.processing_context import SourceReadTimes
+from tomography_session_browser.presentation.read_times import SourceReadTimes
 from tomography_session_browser.presentation.navigation_history import (
     NavigationHistory,
 )

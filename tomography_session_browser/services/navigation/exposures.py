@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from tomography_session_browser.domain.models import (
     TiltSeries,
 )
 from tomography_session_browser.parsers.path_utils import casefold_natural_key
+from tomography_session_browser.services.relationship_identity import AMBIGUOUS_BATCH_EXPLANATION
 
 from .models import ExposureSelection, NavigationResolution
 from .resolution import explicit_id_resolution, navigable_resolution, navigation_resolution_from_candidates, unresolved_resolution
@@ -30,6 +32,30 @@ def exposure_area_id(marker: ImageMarker) -> str:
     the two markers of one exposure share this ID."""
 
     return str(marker.metadata.get("exposure_marker_id") or marker.id)
+
+
+@dataclass(frozen=True, slots=True)
+class BatchMarkers:
+    """One batch record's markers, or none and why."""
+
+    markers: tuple[ImageMarker, ...] = ()
+    explanation: str | None = None
+
+
+def markers_for_batch(markers: Iterable[ImageMarker], batch_id: str) -> BatchMarkers:
+    """The markers built for the batch ``batch_id``, for display lookups.
+
+    When contradictory records share the ID, no marker belongs to one batch,
+    so this returns nothing with the reason rather than the first record's.
+    """
+
+    linked = tuple(
+        marker for marker in markers
+        if str(marker.metadata.get("batch_id") or marker.linked_object_id or "") == batch_id
+    )
+    if any(marker.metadata.get("batch_id_ambiguous") for marker in linked):
+        return BatchMarkers(explanation=AMBIGUOUS_BATCH_EXPLANATION)
+    return BatchMarkers(linked)
 
 
 def exposure_selection(marker: ImageMarker, batch: BatchPosition) -> ExposureSelection:

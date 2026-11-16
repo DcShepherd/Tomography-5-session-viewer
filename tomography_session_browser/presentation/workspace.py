@@ -8,7 +8,7 @@ background preparation share this model throughout one loaded project.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
@@ -20,6 +20,8 @@ from types import MappingProxyType
 from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogram
 from tomography_session_browser.domain.link_confirmations import LinkConfirmation
 from tomography_session_browser.services.tomogram_links import TomogramLink, resolve_tomogram_link
+from tomography_session_browser.services.alignment_links import AlignmentLink, borrowed_rows, link_alignments, merged_alignments
+from tomography_session_browser.services.denoising_links import DenoisingLink, lend_denoising, link_denoising
 from tomography_session_browser.services.acquisition_index import AcquisitionIndex, build_acquisition_index
 from tomography_session_browser.domain.traversal import is_single_atlas_placeholder
 from tomography_session_browser.domain.identity import entity_key_text, canonical_entity_key, dedupe_entities, path_identity_key
@@ -132,14 +134,34 @@ class Workspace:
     tomogram_links: Mapping[str, TomogramLink] = field(default_factory=dict)
     acquisition_index: AcquisitionIndex = field(default_factory=lambda: build_acquisition_index(()))
     link_confirmations: tuple[LinkConfirmation, ...] = ()
+    #: Saved by-name alignment decisions (their own store; see ``alignment_links``).
+    alignment_confirmations: tuple[LinkConfirmation, ...] = ()
+    #: Worked out in ``build`` and ``with_alignment_confirmations``. ``processing_sources`` stay exactly as
+    #: loaded; only display rows borrow an alignment job's evidence, so every
+    #: ``replace`` keeps the same row objects and a removed job leaves nothing.
+    alignment_links: Mapping[str, AlignmentLink] = field(default_factory=dict)
+    borrowed_rows: Mapping[str, Tomogram] = field(default_factory=dict, repr=False)
+    #: cryoCARE denoised rows and the loaded reconstruction each came from (batch 6).
+    denoising_links: Mapping[str, DenoisingLink] = field(default_factory=dict)
     tomogram_placement: TomogramPlacement = field(init=False, repr=False)
+    #: Alignment jobs shown inside their reconstructions, not as rows (``alignment_links.merged_alignments``).
+    merged_alignments: Mapping[str, tuple[str, ...]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         placement = TomogramPlacement.build(self)
+        merged = merged_alignments(self.processing_sources, self.alignment_links)
         object.__setattr__(self, "tomogram_placement", placement)
+        object.__setattr__(self, "merged_alignments", merged)
         acquisition_groups = tuple(group for group in self.project_groups if group.processing_source is None)
+        shown = tuple(source for source in self.processing_sources if source.id not in merged)
         object.__setattr__(self, "project_groups", acquisition_groups +
-                           placement.residual_groups(self.processing_sources, self.group_names))
+                           placement.residual_groups(shown, self.group_names))
+
+    def alignment_companions(self, source_ids: Iterable[str]) -> tuple[ProcessingSource, ...]:
+        """The merged alignment jobs that lend only to ``source_ids``: they reload and leave with them."""
+        given = set(source_ids)
+        return tuple(source for source in self.processing_sources
+                     if source.id in self.merged_alignments and set(self.merged_alignments[source.id]) <= given)
 
     def with_acquisition_index(self, index: AcquisitionIndex) -> Workspace:
         if index.series != self.acquisition_index.series or index.processing != self.acquisition_index.processing:
@@ -150,6 +172,11 @@ class Workspace:
     def with_link_confirmations(self, records: tuple[LinkConfirmation, ...]) -> Workspace:
         links = {item.id: resolve_tomogram_link(item, self.acquisition_index, records) for item in self.acquisition_index.processing}
         return replace(self, link_confirmations=records, tomogram_links=MappingProxyType(links))
+
+    def with_alignment_confirmations(self, records: tuple[LinkConfirmation, ...]) -> Workspace:
+        links = link_alignments(self.processing_sources, records)
+        return replace(self, alignment_confirmations=records, alignment_links=links,
+                       borrowed_rows=display_rows(self.processing_sources, links, self.denoising_links))
 
     @property
     def has_sources(self) -> bool:
@@ -189,7 +216,8 @@ class Workspace:
     @classmethod
     def build(cls, sessions: Sequence[Session], group_names: Mapping[str, str] | None = None, *,
               processing_sources: Sequence[ProcessingSource] = (),
-              link_confirmations: tuple[LinkConfirmation, ...] = ()) -> Workspace:
+              link_confirmations: tuple[LinkConfirmation, ...] = (),
+              alignment_confirmations: tuple[LinkConfirmation, ...] = ()) -> Workspace:
         loaded = list(sessions)
         names = dict(group_names or {})
         try:
@@ -245,11 +273,16 @@ class Workspace:
         tomograms = tuple(item for source in sources for item in source.tomograms)
         index = build_acquisition_index(tilts if tomograms else (), tomograms)
         links = {item.id: resolve_tomogram_link(item, index, link_confirmations) for item in tomograms}
+        alignment_links = link_alignments(sources, alignment_confirmations)
+        denoising_links = link_denoising(sources)
         return cls(tuple(loaded), MappingProxyType(names), tuple(project), groups,
                    MappingProxyType(owners), MappingProxyType(object_owners),
                    MappingProxyType(objects), MappingProxyType({key: tuple(values) for key, values in candidates.items()}),
                    MappingProxyType(atlas_members), processing_sources=sources, tomogram_links=MappingProxyType(links),
-                   acquisition_index=index, link_confirmations=link_confirmations)
+                   acquisition_index=index, link_confirmations=link_confirmations,
+                   alignment_confirmations=alignment_confirmations,
+                   alignment_links=alignment_links, denoising_links=denoising_links,
+                   borrowed_rows=display_rows(sources, alignment_links, denoising_links))
 
     # Each kind returns its own entity type, so a caller can pass the result on
     # as, say, ``list[SearchMap]``. Typing only: one implementation below.
@@ -419,7 +452,7 @@ class Workspace:
         dashboard, the lists, the overlays, Context and the PDF all read these."""
 
         if not self._grid_validations:
-            self._grid_validations.append(GridValidations(self.samples))
+            self._grid_validations.append(GridValidations(self.samples, ungridded=self.entities(EntityKind.TILT_SERIES)))
         return self._grid_validations[0]
 
     def project_marker_context(self, failed_tilt_ids: frozenset[str]) -> MarkerContext:
@@ -534,3 +567,9 @@ class Workspace:
                         group_label,
                     )
         return scoped
+
+
+def display_rows(sources: Sequence[ProcessingSource], alignment: Mapping[str, AlignmentLink],
+                 denoising: Mapping[str, DenoisingLink]) -> Mapping[str, Tomogram]:
+    """Rows that borrow evidence: from an alignment job, then from a denoised volume's input."""
+    return lend_denoising(sources, denoising, borrowed_rows(sources, alignment))

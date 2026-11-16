@@ -1,9 +1,6 @@
-from tomography_session_browser.reports.report_generator import (
-    ReportResult,
-    build_session_report,
-)
+"""PDF reports.
 
-__all__ = [
-    "ReportResult",
-    "build_session_report",
-]
+This package re-exports nothing. Import from the defining module, for example
+``reports.report_generator``: a re-export here would run for every
+``reports.*`` import and load reportlab when the window starts.
+"""

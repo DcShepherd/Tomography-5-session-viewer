@@ -47,7 +47,7 @@ class FocusLayout:
         tab.versions.segments.setVisible(not compact)
         tip = "Leave Focus (Ctrl+M or Esc)" if focus else "Focus the tomogram work area (Ctrl+M)"
         if focus and compact:
-            tip += ". The list is hidden because there is not enough room; use the tomogram selector."
+            tip += ". No room for the list: use the tomogram selector."
         tab.focus_button.setToolTip(tip)
         tab.focus_button.setAccessibleDescription(tip)
         for pane in tab.stage.panes.values():

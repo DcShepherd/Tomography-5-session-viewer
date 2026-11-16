@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (QComboBox, QHeaderView, QLabel, QStyledItemDelega
                                QVBoxLayout, QWidget, QSizePolicy)
 
 from tomography_session_browser.domain.display_names import count_phrase
-from tomography_session_browser.presentation.dashboard.tag_summary import number_text, tag_summary
+from tomography_session_browser.presentation.dashboard.tag_summary import dash_number_text, tag_summary
 from tomography_session_browser.presentation.dashboard.index_chart import chart_model
 from tomography_session_browser.ui.dashboard.common import CardBox, card_header, card_layout
 from tomography_session_browser.ui.theme import TIER_SUPPORTING, apply_tier, current_palette
@@ -105,8 +105,8 @@ class TagCards(QWidget):
             shown = self.summary_rows if all_rows else self.summary_rows[:8]
             self.table.setRowCount(len(shown))
             for index, row in enumerate(shown):
-                values = (row.name, str(row.tomograms), str(row.counted), number_text(row.zero if row.counted else None),
-                          number_text(row.total), number_text(row.median))
+                values = (row.name, str(row.tomograms), str(row.counted), dash_number_text(row.zero if row.counted else None),
+                          dash_number_text(row.total), dash_number_text(row.median))
                 for column, value in enumerate(values):
                     item = QTableWidgetItem(value)
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)

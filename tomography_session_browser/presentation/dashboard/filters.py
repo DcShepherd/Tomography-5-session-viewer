@@ -7,7 +7,6 @@ from collections.abc import Mapping, Sequence
 from tomography_session_browser.domain.identity import entity_key_text
 from tomography_session_browser.presentation.dashboard.models import DashboardFilterModel, DashboardScope
 from tomography_session_browser.presentation.dashboard.analysis import ScopeAnalysis
-from tomography_session_browser.presentation.dashboard.sections.batches import group_matches_any_batch
 from tomography_session_browser.presentation.tab_keys import TabKey
 from tomography_session_browser.presentation.workspace import Entity
 
@@ -39,14 +38,13 @@ def sample_card_routes(
         available = frozenset(entity_key_text(value) for value in rows.get(tab, ()))
         keys = (route.row_keys or frozenset()) & available
         routes.append(replace(route, count=len(keys), row_keys=keys))
-    groups = [group for group in analysis.inferred_batch_groups
-              if not group_matches_any_batch(group, scope.batch_positions)]
+    groups = analysis.inferred_batch_groups
     inferred_keys = frozenset(entity_key_text(tilt) for group in groups for tilt in group.tilt_series)
     inferred_keys &= frozenset(entity_key_text(value) for value in rows.get(TabKey.TILT_SERIES, ()))
     inferred = None
     if inferred_keys:
         label = f"{len(groups)} inferred failed {'group' if len(groups) == 1 else 'groups'} · {len(inferred_keys)} tilt series"
         inferred = DashboardFilterModel(label, len(inferred_keys), TabKey.TILT_SERIES, "",
-                                       "Batch position metadata is absent. Groups are inferred from failed tilt-series names; no recorded Batch position link is created.",
+                                       "No recorded Batch position link. Groups are inferred from failed tilt-series names, and no link is created.",
                                        row_keys=inferred_keys, scope_label=scope.title)
     return tuple(routes), inferred

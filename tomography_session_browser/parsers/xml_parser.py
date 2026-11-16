@@ -12,6 +12,16 @@ def local_name(tag: str) -> str:
     return tag
 
 
+def parse_xml_metadata(path: Path, warnings: list[str], kind: str) -> dict[str, Any]:
+    """Parse one metadata XML. A parse or read error becomes a warning that names ``kind``."""
+
+    data = parse_xml_file(path)
+    message = data.get("_parse_error") or data.get("_read_error")
+    if message:
+        warnings.append(f"Could not parse {kind} metadata XML {path.name}: {message}")
+    return data
+
+
 def parse_xml_file(path: Path) -> dict[str, Any]:
     try:
         root = ElementTree.parse(path).getroot()

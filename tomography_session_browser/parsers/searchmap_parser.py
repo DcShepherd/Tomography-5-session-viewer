@@ -5,7 +5,7 @@ from pathlib import Path
 from tomography_session_browser.domain.models import Overview, SearchMap
 from tomography_session_browser.parsers.mrc_parser import read_mrc_metadata
 from tomography_session_browser.parsers.path_utils import safe_id, sorted_paths
-from tomography_session_browser.parsers.xml_parser import parse_xml_file
+from tomography_session_browser.parsers.xml_parser import parse_xml_file, parse_xml_metadata
 
 
 def parse_search_map_folder(path: Path) -> SearchMap:
@@ -15,9 +15,9 @@ def parse_search_map_folder(path: Path) -> SearchMap:
     xml_path = _first_existing(path / "SearchMap.xml")
     dm_path = _first_existing(path / "SearchMap.dm")
     if xml_path:
-        metadata["SearchMap.xml"] = _parse_xml_metadata(xml_path, warnings)
+        metadata["SearchMap.xml"] = parse_xml_metadata(xml_path, warnings, "search-map")
     if dm_path:
-        metadata["SearchMap.dm"] = _parse_xml_metadata(dm_path, warnings)
+        metadata["SearchMap.dm"] = parse_xml_metadata(dm_path, warnings, "search-map")
 
     overview = _parse_overview(path, search_map_id)
     image_path = _first_existing(path / "SearchMap.jpg")
@@ -29,7 +29,7 @@ def parse_search_map_folder(path: Path) -> SearchMap:
     tile_metadata_paths = sorted_paths(list(path.glob("Tile_*.xml")))
     options = _first_existing(path / "TileSetAcquisitionOptions.xml")
     if options:
-        metadata["TileSetAcquisitionOptions.xml"] = _parse_xml_metadata(options, warnings)
+        metadata["TileSetAcquisitionOptions.xml"] = parse_xml_metadata(options, warnings, "search-map")
 
     return SearchMap(
         id=search_map_id,
@@ -67,11 +67,3 @@ def _parse_overview(path: Path, search_map_id: str) -> Overview | None:
 
 def _first_existing(path: Path) -> Path | None:
     return path if path.exists() else None
-
-
-def _parse_xml_metadata(path: Path, warnings: list[str]) -> dict:
-    data = parse_xml_file(path)
-    message = data.get("_parse_error") or data.get("_read_error")
-    if message:
-        warnings.append(f"Could not parse search-map metadata XML {path.name}: {message}")
-    return data

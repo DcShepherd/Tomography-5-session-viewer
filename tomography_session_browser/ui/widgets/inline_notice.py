@@ -3,6 +3,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QSizePolicy, QVBoxLayout
 
 from tomography_session_browser.presentation.messages import MessageContent
+from tomography_session_browser.ui.widgets.copy_feedback import CopyFeedback
 from tomography_session_browser.ui.widgets.link_button import link_button
 from tomography_session_browser.ui.widgets.section_header import SectionHeader
 
@@ -36,13 +37,15 @@ class InlineNotice(QFrame):
         self.details.setMaximumHeight(100)
         self.details.hide()
         details.toggled.connect(self.details.setVisible)
-        copy.clicked.connect(lambda: QApplication.clipboard().setText(self.copy_text()))
+        self.copy_feedback = CopyFeedback(copy)
+        copy.clicked.connect(self.copy_details)
         layout.addWidget(self.details)
         self.hide()
 
     def set_content(self, content: MessageContent) -> None:
         if content != self.content:
             self.content = content
+            self.copy_feedback.reset()
             self.title.setText(content.title)
             self.consequence.setText(content.consequence)
             self.details.setPlainText("\n\n".join(filter(None, ("\n".join(content.items), content.details))))
@@ -64,3 +67,7 @@ class InlineNotice(QFrame):
 
     def copy_text(self) -> str:
         return self.content.copy_text()
+
+    def copy_details(self) -> None:
+        QApplication.clipboard().setText(self.copy_text())
+        self.copy_feedback.confirm()

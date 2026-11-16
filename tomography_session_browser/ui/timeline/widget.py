@@ -26,7 +26,7 @@ from tomography_session_browser.ui.widgets.time_chart import TIME_CHART_TIMELINE
 from tomography_session_browser.ui.timeline.constants import AXIS_HEIGHT_PX, DENSITY_THRESHOLD_SEGMENTS, LANES_TOP_PX, MAX_GROUPED_LANES, MAX_LANE_LABEL_WIDTH_PX, MAX_UNGROUPED_LANES, OVERFLOW_LANE_KEY
 from tomography_session_browser.ui.timeline.models import TimelineLane, TimelineMode
 from tomography_session_browser.ui.timeline.painter import TimelinePainter
-from tomography_session_browser.ui.timeline.support import group_key, status_icon
+from tomography_session_browser.ui.timeline.support import status_icon
 
 
 class TimelineStrip(QWidget):
@@ -272,49 +272,14 @@ class TimelineStrip(QWidget):
         metadata_grouped = self._lanes_from_segment_metadata(segments)
         if metadata_grouped is not None:
             return metadata_grouped
-        if len(segments) <= MAX_UNGROUPED_LANES:
-            return tuple(
-                TimelineLane(
-                    key=segment.tilt_series_id,
-                    label=segment.label,
-                    segments=(segment,),
-                    grouped=False,
-                )
-                for segment in segments
-            )
-
-        grouped: "OrderedDict[str, list[TimelineSegment]]" = OrderedDict()
-        labels: dict[str, str] = {}
-        for segment in segments:
-            key, label = group_key(segment.label)
-            grouped.setdefault(key, []).append(segment)
-            labels.setdefault(key, label)
-
+        # The dashboard gives every series a typed lane; a timeline without
+        # them (a test, a caller with no lane data) gets one lane per series.
+        # Lanes are never guessed from the series' names.
         lanes = [
-            TimelineLane(
-                key=key,
-                label=labels[key],
-                segments=tuple(values),
-                grouped=True,
-            )
-            for key, values in grouped.items()
+            TimelineLane(key=segment.tilt_series_id, label=segment.label, segments=(segment,), grouped=False)
+            for segment in segments
         ]
-        lanes.sort(key=lambda lane: min(segment.start for segment in lane.segments))
-
-        if len(lanes) <= MAX_GROUPED_LANES:
-            return tuple(lanes)
-
-        visible = lanes[: MAX_GROUPED_LANES - 1]
-        overflow_segments = tuple(segment for lane in lanes[MAX_GROUPED_LANES - 1 :] for segment in lane.segments)
-        visible.append(
-            TimelineLane(
-                key=OVERFLOW_LANE_KEY,
-                label=f"+{count_phrase(len(lanes) - len(visible), 'group')}",
-                segments=overflow_segments,
-                grouped=True,
-            )
-        )
-        return tuple(visible)
+        return _capped(lanes, MAX_UNGROUPED_LANES, "tilt series", "tilt series")
 
     def _lanes_from_segment_metadata(
         self, segments: tuple[TimelineSegment, ...]
@@ -347,23 +312,7 @@ class TimelineStrip(QWidget):
             for key, values in grouped.items()
         ]
         lanes.sort(key=lambda lane: min(segment.start for segment in lane.segments))
-
-        if len(lanes) <= MAX_GROUPED_LANES:
-            return tuple(lanes)
-
-        visible = lanes[: MAX_GROUPED_LANES - 1]
-        overflow_segments = tuple(
-            segment for lane in lanes[MAX_GROUPED_LANES - 1 :] for segment in lane.segments
-        )
-        visible.append(
-            TimelineLane(
-                key=OVERFLOW_LANE_KEY,
-                label=f"+{count_phrase(len(lanes) - len(visible), 'position')}",
-                segments=overflow_segments,
-                grouped=True,
-            )
-        )
-        return tuple(visible)
+        return _capped(lanes, MAX_GROUPED_LANES, "position")
 
     def _apply_height_hint(self) -> None:
         if self._timeline is not None and self._use_density_view(self._timeline):
@@ -431,3 +380,21 @@ LOCAL_KEYS = (
     LocalBinding('timeline.widget.acquisition-timeline-left', 'Acquisition timeline', InteractionKind.KEYBOARD, ('Left', 'Right'), 'Select a segment'),
     LocalBinding('timeline.widget.acquisition-timeline-enter', 'Acquisition timeline', InteractionKind.KEYBOARD, ('Enter', 'Return', 'Space'), 'Open the selected tilt series'),
 )
+
+
+def _capped(lanes: list[TimelineLane], limit: int, singular: str, plural: str | None = None) -> tuple[TimelineLane, ...]:
+    """The first ``limit - 1`` lanes and one that gathers the rest, past ``limit``."""
+
+    if len(lanes) <= limit:
+        return tuple(lanes)
+    visible = lanes[: limit - 1]
+    overflow_segments = tuple(segment for lane in lanes[limit - 1 :] for segment in lane.segments)
+    visible.append(
+        TimelineLane(
+            key=OVERFLOW_LANE_KEY,
+            label=f"+{count_phrase(len(lanes) - len(visible), singular, plural)}",
+            segments=overflow_segments,
+            grouped=True,
+        )
+    )
+    return tuple(visible)

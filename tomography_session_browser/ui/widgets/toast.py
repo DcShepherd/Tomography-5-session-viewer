@@ -33,6 +33,7 @@ TOAST_HEIGHT_PX = 36
 TOAST_MARGIN_PX = 16  # above the workspace's bottom edge
 TOAST_MAX_WIDTH_PX = 560
 TOAST_RISE_PX = 8  # it rises this far as it fades in
+TOAST_ABOVE_GAP_PX = 8  # between the toast and a control it sits above
 _PADDING_PX = 16
 _DOT_PX = 8
 _TEXT_SLACK_PX = 4
@@ -41,13 +42,26 @@ _TEXT_SLACK_PX = 4
 class Toast(QWidget):
     """One toast for ``host`` (the main window); a new message replaces it."""
 
-    def __init__(self, host: QWidget, *, clearance: Callable[[], int] = lambda: 0) -> None:
+    def __init__(
+        self,
+        host: QWidget,
+        *,
+        clearance: Callable[[], int] = lambda: 0,
+        above: Callable[[], QRect | None] = lambda: None,
+    ) -> None:
+        """``clearance`` reserves a band at the workspace's bottom edge.
+        ``above`` gives a control (host coordinates) that the toast sits
+        above, centred on it, or None for the usual place.
+        """
+
         super().__init__(host)
         self.setObjectName("toast")
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._host = host
         self._clearance = clearance
+        self._above = above
+        self._followed: set[QWidget] = set()
         self.text = ""
         self.tone = TONE_INFO
         self._shown_text = ""
@@ -118,7 +132,19 @@ class Toast(QWidget):
         if self.isVisible():
             self._place()
 
+    def follow(self, widget: QWidget) -> None:
+        """Place the toast again when ``widget`` (an ``above`` control) shows, hides, moves or resizes."""
+
+        if widget not in self._followed:
+            self._followed.add(widget)
+            widget.installEventFilter(self)
+            widget.destroyed.connect(lambda *_args, widget=widget: self._followed.discard(widget))
+
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
+        if watched in self._followed:
+            if event.type() in (QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.Move, QEvent.Type.Resize):
+                self.reposition()
+            return False
         if watched is self._host:
             kind = event.type()
             if kind in (QEvent.Type.Resize, QEvent.Type.LayoutRequest):
@@ -154,6 +180,14 @@ class Toast(QWidget):
         self._shown_text = metrics.elidedText(self.text, Qt.TextElideMode.ElideRight, width - chrome)
         x = workspace.left() + (workspace.width() - width) // 2
         y = workspace.bottom() + 1 - TOAST_MARGIN_PX - TOAST_HEIGHT_PX + round(self._rise)
+        target = self._above()
+        if target is not None and not target.isEmpty():
+            # Over a control at the bottom (the Atlas colour key): just above
+            # it, centred on it, so the two read as one stack.
+            low = workspace.left() + TOAST_MARGIN_PX
+            high = max(low, workspace.right() + 1 - TOAST_MARGIN_PX - width)
+            x = min(max(target.center().x() - width // 2, low), high)
+            y = target.top() - TOAST_ABOVE_GAP_PX - TOAST_HEIGHT_PX + round(self._rise)
         self.setGeometry(x, y, width, TOAST_HEIGHT_PX)
 
     # -- motion ----------------------------------------------------------------

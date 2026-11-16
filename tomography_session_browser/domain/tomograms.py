@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from tomography_session_browser.domain.alignment import AlignmentOffer, RecordedAlignment
+from tomography_session_browser.domain.denoising import DenoisingInput
 from tomography_session_browser.domain.models import MrcMetadata
 from tomography_session_browser.domain.recorded_metrics import ProcessingEvidence
 from tomography_session_browser.domain.acquisition import AcquisitionEvidence
@@ -58,6 +60,11 @@ class Tomogram:
     acquisition: AcquisitionEvidence = AcquisitionEvidence()
     warnings: tuple[str, ...] = ()
     processing: ProcessingEvidence = ProcessingEvidence()
+    #: The angles and transforms a Scipion reconstruction job recorded beside
+    #: this volume; None when the folder is not such a job (never offered a link).
+    own_alignment: RecordedAlignment | None = None
+    #: The half sets a cryoCARE prediction job recorded as this volume's input; None otherwise.
+    denoised_from: DenoisingInput | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +78,8 @@ class ProcessingSource:
     versions_complete: bool = False
     #: The recognised Scipion job folder that encloses ``path`` (its ``extra`` folder), set once at intake.
     job_root: Path | None = None
+    #: What an alignment job (``pipeline="Alignment"``, no tomograms) offers, one per series folder.
+    alignments: tuple[AlignmentOffer, ...] = ()
 
     @property
     def protected_roots(self) -> tuple[Path, ...]:

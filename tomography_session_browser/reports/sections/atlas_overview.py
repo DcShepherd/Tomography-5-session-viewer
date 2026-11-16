@@ -8,7 +8,7 @@ from tomography_session_browser.reports import graphics, styles
 from tomography_session_browser.reports.pdf_export import PORTRAIT_USABLE_W
 from tomography_session_browser.reports.constants import THUMBNAILS_PER_ROW, THUMBNAIL_GUTTER
 from tomography_session_browser.reports.context import SessionContext
-from tomography_session_browser.reports.formatting import acquisition_window_text, session_kind_label
+from tomography_session_browser.reports.formatting import acquisition_window_text, print_session_kind
 from tomography_session_browser.reports.images import embeddable_image_path
 from tomography_session_browser.reports.layout import figure_cell, figure_row, meta_row
 
@@ -55,7 +55,7 @@ def session_overview_block(
             anchor=anchor, outline=f"Atlas session: {session.name}", level=0,
         ),
         meta_row([
-            ("Kind", f"{session_kind_label(session.kind)} session"),
+            ("Kind", f"{print_session_kind(session.kind)} session"),
             ("Acquired atlases", f"{len(sample_atlases):,}"),
             ("Acquisition", acquisition_window_text(ctx.dashboard)),
         ]),

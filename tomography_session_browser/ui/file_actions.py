@@ -13,6 +13,11 @@ def show_in_folder(path: Path) -> bool:
     return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path if path.is_dir() else path.parent)))
 
 
+def open_file(path: Path) -> bool:
+    """Open a file in the app that the system uses for it."""
+    return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+
 def copy_text(text: str) -> None:
     clipboard = QGuiApplication.clipboard()
     if clipboard is not None:

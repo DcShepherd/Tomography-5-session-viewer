@@ -8,9 +8,11 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QAbstractItemView, QTreeWidgetItem
 from tomography_session_browser.services.navigation.arrival import search_tile_named_exposures, single_exposure
 from tomography_session_browser.services.preview_sources import PreviewSources
+from tomography_session_browser.ui.viewer.overlay_preferences import MarkerFrame
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.domain.identity import entity_key_text
-from tomography_session_browser.domain.models import SearchTile
+from tomography_session_browser.domain.models import BatchPosition, SearchTile
+from tomography_session_browser.services.navigation.exposures import markers_for_batch
 from tomography_session_browser.presentation.viewer_items import panel_title_for_items as _panel_title_for_items, title_for_item
 from tomography_session_browser.presentation.empty_states import viewer_empty_state
 from tomography_session_browser.presentation.viewer_entries import Entry, ItemEntry
@@ -25,6 +27,7 @@ from tomography_session_browser.ui.viewer.group_rows import make_group_row
 from tomography_session_browser.ui.viewer.models import ViewerViewState
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
+    from tomography_session_browser.ui.viewer.atlas_overlay_state import AtlasOverlayState
     from tomography_session_browser.ui.viewer.mrc_loading import PreviewLoader
     from tomography_session_browser.ui.viewer.viewer_tab import ViewerTab
 
@@ -67,6 +70,8 @@ class TabSelection:
         # (provider, item, its markers): see ``markers_of``.
         self.marker_memo: tuple[Callable[[Any], list[ImageMarker]], Any, list[ImageMarker]] | None = None
         self.label_for: Callable[[Any], str] = title_for_item
+        #: The Atlas colour mode's owner (batch 4); ``None`` on every other tab.
+        self.atlas_overlay: AtlasOverlayState | None = None
         self.retained_list_selection_key: str | None = None
 
     def markers_of(self, value: Any) -> list[ImageMarker]:
@@ -249,7 +254,7 @@ class TabSelection:
         self.marker_selection_explicitly_cleared = False
         self.pending_view_state = None
         self.view.parts.list_pane.set_empty_state_override(None)
-        self.view.parts.overlay_panel.update_atlas_collection_overlay_controls(None)
+        self.view.parts.collection_filter.update(None)
         self.view.parts.frame_scrubber.cancel_pending()
         self.view.list.blockSignals(True)
         self.view.list.setUpdatesEnabled(False)
@@ -523,24 +528,54 @@ class TabSelection:
         object_id = getattr(value, "id", None)
         if object_id is None:
             return None
+        if isinstance(value, BatchPosition):
+            # A batch ID that contradictory records share selects no marker.
+            markers = list(markers_for_batch(markers, object_id).markers)
         for marker in markers:
             if marker.linked_object_id == object_id:
                 return marker.id
         return None
 
+    def set_atlas_overlay(self, state: AtlasOverlayState | None) -> None:
+        self.atlas_overlay = state
+        self.view.parts.colour_by.sync()
+
     def refresh_marker_selection(self) -> None:
         if self.current_value is None:
             return
-        markers = self.markers_of(self.current_value)
-        self.view.parts.overlay_panel.update_marker_type_availability(markers)
+        self.publish(self.current_value)
+
+    def publish(self, value: Any) -> None:
+        """Hand ``value``'s markers to the canvas: the one path, one redraw at most.
+
+        Works out the markers, what they cannot show and the effective types,
+        then gives the marker layer one frame (``MarkerLayer.apply``) and feeds
+        the legend. With no item, it applies the overlay preferences to what
+        the layer already holds.
+        """
+
+        panel = self.view.parts.overlay_panel
         layer = self.view.viewer.parts.marker_layer
-        selected = self.active_selected_marker_id(self.current_value, markers)
-        if markers is layer.input_markers:
-            layer.select_marker(selected)
+        if value is None:
+            markers = layer.input_markers if layer.input_markers is not None else []
+            selected = layer.last_frame_selected_id
         else:
-            self.view.viewer.set_markers(markers, selected_marker_id=selected)
-        if self.view.parts.overlay_panel.atlas_lod:
-            self.view.atlas_marker_legend.set_markers(markers)
+            markers = self.markers_of(value)
+            panel.update_marker_type_availability(markers)
+            selected = self.active_selected_marker_id(value, markers)
+        state = self.atlas_overlay if panel.atlas_lod else None
+        colouring = state.colouring_for(markers) if state is not None else None
+        self.view.viewer.apply_markers(MarkerFrame(
+            markers=markers,
+            effective_types=panel.effective_types(),
+            lod=panel.preferences.lod,
+            selected_id=selected,
+            colouring=colouring,
+        ))
+        if value is not None and panel.atlas_lod:
+            self.view.positions_card.set_markers(markers)
+        if panel.atlas_lod:
+            self.view.parts.colour_by.show(colouring)
 
     def select_marker(self, marker_id: str | None, *, arrive: bool = False, frame: bool = False) -> None:
         """Select a marker; ``arrive`` marks it as where a jump landed.

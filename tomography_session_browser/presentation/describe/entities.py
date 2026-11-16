@@ -40,6 +40,7 @@ from tomography_session_browser.presentation.describe.metadata import (
     xml_pixel_size,
 )
 from tomography_session_browser.presentation.describe.sections import emit_section
+from tomography_session_browser.presentation.read_times import SourceReadTimes
 from tomography_session_browser.presentation.describe.summary import (
     sample_folder,
     sessions_summary_lines,
@@ -72,8 +73,8 @@ from tomography_session_browser.services.tilt_series_validation import (
 from tomography_session_browser.services.timeline_service import parse_datetime
 
 
-def session_summary_lines(session: Session) -> list[str]:
-    return sessions_summary_lines([session])
+def session_summary_lines(session: Session, read_times: SourceReadTimes | None = None) -> list[str]:
+    return sessions_summary_lines([session], read_times)
 
 
 def describe_object(
@@ -82,26 +83,27 @@ def describe_object(
     grid_validations: GridValidations | None = None,
     list_status: ItemListStatus | None = None,
     describes_page_item: bool = False,
+    read_times: SourceReadTimes | None = None,
 ) -> str:
     """Describe ``value`` for the context panel.
 
     ``grid_validations`` gives tilt series their verdicts
-    (``Workspace.tilt_validations``); without it, a series is judged by the
-    others described with it, or alone.
+    (``Workspace.tilt_validations``); without it, each series uses its own evidence.
 
     ``describes_page_item`` is true when the page beside the panel already
     titles this item and carries its status pill, so the description leaves
     out the ``Status`` row (design review B2.2). Everything else is the same.
+
+    ``read_times`` gives a session's folder the time the app read it (D16).
     """
 
-    grid_validations = grid_validations if grid_validations is not None else GridValidations()
-
     if isinstance(value, EntityGroup):
-        return _entity_group_description(value, grid_validations)
+        return _entity_group_description(value, grid_validations or GridValidations(
+            ungridded=(item for item in value.values if isinstance(item, TiltSeries))))
     if isinstance(value, LinkedSampleGroup):
         return _linked_sample_group_description(value)
     if isinstance(value, Session):
-        return "\n".join(session_summary_lines(value))
+        return "\n".join(session_summary_lines(value, read_times))
     if isinstance(value, Sample):
         return _sample_description(value)
     if isinstance(value, Atlas):
@@ -113,7 +115,8 @@ def describe_object(
     if isinstance(value, BatchPosition):
         return _batch_position_description(value, list_status=None if describes_page_item else list_status)
     if isinstance(value, TiltSeries):
-        return _tilt_series_description(value, validation=grid_validations.verdict(value), with_status=not describes_page_item)
+        registry = grid_validations or GridValidations(ungridded=(value,))
+        return _tilt_series_description(value, validation=registry.verdict(value), with_status=not describes_page_item)
     if isinstance(value, Overview):
         return _overview_description(value)
     return str(value)

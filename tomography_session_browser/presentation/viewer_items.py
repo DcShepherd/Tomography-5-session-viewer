@@ -19,9 +19,8 @@ from tomography_session_browser.domain.models import (
     TiltSeries,
 )
 from tomography_session_browser.domain.status import RowStatus, parse_recorded_status
-from tomography_session_browser.domain.units import DEGREE
 from tomography_session_browser.presentation.empty_states import EmptyState, image_missing_state
-from tomography_session_browser.presentation.formatting import format_duration_compact
+from tomography_session_browser.presentation.formatting import format_duration_compact, format_tilt_angle
 from tomography_session_browser.services.entity_links import planned_exposures_for_batch_position
 from tomography_session_browser.services.timeline_service import build_acquisition_timeline
 
@@ -91,11 +90,11 @@ def status_label_for_item(value: Any) -> str:
     return kind.status(value) if kind is not None else ""
 
 
-def range_chip(value: tuple[float, float] | None, suffix: str) -> str:
+def tilt_range_chip(value: tuple[float, float] | None) -> str:
     if value is None:
         return "unknown"
     lo, hi = value
-    return f"{lo:g}{suffix} → {hi:g}{suffix}"
+    return f"{format_tilt_angle(lo)} → {format_tilt_angle(hi)}"
 
 
 def tilt_step_chip(value: TiltSeries) -> str | None:
@@ -110,7 +109,7 @@ def tilt_step_chip(value: TiltSeries) -> str | None:
     step = abs((high - low) / (count - 1))
     if step <= 0:
         return None
-    return f"{step:g}{DEGREE} step"
+    return f"{format_tilt_angle(step)} step"
 
 
 def tilt_duration_chip(value: TiltSeries) -> str | None:
@@ -219,7 +218,7 @@ def _batch_status(value: BatchPosition) -> str:
 def _tilt_summary(value: TiltSeries) -> str:
     tilt_count = value.tilt_count or len(value.sections)
     frames = count_phrase(tilt_count, "frame") if tilt_count else "unknown frames"
-    return f"{frames} · {range_chip(value.tilt_range, DEGREE) if value.tilt_range else 'range unknown'}"
+    return f"{frames} · {tilt_range_chip(value.tilt_range) if value.tilt_range else 'range unknown'}"
 
 
 def _tilt_chips(value: TiltSeries) -> list[str]:
@@ -228,13 +227,13 @@ def _tilt_chips(value: TiltSeries) -> list[str]:
         # One frame has no step, range or duration: those chips read as
         # measured ("-0.02° → -0.02°", "0s"). Say what it is, truthfully.
         angle = value.tilt_range[0] if value.tilt_range else None
-        return [f"single frame at {angle:g}{DEGREE}" if angle is not None else "single frame"]
+        return [f"single frame at {format_tilt_angle(angle)}" if angle is not None else "single frame"]
     chips = []
     step = tilt_step_chip(value)
     if step:
         chips.append(step)
     if value.tilt_range:
-        chips.append(range_chip(value.tilt_range, DEGREE))
+        chips.append(tilt_range_chip(value.tilt_range))
     duration = tilt_duration_chip(value)
     if duration:
         chips.append(duration)

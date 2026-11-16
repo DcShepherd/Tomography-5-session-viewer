@@ -11,6 +11,7 @@ from tomography_session_browser.domain.display_names import (
     format_overview_display_name,
     format_search_tile_display_name,
 )
+from tomography_session_browser.domain.identity import entity_key_text
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.domain.models import (
     Atlas,
@@ -38,11 +39,17 @@ from tomography_session_browser.services.navigation.arrival import (
     marker_id_for_exposure_context_navigation,
 )
 
-JumpKey = Literal["atlas", "overview", "search_map", "search", "batch", "tilt_series"]
+JumpKey = Literal["atlas", "overview", "search_map", "search", "batch", "tilt_series", "tomograms"]
 JUMP_LABELS: Mapping[JumpKey, str] = MappingProxyType({
     "atlas": "Atlas", "overview": "Overview", "search_map": "Search map",
-    "search": "Search tile", "batch": "Batch", "tilt_series": "Tilt series",
+    "search": "Search tile", "batch": "Batch", "tilt_series": "Tilt series", "tomograms": "Tomograms",
 })
+
+
+@dataclass(frozen=True, slots=True)
+class ReconstructionJump:
+    parent_key: str
+    candidates: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -58,6 +65,11 @@ class Jump:
     message: str = ""
     frame_index: int | None = None
     highlight_summary: bool = False
+    reconstruction: ReconstructionJump | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.resolution.navigable or bool(self.reconstruction and self.reconstruction.candidates)
 
     @cached_property
     def arrival_marker_id(self) -> str | None:
@@ -170,8 +182,24 @@ def _exposure_search(source: Overview | SearchMap, context: NavigationContext, m
                  context, markers, selected, clear_unmatched=True)
 
 
+def _exposure_links(context: NavigationContext, markers: MarkerContext) -> dict[JumpKey, Jump]:
+    selected = context.selected_marker
+    exposure = context.tilt_resolution_for_exposure_marker(selected, marker_context=markers)
+    tilt = Jump(exposure.resolution, _tooltip(exposure.tooltip, exposure.resolution.target, context))
+    if selected is None or selected.marker_type not in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}:
+        explanation = "Select an exposure area to jump to its batch position."
+        batch = Jump(NavigationResolution(explanation=explanation, selection_required=True), explanation)
+    else:
+        resolution = context.exposure_batch_resolution(selected)
+        batch = _jump(resolution, _tooltip(resolution.explanation, resolution.target, context),
+                      marker_id_for_exposure_context_navigation, context, markers, selected,
+                      batch=resolution.target, clear_unmatched=True)
+    return {"batch": batch, "tilt_series": tilt}
+
+
 def _overview(source: Overview, context: NavigationContext) -> dict[JumpKey, Jump]:
-    return {"search": _exposure_search(source, context, context.marker_context_for(source))}
+    markers = context.marker_context_for(source)
+    return {"search": _exposure_search(source, context, markers), **_exposure_links(context, markers)}
 
 
 def _map(source: SearchMap, context: NavigationContext) -> dict[JumpKey, Jump]:
@@ -187,7 +215,7 @@ def _map(source: SearchMap, context: NavigationContext) -> dict[JumpKey, Jump]:
         jump = _jump(overview, _linked_tooltip("overview", overview, context),
                      marker_id_for_search_map_navigation, context, markers, source)
         jump = Jump(jump.resolution, jump.tooltip, jump.arrival, frame=False)
-    return {"search": search, "overview": jump}
+    return {"search": search, "overview": jump, **_exposure_links(context, markers)}
 
 
 _STRATEGIES = {TiltSeries: _tilt, SearchTile: _tile, BatchPosition: _batch, Overview: _overview, SearchMap: _map}
@@ -212,6 +240,19 @@ def plan_jumps(source: Any, workspace: Workspace, scope: Scope, selected_marker:
         )
     context = NavigationContext(workspace, scope, source, selected_marker, failed_tilt_ids, marker_provider)
     jumps = strategy(source, context)
+    if isinstance(source, TiltSeries) or "tilt_series" in jumps:
+        tilt = jumps.get("tilt_series")
+        parent = source if isinstance(source, TiltSeries) else tilt.resolution.target if tilt else None
+        if isinstance(parent, TiltSeries):
+            rows = workspace.tomogram_placement.for_parents((parent,))
+            explanation = (f"Open {len(rows)} verified tomograms for this tilt series"
+                           if rows else "No verified tomograms for this tilt series")
+            jumps["tomograms"] = Jump(
+                NavigationResolution(explanation=explanation), explanation,
+                reconstruction=ReconstructionJump(entity_key_text(parent), tuple(row.id for row in rows)),
+            )
+        elif tilt is not None:
+            jumps["tomograms"] = Jump(tilt.resolution, tilt.tooltip)
     atlas = context.atlas_resolution_for(source)
     atlas_jump = Jump(atlas, _tooltip(atlas.explanation, atlas.target, context),
                       atlas_arrival=lambda: tuple(context.atlas_region_of_interest(source)))

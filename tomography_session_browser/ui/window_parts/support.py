@@ -59,12 +59,6 @@ def first_run_window_rect(available: QRect) -> QRect:
     return QRect(left, top, width, height)
 
 
-def format_tilt_angle(angle: float) -> str:
-    if abs(angle) < 0.05:
-        return "0.0"
-    return f"{angle:+.1f}"
-
-
 def compact_pair(left: Any, right: Any) -> str | None:
     if left is None and right is None:
         return None

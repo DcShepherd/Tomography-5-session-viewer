@@ -199,6 +199,10 @@ def _announce(widget: QWidget, text: str) -> None:
     _update_accessibility(announcement)
 
 
+#: The same polite announcement, for owners outside this module (the Project panel).
+announce_politely = _announce
+
+
 class Glyph(QWidget):
     """A small painted glyph in a tone, optionally inside a soft ring."""
 

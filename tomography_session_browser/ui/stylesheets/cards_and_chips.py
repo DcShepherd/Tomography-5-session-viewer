@@ -6,6 +6,12 @@ the order listed in ``ui.stylesheets.__init__``: QSS precedence depends on
 it, so a rule moves only together with the ones it overrides.
 """
 
+#: The slider handle's QSS box. A slider must be at least ``SLIDER_ROOM`` tall,
+#: or its handle is cut at the top and bottom (``subControlRect`` does not show it).
+SLIDER_HANDLE = 16
+SLIDER_HANDLE_BORDER = 1
+SLIDER_ROOM = SLIDER_HANDLE + 2 * SLIDER_HANDLE_BORDER + 2  # 2 px for the antialiased edge
+
 TEMPLATE = """\
 QFrame#dashboardCard {{
     background: {surface};
@@ -153,9 +159,9 @@ QSlider::add-page:horizontal {{
 
 QSlider::handle:horizontal {{
     background: {text_strong};
-    border: 1px solid {accent};
-    width: 16px;
-    height: 16px;
+    border: {slider_handle_border}px solid {accent};
+    width: {slider_handle}px;
+    height: {slider_handle}px;
     margin: -6px 0;
     border-radius: 8px; /* pill */
 }}

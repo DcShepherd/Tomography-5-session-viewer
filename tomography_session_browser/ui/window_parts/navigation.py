@@ -205,22 +205,23 @@ class MarkerNavigation(QObject):
 
     def viewer_navigation_actions(self, value: Any) -> list[ViewerNavigationAction]:
         return [ViewerNavigationAction(key, f"\u2197 {JUMP_LABELS[key]}",
-                                       enabled=jump.resolution.navigable, tooltip=jump.tooltip,
+                                       enabled=jump.enabled, tooltip=jump.tooltip,
                                        selection_required=jump.resolution.selection_required)
-                for key, jump in self.parts.navigation.navigation_plan_for(value).items()] + TomogramNavigation(self.parts).acquisition_actions(value)
+                for key, jump in self.parts.navigation.navigation_plan_for(value).items()]
 
 
     def viewer_navigation_requested(self, value: Any, key: str) -> None:
-        if key == "tomograms":
-            TomogramNavigation(self.parts).open_acquisition(value)
-            return
         jump = self.parts.navigation.navigation_plan_for(value).get(key)
         if jump is not None:
             self.execute_planned_jump(value, key, jump)
 
 
     def execute_planned_jump(self, value: Any, key: str, jump: Jump) -> None:
-        self.parts.viewers.cancel_scope_preparation()
+        if jump.reconstruction is not None:
+            TomogramNavigation(self.parts).open_reconstruction(value, jump.reconstruction)
+            return
+        if jump.resolution.navigable:
+            self.parts.viewers.cancel_scope_preparation()
         effects = NavigationEffects(
             viewer_tabs=self.ui.viewer_tabs,
             post_message=self.parts.context.post_navigation_message,

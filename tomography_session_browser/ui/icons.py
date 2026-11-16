@@ -12,6 +12,7 @@ size) ``QPixmap`` cache, and no exotic icon engine.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 from math import ceil
 from typing import Final
@@ -27,6 +28,20 @@ _DEFAULT_SIZE: Final[int] = 18
 _DEFAULT_COLOR: str = DARK_PALETTE.icon
 
 _pixmap_cache: dict[tuple[str, str, int, float], QPixmap] = {}
+
+
+@lru_cache(maxsize=128)
+def _svg_source(name: str) -> str:
+    """The SVG text of icon ``name``, read once per name.
+
+    Each icon is drawn in up to five pixel densities and two colours, and
+    each drawing read the file again. Owner: this module. Key: the icon name.
+    Bound: 128 names (the package ships about 50). The icons are package
+    files that do not change while the app runs, so nothing invalidates it.
+    """
+
+    svg_path = _ICON_DIR / f"{name}.svg"
+    return svg_path.read_text(encoding="utf-8") if svg_path.exists() else _missing_svg()
 
 
 def themed_icon(name: str, *, color: str | None = None, size: int = _DEFAULT_SIZE) -> QIcon:
@@ -59,9 +74,7 @@ def _themed_pixmap(name: str, color: str, size: int, dpr: float) -> QPixmap:
     if cached is not None:
         return cached
 
-    svg_path = _ICON_DIR / f"{name}.svg"
-    raw = svg_path.read_text(encoding="utf-8") if svg_path.exists() else _missing_svg()
-    coloured = raw.replace("currentColor", color)
+    coloured = _svg_source(name).replace("currentColor", color)
     renderer = QSvgRenderer(QByteArray(coloured.encode("utf-8")))
 
     physical_size = max(1, ceil(size * dpr))

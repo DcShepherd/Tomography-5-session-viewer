@@ -165,8 +165,8 @@ class ChangeReviewDialog(QDialog):
         else:
             self.show_button.setText(f"Show the {count} in this view")
         self.show_button.setToolTip(
-            "Show only these tomograms. This replaces the current filter. Clear shows all tomograms again."
-            if count else "These tomograms are in other loaded folders. Choose their folder first.")
+            "Show only these tomograms. Clear shows all again."
+            if count else "Not available: select their folder first")
         amber = self.proposal and any(row.key in chosen and worst_kind(row.changes) is not ChangeKind.DATE
                                       for row in self.proposal.rows)
         self.caution.setText("Check counts recorded on the affected versions before accepting." if amber else

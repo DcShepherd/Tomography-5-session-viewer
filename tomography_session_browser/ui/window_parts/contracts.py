@@ -92,34 +92,28 @@ class WindowUi:
     review_tabs: dict[str, ViewerTab | TomogramTab]
     tomogram_tab: TomogramTab
     back_action: QAction
+    filter_action: QAction
     brand_label: TitleBarLockup
-    compact_action: QAction
-    compact_button: QAction
     context_dock: QDockWidget
     context_drawer: PanelDrawer
     project_drawer: PanelDrawer
     context_header: ContextHeader
     context_panel: MetadataPanel
     context_panel_action: QAction
-    context_panel_button: QAction
     drop_receipt: LoadReceipt
     forward_action: QAction
     loading_overlay: LoadingOverlay
     loading_progress: QProgressBar
     main_toolbar: QToolBar
     open_action: QAction
-    open_button: QAction
     project_badge_legend: QWidget
     project_dock: QDockWidget
     project_drop_hint: QWidget
     project_drop_overlay: SessionDropOverlay
     project_filter: QLineEdit
     project_panel_action: QAction
-    project_panel_button: QAction
     refresh_action: QAction
-    refresh_button: QAction
     report_action: QAction
-    report_button: QAction
     session_dashboard: SessionDashboard
     status_runtime: QWidget
     tabs: QTabWidget

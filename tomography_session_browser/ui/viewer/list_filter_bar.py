@@ -22,6 +22,7 @@ from tomography_session_browser.presentation.design_tokens import SPACE_S
 from tomography_session_browser.services.item_status import SEGMENT_TAGS, join_filter_query, split_owned_tag
 from tomography_session_browser.ui.theme import TIER_SUPPORTING, apply_tier
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
+from tomography_session_browser.ui.filter_key import with_filter_key
 
 SEGMENT_LABELS = {"failed": "Failed", "incomplete": "Incomplete", "complete": "Complete", "missing": "Missing",
                   "with-acquisitions": "With acquisitions", "no-acquisitions": "No acquisitions"}
@@ -69,7 +70,7 @@ class ListFilterBar(QWidget):
         self.box = QLineEdit(self)
         self.box.setObjectName("viewerFilter")
         self.box.setPlaceholderText("Filter items...")
-        self.box.setToolTip("Filter this list by name, status, or summary")
+        self.box.setToolTip(with_filter_key("Filter this list by name, status, or summary"))
         self.box.setAccessibleName("Filter viewer items")
         self.box.setClearButtonEnabled(True)
         self.box.textChanged.connect(self._box_changed)

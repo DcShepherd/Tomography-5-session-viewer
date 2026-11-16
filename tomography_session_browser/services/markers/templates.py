@@ -50,7 +50,10 @@ from tomography_session_browser.services.markers.shapes import (
 )
 
 
-def template_area_markers(batch: BatchPosition) -> list[ImageMarker]:
+def template_area_markers(batch: BatchPosition, *, token: str | None = None) -> list[ImageMarker]:
+    """``token`` names the record in marker IDs (:mod:`services.markers.identity`)."""
+
+    token = token or batch.id
     metadata = batch.search_mrc_metadata or batch.tracking_mrc_metadata or batch.exposure_mrc_metadata
     pixel_size = overlay_mrc_pixel_size(metadata)
     width = metadata.nx if metadata else None
@@ -62,7 +65,7 @@ def template_area_markers(batch: BatchPosition) -> list[ImageMarker]:
         (MarkerType.CONDITION_AREA, "ConditionTemplateAreaParameters", "Condition"),
     ]
     markers: list[ImageMarker] = []
-    template = _template_bbox_marker(batch, width, height)
+    template = _template_bbox_marker(batch, width, height, token=token)
     if template is not None:
         markers.append(template)
     for marker_type, key, label in specs:
@@ -76,6 +79,7 @@ def template_area_markers(batch: BatchPosition) -> list[ImageMarker]:
             pixel_size,
             exposure_index=0 if marker_type == MarkerType.EXPOSURE_AREA else None,
             exposure_type="main" if marker_type == MarkerType.EXPOSURE_AREA else None,
+            token=token,
         )
         if marker is not None:
             markers.append(marker)
@@ -95,6 +99,7 @@ def template_area_markers(batch: BatchPosition) -> list[ImageMarker]:
                 pixel_size,
                 exposure_index=index,
                 exposure_type="additional",
+                token=token,
             )
             if marker is not None:
                 markers.append(marker)
@@ -110,7 +115,9 @@ def template_markers_in_frame(
     *,
     queued: bool = False,
     queued_reference: QueuedOverlayReference | None = None,
+    token: str | None = None,
 ) -> list[ImageMarker]:
+    token = token or batch.id
     specs = [
         (MarkerType.EXPOSURE_AREA, "ExposureTemplateAreaParameters", "Exposure"),
         (MarkerType.TRACKING_AREA, "TrackingTemplateAreaParameters", "Tracking"),
@@ -118,7 +125,7 @@ def template_markers_in_frame(
         (MarkerType.CONDITION_AREA, "ConditionTemplateAreaParameters", "Condition"),
     ]
     markers: list[ImageMarker] = []
-    template = _template_bbox_marker_in_frame(source_id, frame, batch, batch_stage_position)
+    template = _template_bbox_marker_in_frame(source_id, frame, batch, batch_stage_position, token=token)
     if template is not None:
         markers.append(template)
     for marker_type, key, label in specs:
@@ -134,6 +141,7 @@ def template_markers_in_frame(
             exposure_type="main" if marker_type == MarkerType.EXPOSURE_AREA else None,
             queued=queued,
             queued_reference=queued_reference,
+            token=token,
         )
         if marker is not None:
             markers.append(marker)
@@ -156,6 +164,7 @@ def template_markers_in_frame(
                 exposure_type="additional",
                 queued=queued,
                 queued_reference=queued_reference,
+                token=token,
             )
             if marker is not None:
                 markers.append(marker)
@@ -200,7 +209,7 @@ def template_markers_in_frame(
                 marker.visible = False
                 marker.metadata["queued_camera_fov_replacement"] = True
     markers.extend(camera_markers)
-    markers.extend(_exposure_link_markers(source_id, batch, markers))
+    markers.extend(_exposure_link_markers(source_id, batch, markers, token=token))
     return markers
 
 
@@ -217,6 +226,7 @@ def _template_marker_in_frame(
     exposure_type: str | None = None,
     queued: bool = False,
     queued_reference: QueuedOverlayReference | None = None,
+    token: str | None = None,
 ) -> ImageMarker | None:
     if not isinstance(raw, dict) or raw.get("_attributes", {}).get("nil") == "true":
         return None
@@ -296,7 +306,7 @@ def _template_marker_in_frame(
             }
         )
     return ImageMarker(
-        id=f"{source_id}:batch:{batch.id}:{marker_type}:{area_name}",
+        id=f"{source_id}:batch:{token or batch.id}:{marker_type}:{area_name}",
         marker_type=marker_type,
         linked_object_id=batch.id,
         source_object_id=source_id,
@@ -321,7 +331,9 @@ def _template_marker_in_frame(
     )
 
 
-def _exposure_link_markers(source_id: str, batch: BatchPosition, markers: list[ImageMarker]) -> list[ImageMarker]:
+def _exposure_link_markers(
+    source_id: str, batch: BatchPosition, markers: list[ImageMarker], *, token: str | None = None,
+) -> list[ImageMarker]:
     main = next(
         (
             marker
@@ -349,7 +361,7 @@ def _exposure_link_markers(source_id: str, batch: BatchPosition, markers: list[I
         area_name = as_str(marker.metadata.get("area_name")) or marker.id
         linked.append(
             ImageMarker(
-                id=f"{source_id}:batch:{batch.id}:link:{area_name}",
+                id=f"{source_id}:batch:{token or batch.id}:link:{area_name}",
                 marker_type=MarkerType.LINK_LINE,
                 linked_object_id=batch.id,
                 source_object_id=source_id,
@@ -379,6 +391,7 @@ def _template_marker(
     *,
     exposure_index: int | None = None,
     exposure_type: str | None = None,
+    token: str | None = None,
 ) -> ImageMarker | None:
     if not isinstance(raw, dict) or raw.get("_attributes", {}).get("nil") == "true":
         return None
@@ -425,7 +438,7 @@ def _template_marker(
             }
         )
     return ImageMarker(
-        id=f"{batch.id}:{marker_type}:{label}",
+        id=f"{token or batch.id}:{marker_type}:{label}",
         marker_type=marker_type,
         linked_object_id=batch.id,
         source_object_id=batch.id,
@@ -440,9 +453,9 @@ def _template_marker(
     )
 
 
-def unresolved_batch_marker(search_map: SearchMap, batch: BatchPosition) -> ImageMarker:
+def unresolved_batch_marker(search_map: SearchMap, batch: BatchPosition, *, token: str | None = None) -> ImageMarker:
     return ImageMarker(
-        id=f"{search_map.id}:batch:{batch.id}",
+        id=batch_marker_id(search_map.id, token or batch.id),
         marker_type=MarkerType.BATCH_POSITION,
         linked_object_id=batch.id,
         source_object_id=search_map.id,
@@ -455,7 +468,15 @@ def unresolved_batch_marker(search_map: SearchMap, batch: BatchPosition) -> Imag
     )
 
 
-def batch_marker_in_frame(source_id: str, frame: ImageFrame, batch: BatchPosition) -> ImageMarker | None:
+def batch_marker_id(source_id: str, token: str) -> str:
+    """The ID of the batch-position marker for record ``token`` on ``source_id``."""
+
+    return f"{source_id}:batch:{token}"
+
+
+def batch_marker_in_frame(
+    source_id: str, frame: ImageFrame, batch: BatchPosition, *, token: str | None = None,
+) -> ImageMarker | None:
     position = position_on_tile_set(batch)
     if position is None:
         LOGGER.debug("Skipping batch marker without stage position source=%s batch=%s", source_id, batch.id)
@@ -486,7 +507,7 @@ def batch_marker_in_frame(source_id: str, frame: ImageFrame, batch: BatchPositio
         LOGGER.debug("Skipping off-image batch marker source=%s batch=%s x=%s y=%s image=%s", source_id, batch.id, x, y, frame.image_size)
         return None
     return ImageMarker(
-        id=f"{source_id}:batch:{batch.id}",
+        id=batch_marker_id(source_id, token or batch.id),
         marker_type=MarkerType.BATCH_POSITION,
         linked_object_id=batch.id,
         source_object_id=source_id,
@@ -505,14 +526,16 @@ def batch_marker_in_frame(source_id: str, frame: ImageFrame, batch: BatchPositio
     )
 
 
-def _template_bbox_marker(batch: BatchPosition, width: int | None, height: int | None) -> ImageMarker | None:
+def _template_bbox_marker(
+    batch: BatchPosition, width: int | None, height: int | None, *, token: str | None = None,
+) -> ImageMarker | None:
     if width is None or height is None:
         return None
     rect = _template_image_data_area(batch)
     if rect is None:
         return None
     return ImageMarker(
-        id=f"{batch.id}:{MarkerType.TEMPLATE_AREA}:template",
+        id=f"{token or batch.id}:{MarkerType.TEMPLATE_AREA}:template",
         marker_type=MarkerType.TEMPLATE_AREA,
         linked_object_id=batch.id,
         source_object_id=batch.id,
@@ -524,7 +547,10 @@ def _template_bbox_marker(batch: BatchPosition, width: int | None, height: int |
     )
 
 
-def _template_bbox_marker_in_frame(source_id: str, frame: ImageFrame, batch: BatchPosition, batch_stage_position: tuple[float, float]) -> ImageMarker | None:
+def _template_bbox_marker_in_frame(
+    source_id: str, frame: ImageFrame, batch: BatchPosition, batch_stage_position: tuple[float, float],
+    *, token: str | None = None,
+) -> ImageMarker | None:
     rect = _template_image_data_area(batch)
     metadata = batch.search_mrc_metadata or batch.tracking_mrc_metadata or batch.exposure_mrc_metadata
     source_pixel_size = overlay_mrc_pixel_size(metadata)
@@ -545,7 +571,7 @@ def _template_bbox_marker_in_frame(source_id: str, frame: ImageFrame, batch: Bat
         LOGGER.debug("Skipping off-image template bbox source=%s batch=%s bbox=%s image=%s", source_id, batch.id, bbox, frame.image_size)
         return None
     return ImageMarker(
-        id=f"{source_id}:batch:{batch.id}:{MarkerType.TEMPLATE_AREA}:template",
+        id=f"{source_id}:batch:{token or batch.id}:{MarkerType.TEMPLATE_AREA}:template",
         marker_type=MarkerType.TEMPLATE_AREA,
         linked_object_id=batch.id,
         source_object_id=source_id,

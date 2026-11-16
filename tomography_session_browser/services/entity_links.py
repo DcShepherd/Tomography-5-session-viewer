@@ -17,12 +17,14 @@ recorded link, so it only ever extends the rule
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable
 from typing import Any
 
 from tomography_session_browser.domain.identity import dedupe_entities, entity_id_key, entity_key_text
 from tomography_session_browser.domain.models import BatchPosition, SearchMap, TiltSeries
 from tomography_session_browser.parsers.xml_parser import find_first
+from tomography_session_browser.services.relationship_identity import dedupe_navigation_candidates
 
 
 def batch_on_search_map(batch: BatchPosition, search_map: SearchMap) -> bool:
@@ -126,16 +128,46 @@ def batch_search_maps_with_shared_tilts(
 # ---------------------------------------------------------------------------
 
 
-def batch_tilt_series(batch: BatchPosition, tilt_series: Iterable[TiltSeries]) -> list[TiltSeries]:
-    """Verified batch series, in input order, once per recorded tilt ID.
+def tilt_parent_candidates(
+    tilt: TiltSeries,
+    batches: Iterable[BatchPosition],
+    *,
+    tilt_id_collides: bool = False,
+) -> tuple[list[BatchPosition], bool]:
+    """Return distinct recorded parents and whether the forward ID supplied them."""
+    explicit = [batch for batch in batches if batch.id == tilt.linked_batch_position_id]
+    if explicit:
+        return list(dedupe_navigation_candidates(explicit)), True
+    if tilt_id_collides:
+        return [], False
+    reciprocal = (batch for batch in batches if tilt.id in batch.linked_tilt_series_ids)
+    return list(dedupe_navigation_candidates(reciprocal)), False
 
-    A colliding ID requires a unique reciprocal batch link before applying
-    the existing by-ID counting policy.
+
+def batch_tilt_series(
+    batch: BatchPosition,
+    tilt_series: Iterable[TiltSeries],
+    *,
+    batch_positions: Iterable[BatchPosition],
+) -> list[TiltSeries]:
+    """Return physical series whose unique recorded parent is this batch.
+
+    ``batch_positions`` is every batch of the owning grid. A series that two
+    batches claim is ambiguous and belongs to neither, so the caller must not
+    narrow this to ``batch`` alone.
     """
-    series = list(tilt_series)
-    return unambiguous_tilts_for_ids(
-        (tilt.id for tilt in series if tilt_on_batch(tilt, batch)), series, batch_ids=(batch.id,),
-    )
+    series = dedupe_entities(tilt_series, key=entity_key_text)
+    batches = (*batch_positions, batch)
+    counts = Counter(tilt.id for tilt in series)
+    forward_counts = Counter((tilt.id, tilt.linked_batch_position_id) for tilt in series)
+    result = []
+    for tilt in series:
+        candidates, _ = tilt_parent_candidates(tilt, batches, tilt_id_collides=counts[tilt.id] > 1)
+        if len(candidates) == 1 and len(dedupe_navigation_candidates((*candidates, batch))) == 1:
+            if forward_counts[tilt.id, batch.id] > 1:
+                continue
+            result.append(tilt)
+    return result
 
 
 def unambiguous_tilts_for_ids(

@@ -7,7 +7,8 @@ from PySide6.QtWidgets import QHBoxLayout, QMenu, QToolButton, QWidget
 
 from tomography_session_browser.domain.tomograms import ProcessingSource
 from tomography_session_browser.domain.display_names import count_phrase
-from tomography_session_browser.presentation.processing_context import ProcessingContext, read_time_text
+from tomography_session_browser.presentation.processing_context import ProcessingContext
+from tomography_session_browser.presentation.read_times import READ_INTO_APP, read_time_text
 from tomography_session_browser.presentation.design_tokens import SPACE_XS
 from tomography_session_browser.ui.context.fields import ContextScroll, copy_button, file_row, section, text_label
 from tomography_session_browser.ui.file_actions import add_source_actions
@@ -62,7 +63,7 @@ class ProcessingSources(ContextScroll):
             actions.addWidget(menu_button)
             self.layout_.addWidget(row)
             self.layout_.addWidget(text_label(f'Pipeline: {source.pipeline}', self.body))
-            self.layout_.addWidget(text_label('Read into app: ' + read_time_text(value.read_at), self.body))
+            self.layout_.addWidget(text_label(f'{READ_INTO_APP}: {read_time_text(value.read_at)}', self.body))
             self.layout_.addWidget(section('Source version folders', self.body))
             for file in value.versions:
                 self.layout_.addWidget(file_row(file, self.body))

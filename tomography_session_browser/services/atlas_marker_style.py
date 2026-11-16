@@ -7,7 +7,9 @@ do not acquire a GUI dependency.
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from dataclasses import dataclass
+from typing import Generic, TypeVar
 
 from tomography_session_browser.domain.status import AtlasMarkerStatus
 
@@ -59,35 +61,45 @@ LABEL_OFFSET_DP = LEAF_RING_RADIUS_DP + 6.0
 LABEL_MAX_NUDGE_DP = 18.0
 
 
+#: What a ring segment stands for: a status word today, any hashable key later.
+SegmentKey = TypeVar("SegmentKey", bound=Hashable)
+
+
 @dataclass(frozen=True, slots=True)
-class RingSegment:
-    status: str
+class RingSegment(Generic[SegmentKey]):
+    key: SegmentKey
     start_degrees: float
     sweep_degrees: float
 
 
 def cluster_ring_segments(
     status_counts: dict[str, int] | tuple[tuple[str, int], ...],
-) -> tuple[RingSegment, ...]:
-    """Return fixed-order clockwise cluster-ring segments.
+) -> tuple[RingSegment[str], ...]:
+    """Return fixed-order clockwise cluster-ring segments for status counts."""
 
-    Every present status receives at least 14 degrees.  If applying that floor
+    counts = dict(status_counts)
+    return ring_segments(tuple(
+        (status, int(counts.get(status, 0))) for status in STATUS_ORDER
+    ))
+
+
+def ring_segments(
+    ordered_counts: tuple[tuple[SegmentKey, int], ...],
+) -> tuple[RingSegment[SegmentKey], ...]:
+    """Clockwise ring segments for ``(key, count)`` pairs, in the order given.
+
+    Every present key receives at least 14 degrees.  If applying that floor
     would overflow the available sweep, the excess is removed proportionally
     from segments that remain above the floor.
     """
 
-    counts = dict(status_counts)
-    present = [
-        (status, max(0, int(counts.get(status, 0))))
-        for status in STATUS_ORDER
-        if int(counts.get(status, 0)) > 0
-    ]
+    present = [(key, int(count)) for key, count in ordered_counts if int(count) > 0]
     if not present:
         return ()
 
     gap = CLUSTER_GAP_DEGREES if len(present) > 1 else 0.0
     available = 360.0 - gap * len(present)
-    total = sum(count for _status, count in present)
+    total = sum(count for _key, count in present)
     sweeps = [available * count / total for _status, count in present]
     sweeps = [max(CLUSTER_MIN_SEGMENT_DEGREES, sweep) for sweep in sweeps]
 
@@ -117,9 +129,9 @@ def cluster_ring_segments(
         overflow = sum(sweeps) - available
 
     start = -90.0 + gap / 2.0
-    segments: list[RingSegment] = []
-    for (status, _count), sweep in zip(present, sweeps):
-        segments.append(RingSegment(status, start, sweep))
+    segments: list[RingSegment[SegmentKey]] = []
+    for (key, _count), sweep in zip(present, sweeps):
+        segments.append(RingSegment(key, start, sweep))
         start += sweep + gap
     return tuple(segments)
 

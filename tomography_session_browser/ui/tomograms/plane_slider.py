@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from tomography_session_browser.ui.tomograms.tab import TomogramTab
 
 QueryKey = tuple[tuple[int, int], Tomogram, int]
-BASE_HINT = "Go to a different plane (PageUp, PageDown). Shift + wheel over a pane also steps planes. F8 opens capture marks."
+BASE_HINT = "Select a plane (PageUp, PageDown or Shift+wheel). F8 shows capture marks."
 
 
 @dataclass(frozen=True, slots=True)

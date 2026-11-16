@@ -181,6 +181,36 @@ class TagProjects(QWidget):
         return replace(payload, rows=tuple(rows), folder_projects=tuple(self.key_for(s.path) for s in payload.sources),
                        tags_unsaved=any(s.dirty for source in payload.sources if (s := self.session_for(source.path)) is not None))
 
+    def atlas_tags(self, folder):
+        """A lookup of the saved tags of ``folder``'s tomograms, for the Atlas Tags mode.
+
+        ``None`` when no open project lists the folder. The lookup gives a
+        ``TomogramTagState``, or ``None`` for a row the project cannot bind. No
+        filesystem call: the binding compares the loaded volume facts. The
+        caller keeps the lookup until the tags change (``AtlasOverlayState``).
+        """
+        from tomography_session_browser.presentation.atlas_colouring import TomogramTagState
+        from tomography_session_browser.presentation.tomogram_tag_changes import change_notice
+        from tomography_session_browser.services.tomogram_tags.binding import row_binder
+        session = self.session_for(folder.path)
+        project = session.project if session is not None else None
+        binder = row_binder(project, folder) if project is not None else None
+        if project is None or binder is None:
+            return None
+        names = {tag.id: tag.name for tag in project.catalogue}
+
+        def tags_of(row):
+            binding = binder(row)
+            if binding.ref is None:
+                return None
+            saved = binding.saved
+            if saved is None or not saved.tags:
+                return TomogramTagState()
+            notice = change_notice(binding)
+            return TomogramTagState(tuple((names.get(a.tag_id, a.tag_id), a.count) for a in saved.tags),
+                                    notice.title if notice is not None else "")
+        return tags_of
+
     def open(self, path: Path, folder: Path, *, create: bool = False, restore: bool = False,
              project: TagProject | None = None, relocating: TagSession | None = None) -> None:
         if self.stopping and relocating is None:

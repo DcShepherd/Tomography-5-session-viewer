@@ -6,6 +6,7 @@ from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QFrame
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.services.marker_clustering import MAX_ATLAS_ZOOM
+from tomography_session_browser.services.navigation.exposures import markers_for_batch
 from tomography_session_browser.presentation.design_tokens import CANVAS_CHROME
 from tomography_session_browser.ui.viewer.atlas_lod_items import AtlasClusterPopup
 from tomography_session_browser.ui.viewer.marker_paint import marker_scene_geometry
@@ -213,6 +214,7 @@ class PreviewInteraction:
             members,
             on_member_selected=self.select_popup_member,
             parent=self.view.viewport(),
+            colouring=self.view.parts.marker_layer.colouring,
         )
         popup.adjustSize()
         center = self.view.mapFromScene(QPointF(float(marker.x or 0.0), float(marker.y or 0.0)))
@@ -287,17 +289,13 @@ class PreviewInteraction:
         if not batch_id:
             self.exposure_highlights = {marker.id}
         else:
+            # Records that share a batch ID highlight nothing: neither owns the exposures.
+            lookup = markers_for_batch(self.view.parts.marker_layer.source_markers, batch_id)
             self.exposure_highlights = {
                 candidate.id
-                for candidate in self.view.parts.marker_layer.source_markers
+                for candidate in lookup.markers
                 if candidate.marker_type
                 in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}
-                and str(
-                    candidate.metadata.get("batch_id")
-                    or candidate.linked_object_id
-                    or ""
-                )
-                == batch_id
                 and candidate.source_object_id == marker.source_object_id
             }
         self.view.parts.marker_layer.redraw_markers()

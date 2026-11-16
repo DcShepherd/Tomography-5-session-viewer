@@ -13,8 +13,6 @@ TIME_CHART_BOTTOM_AXIS_SPACE = 54
 TIME_CHART_AXIS_LABEL_GAP = 7
 TIME_CHART_TIMELINE_MIN_HEIGHT = 220
 TIME_CHART_DEFOCUS_MIN_HEIGHT = 300
-TIME_CHART_CARD_PADDING = (12, 9, 12, 10)
-TIME_CHART_CARD_SPACING = 6
 TIME_CHART_ELAPSED_AXIS_LABEL = "Time from start"
 
 
@@ -103,6 +101,33 @@ def nice_axis_ticks(
                 return ticks[0], ticks[-1], ticks
 
     return low, high, [low, high]
+
+
+#: Round elapsed-time steps, in minutes: 1, 2, 5, 10, 15, 20 and 30 minutes;
+#: 1, 2, 3, 4, 6, 8, 12 and 24 hours.
+_ELAPSED_STEPS_MIN = (1, 2, 5, 10, 15, 20, 30, 60, 120, 180, 240, 360, 480, 720, 1440)
+
+
+def elapsed_axis_ticks(span_seconds: float, max_labels: int) -> list[int]:
+    """Labelled ticks of an elapsed-time axis, in whole seconds from its start.
+
+    The timeline and the defocus and dose charts share it. The ticks start at
+    0 and use the first round step that gives no more than ``max_labels``
+    ticks before the end. The axis still ends at the true extent: the caller
+    draws a grid line there without a label (the header gives the length).
+    Past 24-hour steps, the step is a whole number of days."""
+
+    span = max(float(span_seconds), 0.0) if isfinite(span_seconds) else 0.0
+    limit = max(int(max_labels), 1)
+    if span <= 0:
+        return [0]
+    for minutes in _ELAPSED_STEPS_MIN:
+        step = minutes * 60
+        if ceil(span / step) <= limit:
+            break
+    else:
+        step = ceil(span / limit / 86400) * 86400
+    return [index * step for index in range(ceil(span / step))]
 
 
 def format_absolute_time(value: datetime) -> str:

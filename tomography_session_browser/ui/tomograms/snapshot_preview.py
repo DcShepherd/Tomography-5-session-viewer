@@ -71,10 +71,10 @@ class NextFilePreview(ElidedLabel):
             self.running.cancelled.set()
         if key is None or not directory:
             self.setText("Select a tomogram" if key is None else "Choose an output folder")
-            self.setToolTip("The advisory name is available after selecting a tomogram and an output folder. No file is reserved.")
+            self.setToolTip("Select a tomogram and a folder to see the name")
             return
         self.setText("Checking filename…")
-        self.setToolTip("Advisory only. No file is reserved; another writer may take this name before saving.")
+        self.setToolTip("Preview only. The final name is set when the app saves.")
         self.pending = NameQuery(key, self.generation)
         self.timer.start()
 
@@ -109,7 +109,7 @@ class NextFilePreview(ElidedLabel):
             path, error = result
             self.setText(path.name if path else "Filename unavailable")
             self.setToolTip((str(path) + "\n" if path else error + "\n")
-                + "Advisory only. No file is reserved; the writer chooses the final name when saving.")
+                + "Preview only. The final name is set when the app saves.")
         self.start()
 
     @Slot(object, str)

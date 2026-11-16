@@ -52,7 +52,10 @@ class TomogramPlacement:
                 for owner in candidates.values() if candidates else (session,):
                     owner_key = ('sample:' + path_identity_key(owner.path)) if isinstance(owner, Sample) else 'session:' + session_key(owner)
                     owners.setdefault(key, {})[owner_key] = owner
-        rows = tuple({row.id: row for source in workspace.processing_sources for row in source.tomograms}.values())
+        # Display rows: the loaded row, or its copy with an alignment job's evidence.
+        # Everything that shows evidence reads these rows, never ``source.tomograms``.
+        rows = tuple({row.id: workspace.borrowed_rows.get(row.id, row)
+                      for source in workspace.processing_sources for row in source.tomograms}.values())
         parents: dict[str, list[Tomogram]] = {}
         placed: dict[str, Sample | Session] = {}
         reasons: dict[str, ResidualReason] = {}

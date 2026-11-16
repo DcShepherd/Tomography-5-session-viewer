@@ -51,7 +51,7 @@ class ProcessingOutcome(CardBox):
         flow.addWidget(note(status or 'No tomograms in this selection', headline))
         # A value stated in the Tomograms tab can change this count while the page stays.
         self.attention = link_button('', headline)
-        self.attention.setToolTip('Volume or metadata warnings and ambiguous parent links. Opens exactly the counted rows.')
+        self.attention.setToolTip('Show the tomograms with warnings or ambiguous parent links')
         self.attention.clicked.connect(lambda: page.route(self.summary.attention_keys, 'Tomograms needing attention'))
         flow.addWidget(self.attention)
         if summary.name_proposal_count and summary.chart_key is not None:
@@ -59,9 +59,8 @@ class ProcessingOutcome(CardBox):
             source_id = summary.input.sources[0].id if len(summary.input.sources) == 1 else ''
             review.clicked.connect(lambda: page.dashboard.name_links_requested.emit(source_id))
             flow.addWidget(review)
-        flow.addWidget(info('One block per tomogram in list order, or proportional groups when there is insufficient room. '
-                            'Opened means an accepted image was displayed, not that it passed scientific review. '
-                            'Capture counts come from canonical review history and include all reconstruction versions.', headline))
+        flow.addWidget(info('One block for each tomogram. Opened means the image was shown, not that it passed review. '
+                            'Captures include all versions.', headline))
         body.addWidget(headline)
         self.strip = StatusTileGrid([StatusTileModel(row.tomogram.id, row.tomogram.name, TILE_STATUS_NEUTRAL, '')
                                      for row in summary.input.rows], parent=self)

@@ -17,11 +17,11 @@ from reportlab.platypus import CondPageBreak, Paragraph, Spacer, Table
 
 from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.presentation.dashboard.summary import ProcessingSummary, summary_from_input
-from tomography_session_browser.presentation.dashboard.tag_summary import TagContent, number_text, tag_summary
+from tomography_session_browser.presentation.dashboard.tag_summary import TagContent, dash_number_text, tag_summary
 from tomography_session_browser.presentation.dashboard.tomogram_summary_facts import outcome_facts
 from tomography_session_browser.presentation.recorded_metrics import METRIC_COLUMNS, metric_number, metric_row
 from tomography_session_browser.presentation.report_tomograms import (
-    ReportRow, ScopedTomograms, TomogramSection, exclusion_reason, incomplete_note, print_warning,
+    ReportRow, ScopedTomograms, TomogramSection, exclusion_reason, incomplete_note, print_source, print_warning,
     section_input, section_sources,
 )
 from tomography_session_browser.presentation.tomogram_calibration import tomogram_warnings
@@ -160,7 +160,7 @@ def tomogram_table(section: TomogramSection, scoped: ScopedTomograms, *, folder_
     return data_table(header, rows)
 
 
-def recorded_values(rows: Sequence[ReportRow]) -> list:
+def recorded_values(rows: Sequence[ReportRow], scoped: ScopedTomograms) -> list:
     """The recorded-values table, the absent-column line and the grouped sources."""
     metric_rows = [metric_row(row.tomogram) for row in rows]
     present = [index for index, (definition, _) in enumerate(METRIC_COLUMNS)
@@ -174,11 +174,11 @@ def recorded_values(rows: Sequence[ReportRow]) -> list:
     flowables: list = [_subheading("Recorded values"), Spacer(1, 3), data_table(header, table_rows)]
     if absent:
         flowables += [Spacer(1, 3), Paragraph(graphics.html_escape(f"Not recorded: {', '.join(absent)}."), styles.MUTED_STYLE)]
-    flowables += [Spacer(1, 6), _subheading("Sources"), *provenance(rows)]
+    flowables += [Spacer(1, 6), _subheading("Sources"), *provenance(rows, scoped)]
     return flowables
 
 
-def provenance(rows: Sequence[ReportRow]) -> list:
+def provenance(rows: Sequence[ReportRow], scoped: ScopedTomograms) -> list:
     """Sources grouped by definition, recorded field and qualification; per row only for ambiguity."""
     groups: dict[tuple[str, str, str], tuple[set[str], set[str]]] = defaultdict(lambda: (set(), set()))
     ambiguous: list[str] = []
@@ -188,13 +188,13 @@ def provenance(rows: Sequence[ReportRow]) -> list:
             candidates = [metric for metric in metrics if metric.definition == definition]
             if len(candidates) > 1:
                 values = ", ".join(f"{metric_number(metric)} {metric.unit}" for metric in candidates)
-                sources = ", ".join(dict.fromkeys(metric.source for metric in candidates))
+                sources = ", ".join(dict.fromkeys(print_source(metric.source, scoped) for metric in candidates))
                 ambiguous.append(f"{row.tomogram.name}: {label} has {len(candidates)} values ({values}), "
                                  f"so the report shows no value. Sources: {sources}.")
             for metric in candidates:
                 names, files = groups[(metric.label, metric.field, metric.qualification)]
                 names.add(row.key)
-                files.add(metric.source)
+                files.add(print_source(metric.source, scoped))
     qualifications = {qualification for (_, _, qualification) in groups}
     shared = next(iter(qualifications)) if len(qualifications) == 1 else None
     lines = []
@@ -251,7 +251,7 @@ def tomogram_section(section: TomogramSection, scoped: ScopedTomograms, slices: 
         flowables += [coverage, Spacer(1, 4)]
     flowables += [facts_row(summary), Spacer(1, styles.CARD_GAP),
                   tomogram_table(section, scoped, folder_column=len(section_sources(section, scoped)) > 1),
-                  Spacer(1, 8), *recorded_values(section.members)]
+                  Spacer(1, 8), *recorded_values(section.members, scoped)]
     flagged = attention(section, scoped, summary)
     if flagged:
         flowables += [Spacer(1, 8), *flagged]
@@ -273,7 +273,7 @@ def _tag_cell(content: TagContent | None, name: str) -> str:
     tag = next((value for value in content.tags if value.name == name), None) if content else None
     if tag is None:
         return ""
-    return number_text(tag.count) if tag.count is not None else "Tagged"
+    return dash_number_text(tag.count) if tag.count is not None else "Tagged"
 
 
 def tags_and_notes(section: TomogramSection, scoped: ScopedTomograms) -> list:

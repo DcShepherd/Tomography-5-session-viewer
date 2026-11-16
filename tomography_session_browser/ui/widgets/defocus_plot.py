@@ -9,7 +9,7 @@ from __future__ import annotations
 from tomography_session_browser.presentation.help_content import LocalBinding, InteractionKind
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha1
 from math import ceil, floor
 from typing import Any
@@ -28,6 +28,8 @@ from tomography_session_browser.ui.widgets.time_chart import (
     TIME_CHART_LEFT_GUTTER,
     TIME_CHART_RIGHT_GUTTER,
     TIME_CHART_TOP,
+    elapsed_axis_ticks,
+    format_elapsed_offset,
     format_time_axis_tick,
     nice_axis_ticks,
     time_axis_tick_count,
@@ -101,8 +103,8 @@ class DefocusScatterPlot(QWidget):
         count = len(self._model.points) if self._model is not None else 0
         return _point_style(count)
 
-    def color_for_label(self, label: str) -> QColor:
-        return _color_for_label(label, self._series_palette())
+    def color_for_series(self, series_key: str) -> QColor:
+        return _color_for_series(series_key, self._series_palette())
 
     def _point_value(self, point: Any) -> float:
         return point.defocus_um
@@ -209,21 +211,30 @@ class DefocusScatterPlot(QWidget):
             painter.setPen(QPen(colors["grid"], 1))
 
         tick_count = time_axis_tick_count(plot.width())
-        for index in range(tick_count):
-            frac = index / (tick_count - 1)
+        elapsed = model.x_mode == "absolute_time"
+        if elapsed:
+            span = x_max - x_min
+            ticks = [
+                (offset / span if span > 0 else 0.0, format_elapsed_offset(timedelta(seconds=offset)))
+                for offset in elapsed_axis_ticks(span, tick_count)
+            ]
+        else:
+            ticks = [
+                (index / (tick_count - 1), self._x_tick_label(model, x_min + (x_max - x_min) * index / (tick_count - 1), x_min, x_max))
+                for index in range(tick_count)
+            ]
+        for index, (frac, label) in enumerate(ticks):
             x = plot.left() + plot.width() * frac
             painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
-            label = self._x_tick_label(model, x_min + (x_max - x_min) * frac, x_min, x_max)
             label_width = metrics.horizontalAdvance(label)
-            text_x = x - label_width / 2
-            if index == 0:
-                text_x = plot.left()
-            elif index == tick_count - 1:
-                text_x = plot.right() - label_width
+            text_x = plot.left() if index == 0 else min(x - label_width / 2, plot.right() - label_width)
             painter.setPen(colors["label"])
             painter.drawText(QPointF(text_x, plot.bottom() + metrics.ascent() + TIME_CHART_AXIS_LABEL_GAP), label)
             painter.setPen(QPen(colors["grid"], 1))
 
+        if elapsed:
+            # The true end of the time axis: a grid line, no label.
+            painter.drawLine(QPointF(plot.right(), plot.top()), QPointF(plot.right(), plot.bottom()))
         self._draw_y_axis_label(painter, plot, colors["label"])
         axis_font = self._axis_label_font()
         axis_metrics = QFontMetrics(axis_font)
@@ -290,8 +301,8 @@ class DefocusScatterPlot(QWidget):
         radius, alpha = _point_style(len(model.points))
         palette = self._series_palette()
         series_colors = {
-            label: _color_for_label(label, palette)
-            for label in {point.sample_name for point in model.points}
+            key: _color_for_series(key, palette)
+            for key in {point.series_key for point in model.points}
         }
         painter.setPen(Qt.PenStyle.NoPen)
         for point_index, point in enumerate(model.points):
@@ -301,7 +312,7 @@ class DefocusScatterPlot(QWidget):
             y_frac = 0.5 if y_max <= y_min else (y_value - y_min) / (y_max - y_min)
             x = plot.left() + plot.width() * max(0.0, min(x_frac, 1.0))
             y = plot.bottom() - plot.height() * max(0.0, min(y_frac, 1.0))
-            color = QColor(series_colors[point.sample_name])
+            color = QColor(series_colors[point.series_key])
             highlighted = self._point_is_highlighted(point)
             color.setAlpha(self._point_alpha(point, alpha))
             painter.setBrush(color)
@@ -360,8 +371,8 @@ class DefocusScatterPlot(QWidget):
             else max(45, int(alpha * 0.38))
         )
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        for label, positions in geometry["series_points"].items():
-            color = _color_for_label(label, palette)
+        for key, positions in geometry["series_points"].items():
+            color = _color_for_series(key, palette)
             color.setAlpha(base_alpha)
             painter.setPen(
                 QPen(
@@ -411,9 +422,10 @@ class DefocusScatterPlot(QWidget):
         y_max: float,
         radius: float,
     ) -> dict[str, Any]:
+        # No model identity or point count: ``set_model`` clears the cache, and
+        # nothing changes a model's points in place, so the geometry here is
+        # always this widget's current model's.
         key = (
-            id(model),
-            len(model.points),
             plot.x(),
             plot.y(),
             plot.width(),
@@ -443,7 +455,7 @@ class DefocusScatterPlot(QWidget):
             x = plot.left() + plot.width() * max(0.0, min(x_frac, 1.0))
             y = plot.bottom() - plot.height() * max(0.0, min(y_frac, 1.0))
             position = QPointF(x, y)
-            series_points.setdefault(point.sample_name, []).append(position)
+            series_points.setdefault(point.series_key, []).append(position)
             rect = QRectF(x - radius, y - radius, radius * 2, radius * 2)
             hit_rect = rect.adjusted(-3, -3, 3, 3)
             point_rects.append((hit_rect, point))
@@ -460,8 +472,8 @@ class DefocusScatterPlot(QWidget):
         geometry: dict[str, Any] = {
             "key": key,
             "series_points": {
-                label: QPolygonF(positions)
-                for label, positions in series_points.items()
+                key: QPolygonF(positions)
+                for key, positions in series_points.items()
             },
             "point_rects": point_rects,
             "point_bins": point_bins,
@@ -488,7 +500,7 @@ class DefocusScatterPlot(QWidget):
         from tomography_session_browser.ui.theme import current_palette
 
         position, rect, point = entry
-        color = _color_for_label(point.sample_name, palette)
+        color = _color_for_series(point.series_key, palette)
         color.setAlpha(alpha)
         painter.setPen(
             QPen(
@@ -526,16 +538,16 @@ class DefocusScatterPlot(QWidget):
         colors: dict[str, QColor],
     ) -> None:
         self._last_legend_rect = QRectF(legend_rect)
-        labels = self._legend_labels(model)
-        if not labels or legend_rect.height() <= 0:
+        entries = self._legend_entries(model)
+        if not entries or legend_rect.height() <= 0:
             return
         metrics = painter.fontMetrics()
         palette = self._series_palette()
         x = legend_rect.left()
         y = legend_rect.top()
-        max_chip_width = max(70, min(128, int(legend_rect.width() / min(len(labels), 6)) - 8))
+        max_chip_width = max(70, min(128, int(legend_rect.width() / min(len(entries), 6)) - 8))
         row_height = metrics.height() + 3
-        for label in labels:
+        for key, label in entries:
             text = metrics.elidedText(label, Qt.TextElideMode.ElideRight, max_chip_width - 17)
             chip_width = min(max_chip_width, metrics.horizontalAdvance(text) + 18)
             if x + chip_width > legend_rect.right() and x > legend_rect.left():
@@ -543,7 +555,7 @@ class DefocusScatterPlot(QWidget):
                 y += row_height
             if y + row_height > legend_rect.bottom():
                 return
-            dot = _color_for_label(label, palette)
+            dot = _color_for_series(key, palette)
             dot.setAlpha(230)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(dot)
@@ -741,19 +753,26 @@ class DefocusScatterPlot(QWidget):
         return QRectF(plot.left(), TIME_CHART_TOP, plot.width(), height - 4)
 
     def _legend_height(self, painter: QPainter, model: DefocusPlotModel) -> int:
-        labels = self._legend_labels(model)
-        if not labels:
+        entries = self._legend_entries(model)
+        if not entries:
             return 0
         metrics = painter.fontMetrics()
-        rows = 1 if len(labels) <= 6 else 2
+        rows = 1 if len(entries) <= 6 else 2
         return rows * (metrics.height() + 3) + 5
 
     @staticmethod
-    def _legend_labels(model: DefocusPlotModel) -> list[str]:
-        labels = sorted({point.sample_name for point in model.points})
-        if len(labels) < 2 or len(labels) > 12:
+    def _legend_entries(model: DefocusPlotModel) -> list[tuple[str, str]]:
+        """``(series key, text)`` per series, by text ignoring case, then by key.
+
+        A series is a sample group: two groups with the same text are two
+        entries. The 2-to-12 limit counts series."""
+
+        texts: dict[str, str] = {}
+        for point in model.points:
+            texts.setdefault(point.series_key, point.sample_name)
+        if len(texts) < 2 or len(texts) > 12:
             return []
-        return labels
+        return sorted(texts.items(), key=lambda entry: (entry[1].casefold(), entry[1], entry[0]))
 
     def _x_range(self, model: DefocusPlotModel) -> tuple[float, float]:
         values = [self._point_x(point, model) for point in model.points]
@@ -813,7 +832,7 @@ class DefocusScatterPlot(QWidget):
     def _series_palette(self) -> list[QColor]:
         """Per-sample series colours.
 
-        ``_color_for_label`` picks from this list by hashing the sample name,
+        ``_color_for_series`` picks from this list by hashing the series key,
         so every entry has to stand on its own — list order confers nothing.
         The requirement is therefore that no two entries are equal (they used
         to be: ``chart_blue`` and ``chart_violet`` were the same hex, so two
@@ -842,19 +861,19 @@ def _point_style(count: int) -> tuple[float, int]:
     return 1.4, 88
 
 
-def _color_for_label(label: str, palette: list[QColor]) -> QColor:
+def _color_for_series(series_key: str, palette: list[QColor]) -> QColor:
     if not palette:
         from tomography_session_browser.ui.theme import current_palette
 
         return QColor(current_palette().accent)
-    index = _series_index(label, len(palette))
+    index = _series_index(series_key, len(palette))
     return QColor(palette[index])
 
 
-def _series_index(label: str, count: int) -> int:
+def _series_index(series_key: str, count: int) -> int:
     if count <= 0:
         return 0
-    digest = sha1(label.encode("utf-8", errors="replace")).digest()
+    digest = sha1(series_key.encode("utf-8", errors="replace")).digest()
     return int.from_bytes(digest[:2], "big") % count
 
 

@@ -8,7 +8,7 @@ import math
 from tomography_session_browser.domain.tomograms import Tomogram, Volume, VolumeGrid
 from tomography_session_browser.presentation.dashboard.index_chart import SlabReference
 from tomography_session_browser.presentation.tomogram_versions import review_versions
-from tomography_session_browser.presentation.volume_formatting import mode_text, file_size
+from tomography_session_browser.presentation.volume_formatting import mode_text, file_size, per_axis_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,13 +35,13 @@ def slab_reference(item: Tomogram) -> SlabReference:
         return SlabReference(sources=sources, note="Slab unavailable: a full version has no resolved Z spacing/grid.")
     if any(volume.grid != versions[0].grid for volume in versions[1:]):
         return SlabReference(sources=sources, note="Slab unavailable: full reconstruction versions have different geometry.")
-    return SlabReference(slab_nm(versions[0]), sources, "Physical Z extent from the reconstruction header; not a specimen-thickness estimate.")
+    return SlabReference(slab_nm(versions[0]), sources, "Z extent from the header; not a specimen thickness")
 
 
 def volume_columns(volume: Volume) -> tuple[str, ...]:
     grid = volume.grid
     shape = " × ".join(map(str, grid.shape_xyz)) if grid else "Unavailable"
-    spacing = " × ".join(f"{v:g}" if v is not None else "?" for v in grid.spacing_xyz) + " Å" if grid else "Unresolved"
+    spacing = per_axis_text(grid.spacing_xyz) + " Å" if grid else "Unresolved"
     slab = slab_nm(volume)
     return shape, spacing, f"{slab:g} nm" if slab is not None else "Unresolved", mode_text(volume.dtype), file_size(volume.fingerprint.size)
 

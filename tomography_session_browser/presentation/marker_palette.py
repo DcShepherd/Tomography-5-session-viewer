@@ -215,3 +215,40 @@ def marker_style(marker: ImageMarker, *, queued_stroke: str, fallback_stroke: st
     stroke, fill, alpha = style
     line = FRAME_LINES.get(marker.marker_type, "solid")
     return MarkerStyle(stroke, fill or stroke, alpha, "type", line=line, halo=stroke == FRAME)
+
+
+# --- Atlas colour by a value (batch 4) --------------------------------------
+#
+# Screen only: the PDF keeps status colours. The same in both themes, because
+# the canvas is near-black in both. Decision 11: blue (low) to yellow (high),
+# like cividis, with the dark end lifted to meet the contrast floor. The floor
+# (``tests/test_atlas_colour_ramp.py``): every ramp colour and ``NO_VALUE`` is
+# at least 3:1 against the leaf halo (``MARKER_INK``) that surrounds it, and the
+# halo is at least 3:1 against the canvas and a mid-grey image, so a glyph
+# separates on both. The two ends are at least 3:1 from each other.
+
+#: Ramp stops, low to high: ``(fraction, colour)``.
+COLOUR_RAMP: Final[tuple[tuple[float, str], ...]] = (
+    (0.0, "#3F6FC2"),
+    (0.35, "#6F80A8"),
+    (0.65, "#A9A27A"),
+    (1.0, "#FFE14A"),
+)
+#: A position with no value: one fill for every reason, apart from the ramp
+#: and from the grey dashed Unresolved-link ring (decision 8).
+NO_VALUE: Final[str] = "#C9B6E4"
+#: Tomogram mode: a placed tomogram, and no tomogram linked (the ramp's ends).
+PRESENCE_PLACED: Final[str] = COLOUR_RAMP[-1][1]
+PRESENCE_NONE_LINKED: Final[str] = COLOUR_RAMP[0][1]
+
+
+def ramp_colour(fraction: float) -> str:
+    """The ramp colour at ``fraction`` (0 low, 1 high), as ``#rrggbb``."""
+
+    t = min(max(float(fraction), 0.0), 1.0)
+    for (low_at, low), (high_at, high) in zip(COLOUR_RAMP, COLOUR_RAMP[1:]):
+        if t <= high_at:
+            share = (t - low_at) / (high_at - low_at)
+            channels = (round(int(low[i:i + 2], 16) * (1 - share) + int(high[i:i + 2], 16) * share) for i in (1, 3, 5))
+            return "#" + "".join(f"{channel:02X}" for channel in channels)
+    return COLOUR_RAMP[-1][1]

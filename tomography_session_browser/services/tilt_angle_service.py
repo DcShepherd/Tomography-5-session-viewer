@@ -42,6 +42,17 @@ def explicit_stack_order_tilt_angles(
     return stack_order_tilt_angles(tilt_series, frame_count, allow_inferred=False)
 
 
+def preloaded_stack_angles(tilt_series: TiltSeries, frame_count: int) -> tuple[tuple[float, ...], bool]:
+    """Select angles already associated with the available frames, without file reads."""
+    mrc = _mrc_extended_header_angles(tilt_series, frame_count)
+    metadata = tilt_series.mrc_metadata
+    mdoc = (_mdoc_stack_order_angle_entries(tilt_series, frame_count)
+            if metadata is not None and metadata.data_complete is True else None)
+    if mrc is not None:
+        return tuple(mrc), mdoc is not None and not _angle_sets_close(mrc, mdoc[0])
+    return (tuple(mdoc[0]), False) if mdoc is not None else ((), False)
+
+
 def stack_order_mdoc_section_indices(
     tilt_series: TiltSeries,
     frame_count: int | None = None,

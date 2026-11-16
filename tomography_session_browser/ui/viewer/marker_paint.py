@@ -1,5 +1,6 @@
 """Marker paint for the image viewer."""
 from __future__ import annotations
+from collections.abc import Hashable
 from typing import Any
 from PySide6.QtCore import QPointF
 from PySide6.QtGui import QColor, QFont, QPainterPath
@@ -7,7 +8,10 @@ from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.domain.status import AtlasMarkerStatus
 from tomography_session_browser.services.atlas_marker_style import IMAGE_STATUS_COLOURS
 from tomography_session_browser.ui.theme import current_palette
-from tomography_session_browser.presentation.marker_palette import MarkerStyle, marker_style
+from tomography_session_browser.presentation.atlas_colouring import FIRST_CATEGORIES, StatusKey, TomogramPresence, ValueBin
+from tomography_session_browser.presentation.design_tokens import CANVAS_CHROME
+from tomography_session_browser.presentation.marker_palette import NO_VALUE, PRESENCE_NONE_LINKED, PRESENCE_PLACED, MarkerStyle, marker_style, ramp_colour
+from tomography_session_browser.services.atlas_lod import glyph_colour_status
 
 
 def marker_outline(marker: ImageMarker) -> MarkerStyle:
@@ -114,6 +118,24 @@ def atlas_status_color(status: str) -> QColor:
     return QColor(
         IMAGE_STATUS_COLOURS.get(normalized, IMAGE_STATUS_COLOURS[AtlasMarkerStatus.QUEUED])
     )
+
+
+#: The fill of a cluster in a value mode: the ring alone carries the values.
+CLUSTER_NEUTRAL = "cluster_neutral"
+
+
+def key_colour(key: Hashable) -> QColor:
+    """The colour a glyph key is drawn in: a status word or an ``atlas_colouring`` key."""
+
+    if isinstance(key, str):
+        return QColor(CANVAS_CHROME.text) if key == CLUSTER_NEUTRAL else atlas_status_color(key)
+    if isinstance(key, StatusKey):
+        return atlas_status_color(glyph_colour_status(key.word))
+    if isinstance(key, ValueBin):
+        return QColor(ramp_colour(key.fraction))
+    if isinstance(key, TomogramPresence):
+        return QColor(PRESENCE_PLACED if key.presence in FIRST_CATEGORIES else PRESENCE_NONE_LINKED)
+    return QColor(NO_VALUE)
 
 
 def marker_scene_extent(marker: ImageMarker) -> tuple[float, float]:

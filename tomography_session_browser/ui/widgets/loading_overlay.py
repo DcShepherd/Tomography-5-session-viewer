@@ -177,7 +177,14 @@ class LoadingOverlay(QWidget):
         self._sync_accessible_description()
         self.hide()
 
-    def show_loading(self, message: str, detail: str | None = None) -> None:
+    def show_loading(self, message: str, detail: str | None = None, *, return_focus: bool = True) -> None:
+        """Show the loader; it holds keyboard focus until the load is done.
+
+        ``return_focus`` False: when the load is done, focus goes to
+        ``focus_after`` (the project tree), not back to what had it. The
+        window asks for that on the first load into an empty project.
+        """
+
         self._cancel_hand_off()
         self._message = message
         if detail is not None:
@@ -195,7 +202,7 @@ class LoadingOverlay(QWidget):
         if not self.isVisible():
             # Given back when the load is done (``_give_focus_back``).
             focus = QApplication.focusWidget()
-            self._focus_before = focus if focus is not None and focus is not self else None
+            self._focus_before = focus if return_focus and focus is not None and focus is not self else None
         self.show()
         self.raise_()
         self.setFocus(Qt.FocusReason.OtherFocusReason)
@@ -415,7 +422,8 @@ class LoadingOverlay(QWidget):
         and never gave it back: hiding it left focus wherever Qt's tab chain
         went next, and a key pressed during the hand-off was lost with it.
         Focus returns to what had it before the load, if that still shows
-        and takes focus, or else to ``focus_after`` (the project tree). If
+        and takes focus, or else to ``focus_after`` (the project tree). A
+        load shown with ``return_focus`` False goes to ``focus_after``. If
         the reviewer has already put it somewhere, it stays there.
         """
 
@@ -825,7 +833,7 @@ class LoadingOverlay(QWidget):
     def _paint_card(self, painter: QPainter, layout: _CardLayout, palette, colours: OrbColours | None) -> None:
         """The card, and the painted orbs in it unless ``colours`` is None."""
 
-        from tomography_session_browser.ui.branding import draw_stack_mark
+        from tomography_session_browser.ui.stack_mark import draw_stack_mark
         from tomography_session_browser.presentation.design_tokens import RADIUS_POPOVER
 
         painter.setPen(QPen(QColor(palette.border_strong), 1.0))

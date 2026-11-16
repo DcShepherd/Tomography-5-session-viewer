@@ -7,13 +7,15 @@ from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QPushButton, QVBoxLayout, QWidget
 from tomography_session_browser.ui.widgets.empty_state_panel import EmptyStatePanel
 from tomography_session_browser.ui.widgets.canvas_shell import CanvasShell
-from tomography_session_browser.ui.motion import live_section_reveal
+from tomography_session_browser.ui.motion import live_section_reveal, settle_layouts
 from tomography_session_browser.services.pixel_size import scale_bar_pixel_size
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.presentation.design_tokens import CANVAS_CHROME, SPACE_M, SPACE_S, SPACE_XS
 import logging
 LOGGER = logging.getLogger("tomography_session_browser.ui.image_viewer")
-from tomography_session_browser.ui.viewer.atlas_lod_items import AtlasMarkerLegend
+#: The Overlays button's label while it has room for one.
+OVERLAY_BUTTON_TEXT = "Overlays"
+from tomography_session_browser.ui.viewer.positions_card import PositionsCard
 from tomography_session_browser.ui.viewer.constants import BUTTON_ZOOM_STEP, FLOATING_CONTROL_BOTTOM_INSET_PX, FLOATING_CONTROL_INSET_PX, FLOATING_CONTROL_SIZE_PX, MAX_SCALE_BAR_SCREEN_PX, MIN_SCALE_BAR_SCREEN_PX, PYRAMID_LEVELS, QWIDGETSIZE_MAX, ZOOM_LABEL_MIN_WIDTH_PX, ZOOM_PANEL_HORIZONTAL_PADDING_PX
 from tomography_session_browser.ui.viewer.preview_image import source_image_size_for_item
 from tomography_session_browser.ui.viewer.scale_bar import ScaleBarWidget, format_pixel_size_label, format_scale_length_label, nice_scale_length_meters
@@ -78,7 +80,7 @@ class CanvasControls:
         top_right_row = QHBoxLayout()
         top_right_row.setContentsMargins(0, 0, 0, 0)
         top_right_row.setSpacing(6)
-        top_right_row.addWidget(self.view.overlay_button)
+        top_right_row.addWidget(self.view.overlay_button, alignment=Qt.AlignmentFlag.AlignRight)
         top_right_layout.addLayout(top_right_row)
         top_right_layout.addWidget(self.view.overlay_panel, alignment=Qt.AlignmentFlag.AlignRight)
         top_right_anchor = QWidget(viewer_shell)
@@ -148,10 +150,16 @@ class CanvasControls:
         scale_bar_anchor_layout.setContentsMargins(0, 0, 0, 0)
         scale_bar_anchor_layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
         if atlas_lod:
-            scale_bar_anchor_layout.addWidget(self.view.atlas_marker_legend)
+            # The From chip stands in for the card while a collection is hidden
+            # and the card is hidden or closed (``CollectionFilter.sync``).
+            scale_bar_anchor_layout.addWidget(self.view.parts.collection_filter.chip, 0, Qt.AlignmentFlag.AlignLeft)
+            scale_bar_anchor_layout.addWidget(self.view.positions_card)
             scale_bar_anchor_layout.addSpacing(SPACE_M)
         scale_bar_anchor_layout.addWidget(self.view.scale_bar)
         self.scale_bar_anchor = scale_bar_anchor
+        if atlas_lod:
+            # The colour key sits at the bottom centre (``place_bottom_anchors``).
+            self.view.parts.colour_by.key.setParent(viewer_shell)
         for watched in (viewer_shell, zoom_anchor, scale_bar_anchor):
             watched.installEventFilter(self.view)
         image_badge_anchor = QWidget(viewer_shell)
@@ -210,7 +218,7 @@ class CanvasControls:
         self.view.zoom_out_button = QPushButton("", self.view)
         self.view.fit_button = QPushButton("Fit", self.view)
         self.view.export_image_button = QPushButton("", self.view)
-        self.view.overlay_button = QPushButton("Overlays", self.view)
+        self.view.overlay_button = QPushButton(self.button_text(), self.view)
         self.view.overlay_button.setCheckable(True)
         self.view.overlay_button.setToolTip("Show overlay controls")
         self.set_canvas_control_icons()
@@ -238,10 +246,20 @@ class CanvasControls:
         self.image_badge_wanted = False
         self.overlay_button_compact = False
         self.overlay_button_full_width = 0
+        # A2: the width Overlays grows to while the panel is open, and whether
+        # a width is held on it now (``sync_overlay_button_width``).
+        self.overlay_button_open_width = 0
+        self.overlay_button_held = False
         self.view.scale_bar = ScaleBarWidget(self.view)
-        self.view.atlas_marker_legend = AtlasMarkerLegend(self.view)
-        self.view.atlas_marker_legend.setVisible(atlas_lod)
-        self.view.atlas_marker_legend.set_toggle_handler(self.view.parts.overlay_panel.set_atlas_legend_expanded)
+        self.view.positions_card = PositionsCard(self.view)
+        self.view.positions_card.setVisible(atlas_lod)
+        self.view.positions_card.set_toggle_handler(self.view.parts.overlay_panel.set_atlas_legend_expanded)
+        self.view.positions_card.from_button.clicked.connect(
+            lambda: self.view.parts.collection_filter.open_menu(self.view.positions_card.from_button)
+        )
+        self.view.positions_card.colour_button.clicked.connect(
+            lambda: self.view.parts.colour_by.open_menu(self.view.positions_card.colour_button)
+        )
         self.view.zoom_in_button.setToolTip("Zoom in")
         self.view.zoom_out_button.setToolTip("Zoom out")
         self.view.fit_button.setToolTip("Fit preview to the available space")
@@ -318,7 +336,7 @@ class CanvasControls:
         self.view.viewer.refresh_theme()
         self.view.image_badge.update()
         self.view.scale_bar.update()
-        self.view.atlas_marker_legend.update()
+        self.view.positions_card.update()
         self.view.list.viewport().update()
         self.view.overlay_panel.update()
         self.view.update()
@@ -388,25 +406,45 @@ class CanvasControls:
         left, right, bottom = self.floating_control_insets()
         baseline = shell.height() - bottom
         scale_anchor.move(left, baseline - scale_anchor.height())
+        # The open Overlays panel ends above the zoom stack; a zoom or resize
+        # moves the stack's top, so bound the panel again first.
+        self.view.parts.overlay_panel.fit_to_room()
         zoom_left = shell.width() - right - zoom_anchor.width()
-        zoom_anchor.move(self.clear_of_open_panel(zoom_left, zoom_anchor), baseline - zoom_anchor.height())
+        zoom_x = self.clear_of_open_panel(zoom_left, zoom_anchor, baseline - zoom_anchor.height())
+        zoom_anchor.move(zoom_x, baseline - zoom_anchor.height())
+        if self.view.parts.colour_by.atlas_lod:
+            # Between the scale bar (and the card above it) and the zoom stack.
+            # Judged against the open card, so opening or closing the card
+            # never moves the key sideways.
+            card = getattr(self.view, "positions_card", None)
+            card_width = card.open_width() if card is not None and not card.isHidden() else 0
+            stack_width = max(scale_anchor.width(), card_width)
+            self.view.parts.colour_by.place(left + stack_width + SPACE_M, zoom_x - SPACE_M, baseline)
         # A legend opening or closing rides along with its anchor (a zoom
         # step moves the anchor with a letterboxed image's edge).
-        legend = getattr(self.view, "atlas_marker_legend", None)
+        legend = getattr(self.view, "positions_card", None)
         reveal = live_section_reveal(legend) if legend is not None else None
         if reveal is not None:
             reveal.align_to(self.view.parts.overlay_panel.rect_in_shell(legend))
 
-    def clear_of_open_panel(self, zoom_left: int, zoom_anchor: QWidget) -> int:
-        """Where the zoom stack's left edge goes: beside the Overlays panel when that panel would reach it.
+    def zoom_stack_top(self) -> int | None:
+        """The zoom stack's top edge in the canvas, where ``place_bottom_anchors`` puts it."""
 
-        Judged against the lowest the stack can sit (an image that fills the
-        canvas), so zooming a letterboxed image never flips it from side to side.
+        shell = getattr(self.view, "viewer_shell", None)
+        zoom_anchor = getattr(self, "zoom_anchor", None)
+        if shell is None or zoom_anchor is None:
+            return None
+        return shell.height() - self.floating_control_insets()[2] - zoom_anchor.height()
+
+    def clear_of_open_panel(self, zoom_left: int, zoom_anchor: QWidget, stack_top: int) -> int:
+        """Where the zoom stack's left edge goes: beside the Overlays panel only when that panel reaches it.
+
+        The panel normally ends above the stack (``OverlayPanel.panel_room``),
+        so the stack stays put; only a canvas too short for that moves it.
         """
 
         panel_rect = self.view.parts.overlay_panel.open_panel_rect()
-        shell = self.view.viewer_shell
-        if panel_rect is None or panel_rect.bottom() < shell.height() - FLOATING_CONTROL_BOTTOM_INSET_PX - zoom_anchor.height() - SPACE_S:
+        if panel_rect is None or panel_rect.bottom() + SPACE_S < stack_top:
             return zoom_left
         return max(min(zoom_left, panel_rect.left() - SPACE_S - zoom_anchor.width()), 0)
 
@@ -486,8 +524,74 @@ class CanvasControls:
         badge_width = badge.sizeHint().width() + SPACE_S if wanted else 0
         compact = badge_width + self.overlay_button_full_width > available
         self.set_overlay_button_compact(compact)
-        button_width = FLOATING_CONTROL_SIZE_PX if compact else self.overlay_button_full_width
+        self.sync_overlay_button_width()
+        # The badge makes room for the width Overlays heads for, not the one
+        # it has part-way through a growth.
+        target = self.overlay_button_target_width() if button.isChecked() else self.overlay_button_full_width
+        button_width = FLOATING_CONTROL_SIZE_PX if compact else target
         badge.setVisible(wanted and badge_width + button_width <= available)
+
+    def button_text(self) -> str:
+        """The one source of the Overlays label; ``refresh_overlay_button_text`` applies a change.
+
+        It names a preset other than Standard (decision 9).
+        """
+
+        panel = getattr(getattr(self.view, "parts", None), "overlay_panel", None)
+        preset = panel.preset_label() if panel is not None else "Standard"
+        return OVERLAY_BUTTON_TEXT if preset == "Standard" else f"{OVERLAY_BUTTON_TEXT}: {preset}"
+
+    def refresh_overlay_button_text(self) -> None:
+        """Show a changed label and fit it again: the cached width is of the old text."""
+
+        self.set_overlay_button_compact(False)
+        self.view.overlay_button.setText(self.button_text())
+        self.overlay_button_full_width = 0
+        self.fit_top_floating_controls()
+
+    def overlay_button_target_width(self) -> int:
+        """The open panel's width (the motion's target), never less than the label needs.
+
+        The panel's hint, held to the canvas the way its column holds the panel.
+        """
+
+        rect = self.view.parts.overlay_panel.open_panel_rect()
+        if rect is not None:
+            self.overlay_button_open_width = min(rect.width(), self.view.viewer_shell.width() - FLOATING_CONTROL_INSET_PX)
+        return max(self.overlay_button_full_width, self.overlay_button_open_width)
+
+    def sync_overlay_button_width(self, progress: float | None = None) -> None:
+        """A2: Overlays grows to the open panel's width and back with its reveal.
+
+        ``progress`` is the panel reveal's, 0 closed to 1 open; without one the
+        button takes the width of the panel's real state, as with reduced
+        motion. Off while compact, which holds its own square. Display only.
+        """
+
+        button = self.view.overlay_button
+        if self.overlay_button_compact:
+            self.overlay_button_held = False
+            return
+        if progress is None:
+            reveal = live_section_reveal(self.view.overlay_panel)
+            progress = reveal.progress if reveal is not None and reveal.kind == "panel" else float(button.isChecked())
+        natural = self.overlay_button_full_width or button.sizeHint().width()
+        width = round(natural + (self.overlay_button_target_width() - natural) * progress)
+        if width > natural:
+            if width == button.width() and self.overlay_button_held:
+                return
+            button.setFixedWidth(width)
+            self.overlay_button_held = True
+        elif self.overlay_button_held:
+            button.setFixedWidth(natural)
+            button.setMinimumWidth(0)
+            button.setMaximumWidth(QWIDGETSIZE_MAX)
+            self.overlay_button_held = False
+        else:
+            return
+        # Place it in this frame: left to the event loop, its right edge
+        # would trail its new width by a pass or more.
+        settle_layouts(button, self.view.viewer_shell)
 
     def set_overlay_button_compact(self, compact: bool) -> None:
         if compact == self.overlay_button_compact:
@@ -498,7 +602,7 @@ class CanvasControls:
         # room inside the square; the accessible name and tooltip still say
         # what the button is.
         button.setProperty("compact", compact)
-        button.setText("" if compact else "Overlays")
+        button.setText("" if compact else self.button_text())
         if not compact:
             # Release the square before the repolish re-applies the sheet's
             # own minimum width.
@@ -509,6 +613,7 @@ class CanvasControls:
             style.unpolish(button)
             style.polish(button)
         if compact:
+            self.overlay_button_held = False
             button.setFixedWidth(FLOATING_CONTROL_SIZE_PX)
 
     def update_scale_bar(self) -> None:

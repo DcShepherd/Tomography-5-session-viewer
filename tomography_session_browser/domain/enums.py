@@ -10,9 +10,3 @@ class SessionKind(StrEnum):
     MULTIGRID = "multigrid"
     COLLECTION = "collection"
     SINGLE_COLLECTION = "single_collection"
-
-
-class WarningSeverity(StrEnum):
-    INFO = "info"
-    WARNING = "warning"
-    ERROR = "error"

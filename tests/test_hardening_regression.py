@@ -9,7 +9,6 @@ from tomography_session_browser.domain.models import Atlas, MrcMetadata, Overvie
 from tomography_session_browser.parsers.mdoc_parser import parse_mdoc
 from tomography_session_browser.parsers.session_scanner import SessionScanner
 from tomography_session_browser.parsers.tiltseries_parser import (
-    find_unpaired_mrcs,
     parse_tilt_series,
     parse_tilt_series_in_folder,
 )
@@ -72,7 +71,6 @@ def test_serialem_mrc_mdoc_name_pairs_with_stack(tmp_path: Path) -> None:
     assert len(series) == 1
     assert series[0].mrc_path == mrc_path
     assert series[0].mdoc_path == mdoc_path
-    assert find_unpaired_mrcs(tmp_path) == []
 
 
 def test_missing_mdoc_binning_uses_cross_checked_mrc_pixel_size(

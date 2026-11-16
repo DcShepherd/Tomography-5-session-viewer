@@ -75,4 +75,4 @@ def review_counts(rows: Iterable[RowReview]) -> ProcessingReviewCounts:
     captured = sum(bool(row.captures) for row in values) if captures is not None else None
     notes = tuple(dict.fromkeys(row.note for row in values if row.opened is None or row.captures is None))
     return ProcessingReviewCounts(opened, captures, captured, " ".join(notes) or
-                                  "Canonical review-history counts; independent of reconstruction version.")
+                                  "Counts from the review history")

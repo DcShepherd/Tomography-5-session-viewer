@@ -1,7 +1,7 @@
 """One Qt-free Context model for displayed values, evidence and copied text."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -9,9 +9,11 @@ from tomography_session_browser.domain.identity import entity_key_text
 from tomography_session_browser.domain.models import TiltSeries
 from tomography_session_browser.domain.recorded_metrics import RecordedMetric
 from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogram, Volume
-from tomography_session_browser.presentation.recorded_metrics import metric_number
+from tomography_session_browser.presentation.recorded_metrics import Ambiguous, display_factor, metric_number, single_metric
 from tomography_session_browser.presentation.tomogram_calibration import open_warnings
-from tomography_session_browser.presentation.volume_formatting import file_size, mode_text, triple
+from tomography_session_browser.presentation.volume_formatting import file_size, mode_text, per_axis_text, triple
+from tomography_session_browser.services.alignment_links import AlignmentLink
+from tomography_session_browser.services.denoising_links import DenoisingLink
 from tomography_session_browser.services.tomogram_links import TomogramLink
 from tomography_session_browser.services.volume.render import calibrated_spacing
 
@@ -40,6 +42,8 @@ class ContextValue:
     qualifier: str = ''
     evidence: tuple[ValueEvidence, ...] = ()
     state: ValueState = 'recorded'
+    #: A short mark beside the value, e.g. "By name" for a value lent on the name alone.
+    tag: str = ''
 
     @property
     def display(self) -> str:
@@ -71,6 +75,14 @@ class ParentContext:
 
 
 @dataclass(frozen=True, slots=True)
+class AlignmentAction:
+    """The link on the warning card ``card``: confirm the one same-name alignment job, or unlink it."""
+    card: str
+    label: str
+    kind: Literal['confirm', 'unlink']
+
+
+@dataclass(frozen=True, slots=True)
 class TomogramContext:
     row_key: str
     name: str
@@ -83,6 +95,9 @@ class TomogramContext:
     other_values: tuple[ContextValue, ...]
     header: tuple[ContextValue, ...]
     warnings: tuple[str, ...]
+    alignment_action: AlignmentAction | None = None
+    #: Where a cryoCARE denoised volume came from (batch 6), or ''.
+    provenance: str = ''
 
     def to_text(self) -> str:
         lines = [f'Tomogram: {self.name}', f'Version: {self.version}', 'Parent:',
@@ -91,7 +106,7 @@ class TomogramContext:
             lines += [f'  {tile.label} · {value.label}: {value.display}' for value in tile.values]
         lines += ['Volume:', *(f'  {value.label}: {value.display}' for value in self.volume),
                   'Files:', *(f'  {file.label}: {file.path}' for file in self.files),
-                  'How each value was found:', self.alignment]
+                  'How each value was found:', *([self.provenance] if self.provenance else []), self.alignment]
         for value in (*[value for tile in self.tiles for value in tile.values], *self.other_values):
             lines.append(value.detail)
         lines += ['Header geometry:', *(value.detail for value in self.header)]
@@ -114,15 +129,16 @@ def metric_value(metric: RecordedMetric, source: ProcessingSource | None, *, lab
 
 
 def metric_tile(item: Tomogram, source: ProcessingSource | None, label: str,
-                definitions: tuple[tuple[str, str], ...]) -> ValueTile:
+                definitions: tuple[tuple[str, str], ...], by_name: tuple[RecordedMetric, ...] = ()) -> ValueTile:
     values = []
     for definition, name in definitions:
-        metrics = tuple(metric for metric in item.processing.metrics if metric.definition == definition)
-        if len(metrics) == 1:
-            metric = metrics[0]
-            convert = definition == 'warp.ctf_specimen_thickness' and metric.unit == 'Å'
-            values.append(metric_value(metric, source, label=name, factor=.1 if convert else 1., unit='nm' if convert else None))
-        elif metrics:
+        found = single_metric(item, definition)
+        if isinstance(found, RecordedMetric):
+            factor, unit = display_factor(found)
+            value = metric_value(found, source, label=name, factor=factor, unit=unit)
+            values.append(replace(value, tag='By name') if found in by_name else value)
+        elif isinstance(found, Ambiguous):
+            metrics = tuple(metric for metric in item.processing.metrics if metric.definition == definition)
             values.append(ContextValue(name, 'Ambiguous recorded values',
                 evidence=tuple(metric_value(metric, source).evidence[0] for metric in metrics), state='ambiguous'))
     return ValueTile(label, tuple(values) or (ContextValue(label, 'Not recorded', state='not_recorded'),))
@@ -130,7 +146,8 @@ def metric_tile(item: Tomogram, source: ProcessingSource | None, label: str,
 
 def tomogram_context(item: Tomogram, volume: Volume | None, link: TomogramLink | None,
                      override: float | None = None, *, source: ProcessingSource | None = None,
-                     parents: tuple[TiltSeries, ...] = ()) -> TomogramContext:
+                     parents: tuple[TiltSeries, ...] = (), alignment: AlignmentLink | None = None,
+                     denoising: DenoisingLink | None = None) -> TomogramContext:
     # A stale widget must not lend another row's volume or calibration.
     if source is not None and source.id != item.source_id:
         source = None
@@ -149,7 +166,9 @@ def tomogram_context(item: Tomogram, volume: Volume | None, link: TomogramLink |
         ('Defocus', (('warp.ctf.defocus', 'Defocus'),)),
         ('Astigmatism', (('warp.ctf.defocus_delta', 'Astigmatism delta'),)),
     )
-    tiles = [metric_tile(item, source, label, definitions) for label, definitions in specs]
+    lent = alignment.offer if alignment is not None and alignment.status == 'confirmed' else None
+    by_name = lent.by_name.metrics if lent is not None else ()
+    tiles = [metric_tile(item, source, label, definitions, by_name) for label, definitions in specs]
     fields: list[ContextValue] = []
     header: list[ContextValue] = []
     files: list[ContextFile] = []
@@ -163,8 +182,10 @@ def tomogram_context(item: Tomogram, volume: Volume | None, link: TomogramLink |
         if spacing is None:
             voxel = ContextValue('Voxel', 'Unresolved', qualifier='Voxel navigation only; no resolved physical calibration.', state='unresolved')
         else:
-            value = f'{spacing[0]:g}' if len(set(spacing)) == 1 else ' × '.join(f'{value:g}' for value in spacing)
-            evidence = ValueEvidence('volume.effective_spacing', value, 'Å', str(volume.path),
+            # The tile collapses equal texts; the evidence keeps each recorded axis.
+            value = per_axis_text(spacing)
+            recorded = f'{spacing[0]:g}' if len(set(spacing)) == 1 else ' × '.join(f'{axis:g}' for axis in spacing)
+            evidence = ValueEvidence('volume.effective_spacing', recorded, 'Å', str(volume.path),
                 'User-confirmed spacing' if override is not None else 'MRC header spacing X, Y, Z',
                 'Display-only override for this version; source unchanged.' if override is not None else 'Resolved header calibration.')
             voxel = ContextValue('Voxel', value, 'Å', evidence.qualifier, (evidence,))
@@ -193,7 +214,19 @@ def tomogram_context(item: Tomogram, volume: Volume | None, link: TomogramLink |
             file = ContextFile('Alignment', source_path(source, line.removeprefix('Alignment log: ')))
             if not any(existing.path == file.path for existing in files):
                 files.append(file)
+    if (given := item.denoised_from) is not None:
+        files += [ContextFile('Denoising config', given.config), ContextFile('Even input', given.even),
+                  ContextFile('Odd input', given.odd)]
     warnings = tuple(dict.fromkeys((*item.warnings, *item.processing.warnings, *(link.warnings if link else ()),
                                    *(open_warnings(volume, override) if volume else ()))))
     return TomogramContext(item.id, item.name, volume.version if volume else 'Absent', parent, tuple(tiles),
-                           tuple(fields), tuple(files), item.processing.alignment, other, tuple(header), warnings)
+                           tuple(fields), tuple(files), item.processing.alignment, other, tuple(header), warnings,
+                           alignment_action(alignment), denoising.explanation if denoising is not None else '')
+
+
+def alignment_action(link: AlignmentLink | None) -> AlignmentAction | None:
+    if link is None or not link.signature:
+        return None
+    if link.status == 'confirmed':
+        return AlignmentAction(link.explanation, 'Unlink', 'unlink')
+    return AlignmentAction(link.explanation, 'Confirm by name…', 'confirm')

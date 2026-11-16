@@ -11,22 +11,23 @@ from tomography_session_browser.domain.display_names import count_phrase as _cou
 from tomography_session_browser.domain.identity import canonical_entity_key, dedupe_entities, entity_id_key
 from tomography_session_browser.domain.models import Atlas, BatchPosition, Overview, Sample, SearchMap, SearchTile, TiltSeries
 from tomography_session_browser.domain.status import RowStatus, ValidationStatus, parse_recorded_status
-from tomography_session_browser.parsers.path_utils import natural_key
 from tomography_session_browser.services.batch_inference import (
-    batch_inference_key,
     entity_owner_keys,
     inferred_batch_label_for_tilt,
     inferred_group_token,
-    inferred_label_matches_batch,
 )
 from tomography_session_browser.services.entity_links import (
     explicitly_linked_tilt_ids,
     batch_tilt_series,
     planned_exposures_for_batch_position,
+    planned_exposures_from_metadata,
     search_map_batches,
     unambiguous_tilts_for_ids,
 )
+from tomography_session_browser.services.acquisition_plan.evidence import VerifiedPlan
+from tomography_session_browser.services.acquisition_plan.coverage import Coverage
 from tomography_session_browser.services.timeline_service import datetime_sort_key
+from tomography_session_browser.parsers.path_utils import natural_key
 from tomography_session_browser.services.tilt_series_validation import (
     TiltSeriesValidation,
     actual_tilt_count,
@@ -168,14 +169,7 @@ class ItemStatusContext:
 
 @dataclass(frozen=True, slots=True)
 class BatchPositionStatusCounts:
-    """Validator-backed acquisition counts for one batch position.
-
-    The Atlas LOD overlay consumes this public, read-only summary instead of
-    duplicating the viewer-list classification rules. ``include_inferred`` is
-    deliberately configurable because orphaned failed tilt series remain
-    distinct markers on the Atlas rather than being promoted into a scientific
-    batch relationship.
-    """
+    """Validator-backed acquisition counts for one batch position."""
 
     planned: int
     complete: int
@@ -269,7 +263,7 @@ def _same_tile_note(names: tuple[str, ...]) -> str:
     return f"same tile as {shown}" + (f" and {len(names) - 3} more" if len(names) > 3 else "")
 
 
-def item_list_status(value: Any, context: ItemStatusContext | None, *, include_inferred: bool = True) -> ItemListStatus:
+def item_list_status(value: Any, context: ItemStatusContext | None) -> ItemListStatus:
     if context is None:
         return ItemListStatus(status=RowStatus.UNKNOWN, summary="")
     if isinstance(value, Overview):
@@ -279,29 +273,36 @@ def item_list_status(value: Any, context: ItemStatusContext | None, *, include_i
     if isinstance(value, SearchTile):
         return _search_tile_status(value, context)
     if isinstance(value, BatchPosition):
-        return _batch_position_status(value, context, include_inferred=include_inferred)
+        return _batch_position_status(value, context)
     if isinstance(value, TiltSeries):
         return _tilt_series_status(value, context)
     return ItemListStatus(status=RowStatus.UNKNOWN, summary="")
 
 
-def batch_position_status_counts(
-    batch: BatchPosition,
-    context: ItemStatusContext,
-    *,
-    include_inferred: bool = True,
-) -> BatchPositionStatusCounts:
-    """Return the shared planned/acquired outcome counts for ``batch``."""
+@dataclass(frozen=True, slots=True)
+class BatchOutcome:
+    counts: BatchPositionStatusCounts
+    #: The tilt series linked to the batch position: its status members, in acquisition order.
+    members: tuple[TiltSeries, ...]
+    interrupted: bool
+    status: RowStatus
+    recorded_exposures: int = 0
 
-    linked_tilts = _tilt_series_for_batch(
-        batch,
-        context,
-        include_inferred=include_inferred,
-    )
+    @property
+    def member_count(self) -> int:
+        return len(self.members)
+
+
+def batch_position_status_counts(batch: BatchPosition, context: ItemStatusContext) -> BatchPositionStatusCounts:
+    return batch_outcome(batch, context).counts
+
+
+def batch_outcome(batch: BatchPosition, context: ItemStatusContext) -> BatchOutcome:
+    linked_tilts = _tilt_series_for_batch(batch, context)
     planned = planned_exposures_for_batch_position(batch, linked_tilts)
     counts = _status_counts(linked_tilts, context)
     counts.missing += max(planned - len(linked_tilts), 0)
-    return BatchPositionStatusCounts(
+    details = BatchPositionStatusCounts(
         planned=planned,
         complete=counts.complete,
         incomplete=counts.incomplete,
@@ -309,6 +310,39 @@ def batch_position_status_counts(
         missing=counts.missing,
         unknown=counts.unknown,
     )
+
+    explicit_status = parse_recorded_status(batch.status)
+    interrupted = explicit_status == RowStatus.FAILED
+    recorded = planned_exposures_from_metadata(batch.metadata)
+    if interrupted:
+        if not linked_tilts or counts.failed == len(linked_tilts):
+            status = RowStatus.FAILED
+        elif counts.complete == len(linked_tilts) == recorded and _covers_recorded_exposures(batch, linked_tilts, context):
+            status = RowStatus.DONE
+        else:
+            status = RowStatus.INCOMPLETE
+    elif not planned:
+        status = explicit_status or RowStatus.UNKNOWN
+    else:
+        status = _status_from_counts(counts, planned=planned)
+    return BatchOutcome(details, tuple(linked_tilts), interrupted, status, recorded)
+
+
+
+def _covers_recorded_exposures(batch: BatchPosition, members: list[TiltSeries], context: ItemStatusContext) -> bool:
+    # Only per-slot recorded IDs establish planned population coverage here.
+    from tomography_session_browser.services.acquisition_plan.batch_slots import recorded_slot_tilt_ids
+
+    slots = recorded_slot_tilt_ids(batch)
+    if slots is None or len(slots) != len(members) or slots != {tilt.id for tilt in members}:
+        return False
+    for tilt in members:
+        verdict = validation_for(context.validations, tilt)
+        if verdict is None or not isinstance(verdict.plan, VerifiedPlan):
+            return False
+        if verdict.coverage is not Coverage.COVERED:
+            return False
+    return True
 
 
 def _overview_status(overview: Overview, context: ItemStatusContext) -> ItemListStatus:
@@ -321,7 +355,7 @@ def _overview_status(overview: Overview, context: ItemStatusContext) -> ItemList
         key=entity_id_key,
     )
     tilts = dedupe_entities(
-        [tilt for batch in batches for tilt in batch_tilt_series(batch, context.tilt_series)],
+        [tilt for batch in batches for tilt in _tilt_series_for_batch(batch, context)],
         key=entity_id_key,
     )
     status = RowStatus.WITH_ACQUISITIONS if batches else RowStatus.NO_ACQUISITIONS
@@ -446,35 +480,11 @@ def _search_tile_status(search_tile: SearchTile, context: ItemStatusContext) -> 
     )
 
 
-def _batch_position_status(batch: BatchPosition, context: ItemStatusContext, *, include_inferred: bool = True) -> ItemListStatus:
-    details = batch_position_status_counts(batch, context, include_inferred=include_inferred)
-    return batch_position_status_from_counts(batch, details)
-
-
-def batch_position_status_from_counts(batch: BatchPosition, details: BatchPositionStatusCounts) -> ItemListStatus:
-    """Classify already-derived counts for GUI, Atlas and presenter consumers."""
-    planned = details.planned
-    counts = _StatusCounts(
-        complete=details.complete,
-        incomplete=details.incomplete,
-        failed=details.failed,
-        missing=details.missing,
-        unknown=details.unknown,
-    )
-
-    explicit_status = parse_recorded_status(batch.status)
-    if planned == 0:
-        status = explicit_status or RowStatus.UNKNOWN
-    elif explicit_status == RowStatus.FAILED and not counts.failed:
-        # The microscope's "Failed" is one failed exposure, then the batch is
-        # classified like any other row: a batch that also completed a tilt
-        # series is partial, not failed. Failed only when nothing succeeded.
-        counts.failed += 1
-        counts.missing = max(counts.missing - 1, 0)
-        status = _status_from_counts(counts, planned=planned)
-    else:
-        status = _status_from_counts(counts, planned=planned)
-
+def _batch_position_status(batch: BatchPosition, context: ItemStatusContext) -> ItemListStatus:
+    outcome = batch_outcome(batch, context)
+    counts = outcome.counts
+    planned = counts.planned
+    status = outcome.status
     parts = [
         _count_phrase(planned, "exposure area") if planned else "no planned exposure areas"
     ]
@@ -486,7 +496,8 @@ def batch_position_status_from_counts(batch: BatchPosition, details: BatchPositi
         parts.append(f"{counts.incomplete} incomplete")
     if counts.missing:
         parts.append(f"{counts.missing} missing")
-    tooltip = _join_tooltip(batch.name or batch.id, parts, status=status)
+    notes = [*parts, "Acquisition reported an interruption."] if outcome.interrupted else parts
+    tooltip = _join_tooltip(batch.name or batch.id, notes, status=status)
     return ItemListStatus(status=status, summary=" · ".join(parts), tooltip=tooltip, tags=frozenset({status_tag(status)}))
 
 
@@ -499,10 +510,13 @@ def _tilt_series_status(tilt: TiltSeries, context: ItemStatusContext) -> ItemLis
     parts: list[str] = []
     if status != RowStatus.DONE:
         if validation is not None:
-            if validation.expected_count:
-                parts.append(f"{validation.actual_count} of {validation.expected_count} frames")
+            actual, expected = validation.observation.reported_count, validation.plan.expected_count
+            if actual is None:
+                parts.append("unknown frames")
+            elif expected:
+                parts.append(f"{actual} of {expected} frames")
             else:
-                parts.append(_count_phrase(validation.actual_count, "frame"))
+                parts.append(_count_phrase(actual, "frame"))
         else:
             actual = actual_tilt_count(tilt)
             parts.append(_count_phrase(actual, "frame") if actual else "unknown frames")
@@ -522,12 +536,8 @@ def _tilt_series_status(tilt: TiltSeries, context: ItemStatusContext) -> ItemLis
         tags.add(TAG_MISSING_MDOC)
     if inferred:
         tags.add(inferred_batch_tag(inferred, context.owners.get(tilt.id)))
-        inferred_key = batch_inference_key(inferred)
-        if not any(
-            inferred_label_matches_batch(inferred, batch, tilt_id=tilt.id, owners=context.owners)
-            for batch in context.batch_positions
-        ):
-            tags.add(TAG_ORPHANED_FAILED)
+        # A name label never joins a recorded batch (owner decision 1).
+        tags.add(TAG_ORPHANED_FAILED)
     return ItemListStatus(
         status=status,
         summary=" · ".join(parts),
@@ -624,34 +634,15 @@ def _status_from_validation(
     if validation.status == ValidationStatus.INCOMPLETE:
         return RowStatus.INCOMPLETE
     if validation.status == ValidationStatus.UNKNOWN:
-        return RowStatus.MISSING if validation.actual_count == 0 else RowStatus.UNKNOWN
+        return RowStatus.MISSING if validation.observation.reported_count == 0 else RowStatus.UNKNOWN
     return RowStatus.UNKNOWN
 
 
-def _tilt_series_for_batch(
-    batch: BatchPosition,
-    context: ItemStatusContext,
-    *,
-    include_inferred: bool = True,
-) -> list[TiltSeries]:
-    linked = batch_tilt_series(batch, context.tilt_series)
-    seen = {tilt.id for tilt in linked}
-    for tilt in context.tilt_series:
-        if tilt.id in seen:
-            continue
-        inferred_label = context.inferred_batch_labels.get(tilt.id) if include_inferred else None
-        # Same name *and* same grid: "Position_1" repeats on every grid.
-        if (inferred_label is not None
-                and inferred_label_matches_batch(inferred_label, batch, tilt_id=tilt.id, owners=context.owners)):
-            linked.append(tilt)
-            seen.add(tilt.id)
-    linked.sort(
-        key=lambda tilt: (
-            *datetime_sort_key(tilt.acquisition_time_start),
-            natural_key(tilt.name or tilt.id),
-        )
+def _tilt_series_for_batch(batch: BatchPosition, context: ItemStatusContext) -> list[TiltSeries]:
+    return sorted(
+        batch_tilt_series(batch, context.tilt_series, batch_positions=context.batch_positions),
+        key=lambda tilt: (*datetime_sort_key(tilt.acquisition_time_start), natural_key(tilt.name or tilt.id)),
     )
-    return linked
 
 
 def search_map_tile_counts(search_map: SearchMap) -> tuple[int, int]:

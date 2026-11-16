@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from tomography_session_browser.domain.display_names import count_phrase
+from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.domain.tomogram_tags import ChangeKind, TagAssignment, TagProject, TomogramTags
 from tomography_session_browser.domain.tomograms import ProcessingSource
 from tomography_session_browser.presentation.volume_formatting import mode_text
@@ -138,10 +139,27 @@ def issue_text(row: AcceptanceRow) -> str:
     }[row.issue]
 
 
-def unmatched_count(project: TagProject, folders: tuple[ProcessingSource, ...]) -> int:
+@dataclass(frozen=True, slots=True)
+class Unmatched:
+    """Saved rows with no loaded tomogram."""
+
+    count: int
+    #: Rows of a folder loaded as an alignment job: that job lists no tomograms
+    #: by design (decision 6), so finding a moved folder cannot match them (ruling R4).
+    removed: int
+
+    @property
+    def movable(self) -> bool:
+        return self.count > self.removed
+
+
+def unmatched(project: TagProject, folders: tuple[ProcessingSource, ...]) -> Unmatched:
     matched = {(item.binding.ref.source, item.binding.ref.relative)
                for item in bind_rows(project, folders) if item.binding.ref is not None}
-    return sum((row.ref.source, row.ref.relative) not in matched for row in project.tomograms)
+    alignment = {path_identity_key(folder.path) for folder in folders if folder.pipeline == "Alignment"}
+    removed = {source.id for source in project.sources if path_identity_key(source.path) in alignment}
+    rows = [row for row in project.tomograms if (row.ref.source, row.ref.relative) not in matched]
+    return Unmatched(len(rows), sum(row.ref.source in removed for row in rows))
 
 
 def review_total(rows: tuple[AcceptanceRow, ...]) -> str:

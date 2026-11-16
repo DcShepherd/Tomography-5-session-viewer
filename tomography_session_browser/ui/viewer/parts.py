@@ -11,7 +11,10 @@ if TYPE_CHECKING:
     from tomography_session_browser.ui.viewer.viewer_header import ViewerHeader
     from tomography_session_browser.ui.viewer.overlay_panel import OverlayPanel
     from tomography_session_browser.ui.viewer.canvas_controls import CanvasControls
+    from tomography_session_browser.ui.viewer.collection_filter import CollectionFilter
+    from tomography_session_browser.ui.viewer.colour_by import ColourBy
     from tomography_session_browser.ui.viewer.frame_scrubber import FrameScrubber
+    from tomography_session_browser.ui.viewer.outside_close import OutsideClose
     from tomography_session_browser.ui.viewer.mrc_loading import PreviewLoader
     from tomography_session_browser.ui.viewer.export import ViewerExport
     from tomography_session_browser.ui.viewer.tab_selection import TabSelection
@@ -29,10 +32,13 @@ class PreviewParts:
 @dataclass(frozen=True)
 class TabParts:
     canvas_controls: CanvasControls
+    collection_filter: CollectionFilter
+    colour_by: ColourBy
     export: ViewerExport
     frame_scrubber: FrameScrubber
     list_pane: ViewerListPane
     mrc_loading: PreviewLoader
+    outside_close: OutsideClose
     overlay_panel: OverlayPanel
     tab_selection: TabSelection
     viewer_header: ViewerHeader

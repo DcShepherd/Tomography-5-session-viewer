@@ -40,6 +40,7 @@ LOGGER = logging.getLogger(__name__)
 
 ASSETS = Path(__file__).resolve().parents[2] / "assets" / "loader"
 QML_PATH = ASSETS / "orbs.qml"
+#: The shader source; a test compares it with the constants mirrored below.
 SHADER_SOURCE_PATH = ASSETS / "orbs.frag"
 SHADER_PATH = ASSETS / "orbs.frag.qsb"
 

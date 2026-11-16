@@ -20,6 +20,7 @@ from tomography_session_browser.presentation.tomogram_list_filter import ListFil
 from tomography_session_browser.presentation.design_tokens import (RADIUS_CONTROL, SPACE_M, SPACE_S, STATUS_TONE_COLOURS,
                                                                    TYPE_BODY, TYPE_CAPTION, ThemePalette, readable_tone)
 from tomography_session_browser.presentation.tomogram_state import ReviewSegment, TomogramViewState
+from tomography_session_browser.presentation.tomogram_movie_history import NO_MOVIES
 from tomography_session_browser.presentation.tomogram_versions import review_versions
 from tomography_session_browser.presentation.viewer_entries import GroupHeader
 from tomography_session_browser.ui.motion import ItemHoverAnimator, blend, veil
@@ -28,11 +29,11 @@ from tomography_session_browser.ui.widgets.smooth_tree import SmoothScrollTree
 from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.tomograms.layout_controls import Versions
-from tomography_session_browser.ui.tomograms.capture_column import CaptureColumn
-from tomography_session_browser.ui.tomograms.movie_marks import MovieMarks
+from tomography_session_browser.ui.tomograms.count_columns import CountColumns, capture_tooltip, film_tooltip
 from tomography_session_browser.ui.viewer.constants import LIST_GROUP_SHOWN_ROLE, LIST_ROW_SINGLE_HEIGHT_PX, LIST_REFILL_VEIL_OPACITY, VIEWER_ENTRY_ROLE
 from tomography_session_browser.ui.viewer.group_rows import make_group_row, paint_group_row
 from tomography_session_browser.ui.viewer.list_rows import fit_list_name
+from tomography_session_browser.ui.filter_key import with_filter_key
 
 
 class SelectorDelegate(QStyledItemDelegate):
@@ -127,12 +128,9 @@ class ReviewRowDelegate(QStyledItemDelegate):
         painter.setPen(QPen(QColor(theme.border), 1))
         painter.drawLine(rect.bottomLeft(), rect.bottomRight())
         left, right = rect.left() + SPACE_M, rect.right() - SPACE_M
-        if self.owner.capture_column.width:
-            self.owner.capture_column.paint(painter, option, key)
-            right = self.owner.capture_column.rect(option.rect).left() - SPACE_S
-        if self.owner.movie_marks.width:
-            self.owner.movie_marks.paint(painter, option.rect, key)
-            right = self.owner.movie_marks.rect(option.rect).left() - SPACE_S
+        if self.owner.counts.visible:
+            self.owner.counts.paint(painter, option, key)
+            right = self.owner.counts.left(option.rect) - SPACE_S
         value = row_value(row, self.owner.sort.currentText())
         if value:
             font = QFont(option.font)
@@ -208,7 +206,7 @@ class TomogramList(QWidget):
                            ("Needs attention", ReviewSegment.ATTENTION)):
             self.segment.addItem(label, key)
         self.segment.setAccessibleName("Tomogram review segment")
-        self.segment.setToolTip("Show all tomograms, the tomograms that you did not open, or the tomograms with warnings")
+        self.segment.setToolTip("Select which tomograms to show")
         self.segment.rebuild()
         self.segment.hide()
         self.segment.segments.setAccessibleName("Tomogram review segment")
@@ -220,14 +218,14 @@ class TomogramList(QWidget):
         self.query.setObjectName("viewerFilter")
         self.query.setPlaceholderText("Filter tomograms…")
         self.query.setAccessibleName("Filter tomograms")
+        self.query.setToolTip(with_filter_key("Filter the tomograms by name"))
         self.query.setClearButtonEnabled(True)
         self.sort = QComboBox(self)
         self.sort.setObjectName("tomogramSort")
         self.sort.addItems(SORTS)
         self.sort.setAccessibleName("Sort tomograms")
-        self.sort.setToolTip("Sort the tomograms in each group. Residual: the IMOD tiltalign mean residual, in nm. "
-                             "Thickness: the Warp estimate. Values in other units go next. Tomograms with no value go last. "
-                             "These are recorded values. The app cannot confirm that they apply to this reconstruction.")
+        self.sort.setToolTip("Sort each group. Residual: IMOD tiltalign mean, nm. Thickness: Warp estimate. "
+                             "These are recorded values; they may not apply to this reconstruction.")
         self.sort_tooltip = self.sort.toolTip()
         self.sort.currentIndexChanged.connect(self.sort_changed)
         self.tree = SmoothScrollTree(self)
@@ -238,8 +236,10 @@ class TomogramList(QWidget):
         self.tree.setIndentation(0)
         self.tree.setMouseTracking(True)
         self.tree.setItemDelegate(ReviewRowDelegate(self))
-        self.capture_column = CaptureColumn(self)
-        self.movie_marks = MovieMarks(self)
+        # Right to left: the camera at the row's end, the film just left of it.
+        self.counts = CountColumns(self, (("camera", "camera", capture_tooltip), ("film", "film", film_tooltip)))
+        self.capture_column = self.counts.by_name["camera"]
+        self.movie_column = self.counts.by_name["film"]
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.context_menu)
         self.compact = QComboBox(parent)
@@ -271,14 +271,14 @@ class TomogramList(QWidget):
         self.provenance = QLabel(self.route_chip)
         self.provenance.setWordWrap(True)
         self.provenance.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.remove_route_button = link_button("×", self.route_chip, tooltip="Remove the Summary restriction; keep text and segment filters")
+        self.remove_route_button = link_button("×", self.route_chip, tooltip="Remove only the Summary restriction")
         self.remove_route_button.setAccessibleName("Remove Summary restriction")
         self.remove_route_button.clicked.connect(self.remove_route)
         chip_layout.addWidget(self.provenance, 1)
         chip_layout.addWidget(self.remove_route_button)
         self.clear_button = link_button(parent=self)
         self.clear_button.setText("Clear all filters")
-        self.clear_button.setToolTip("Clear text, segment and the Summary row restriction")
+        self.clear_button.setToolTip("Clear all filters")
         self.clear_button.clicked.connect(self.clear_filters)
         result_layout.addWidget(self.result)
         result_layout.addStretch(1)
@@ -288,12 +288,27 @@ class TomogramList(QWidget):
         layout.addWidget(self.tree, 1)
         self.refresh_theme()
 
-    def install(self, payload: PreparedTomogramTab) -> None:
+    def install(self, payload: PreparedTomogramTab, *, rebuild: bool = True) -> None:
         self.rows = {row.tomogram.id: row for row in payload.rows}
         self.name_prefixes = group_name_prefixes(payload.rows)
         self.membership = None
         self.route_keys, self.scope_label = None, ""
+        if rebuild:
+            self.rebuild()
+
+    def restore_arrival_filters(self, filters: ListFilter, membership: frozenset[str] | None) -> None:
+        self.tag_filter = filters.tags
+        self.route_keys = filters.route_keys.intersection(self.rows) if filters.route_keys is not None else None
+        self.scope_label = filters.scope_label
+        self.membership = membership.intersection(self.rows) if membership is not None else None
+        with QSignalBlocker(self.query), QSignalBlocker(self.segment), QSignalBlocker(self.sort):
+            self.query.setText(filters.query)
+            self.set_segment(filters.segment)
+            sort, notice = restored_sort(filters.sort)
+            self.sort.setCurrentText(sort)
+        self.set_ordering_notice(notice)
         self.rebuild()
+        self.filter_restored.emit()
 
     def filters_changed(self) -> None:
         self.membership = None
@@ -316,10 +331,14 @@ class TomogramList(QWidget):
         self.filters_changed()
 
     def restrict(self, keys: frozenset[str], label: str) -> None:
+        previous_route = self.route_keys
         self.route_keys = keys.intersection(self.rows)
         self.scope_label = label or "Summary"
-        self.membership = self.route_keys if self.segment_key() != ReviewSegment.ATTENTION else frozenset(
-            key for key in self.route_keys if self.needs_attention(self.rows[key]))
+        self.membership = (
+            self.membership & self.route_keys
+            if self.membership is not None and previous_route is None
+            else None
+        )
         self.rebuild()
 
     def sort_changed(self) -> None:
@@ -422,8 +441,7 @@ class TomogramList(QWidget):
         veil(self.tree.viewport(), QColor(current_palette().panel), start_opacity=LIST_REFILL_VEIL_OPACITY)
 
     def refresh_counts(self) -> None:
-        self.capture_column.reflow()
-        self.movie_marks.reflow()
+        self.counts.reflow()
         self.result.setText(f"{len(self.ordered_keys)} of {len(self.rows)} shown")
         self.provenance.setText(f"from {self.scope_label}" if self.route_keys is not None else "")
         self.route_chip.setVisible(self.route_keys is not None)
@@ -432,13 +450,12 @@ class TomogramList(QWidget):
         self.segment.setItemText(0, f"All · {len(self.rows)}")
         self.segment.setItemText(1, f"Not opened · {not_opened}")
         self.segment.setItemText(2, f"Needs attention · {sum(self.needs_attention(row) for row in self.rows.values())}")
-        self.segment.setItemData(0, f"Show all {len(self.rows)} tomograms. Names in bold are tomograms that you did not open. "
-                                 "Names in grey are tomograms that you opened.",Qt.ItemDataRole.ToolTipRole)
+        self.segment.setItemData(0, f"Show all {len(self.rows)} tomograms. Bold names are not opened.",Qt.ItemDataRole.ToolTipRole)
         self.segment.setItemData(2, f"Show the {sum(self.needs_attention(row) for row in self.rows.values())} tomograms "
-                                 "with warnings. A tomogram that you correct stays until you change the filter.",
+                                 "with warnings. Corrected tomograms stay until you change the filter.",
                                  Qt.ItemDataRole.ToolTipRole)
-        self.segment.setItemData(1, f"Show the {not_opened} tomograms that you did not open. A tomogram that you open "
-                                 "stays until you change the filter.", Qt.ItemDataRole.ToolTipRole)
+        self.segment.setItemData(1, f"Show the {not_opened} tomograms that you did not open. Opened tomograms stay "
+                                 "until you change the filter.", Qt.ItemDataRole.ToolTipRole)
         self.segment.setToolTip(self.segment.currentData(Qt.ItemDataRole.ToolTipRole))
         self.segment.relabel()
         self.segment.sync()  # Restores also use a signal blocker around the combo.
@@ -446,10 +463,26 @@ class TomogramList(QWidget):
     def refresh_theme(self) -> None:
         for index in range(self.sort.count()):
             self.sort.setItemIcon(index, themed_icon("arrow-up-down", size=14))
-        self.capture_column.icon = themed_icon("camera", size=14)
-        self.movie_marks.icon = themed_icon("film", size=14)
-        self.capture_column.reflow()
+        for slot in self.counts.slots:
+            slot.refresh_theme()
+        self.counts.reflow()
         self.tree.viewport().update()
+
+    def capture_anchor(self) -> tuple[str, int]:
+        item = self.tree.itemAt(0, 0)
+        while item is not None:
+            key = item.data(0, Qt.ItemDataRole.UserRole)
+            if key in self.items_by_key:
+                return key, self.tree.visualItemRect(item).top()
+            item = self.tree.itemBelow(item)
+        return "", 0
+
+    def restore_anchor(self, key: str, offset: int) -> None:
+        item = self.items_by_key.get(key)
+        if item is None:
+            return
+        top = self.tree.visualItemRect(item).top()
+        self.tree.scroller.scroll_to(self.tree.verticalScrollBar().value() + top - offset, animate=False)
 
     def select(self, key: str) -> None:
         self.selected_key = key
@@ -492,7 +525,13 @@ class TomogramList(QWidget):
         if not isinstance(key, str):
             return
         menu = QMenu(self)
+        menu.setToolTipsVisible(True)
         menu.addAction("Captures…", lambda: self.capture_column.requested.emit(key))
+        movies = menu.addAction("Movies…", lambda: self.movie_column.requested.emit(key))
+        # Unknown while the count loads: the menu then says so itself.
+        if self.movie_column.available and not self.movie_column.counts.get(key, 0):
+            movies.setEnabled(False)
+            movies.setToolTip(NO_MOVIES)
         action = menu.addAction("Mark as not opened")
         if menu.exec(self.tree.viewport().mapToGlobal(point)) is action:
             self.opened.discard(key)

@@ -61,6 +61,25 @@ def calibrated_spacing(volume: Volume, override: float | None) -> tuple[float, f
     return (x, y, z)
 
 
+#: Relative spread that still counts as one spacing: two float32 epsilons. An MRC
+#: records each cell length in float32 and the app divides by the voxel count, so
+#: a single pixel size can differ across axes by at most about one epsilon.
+UNIFORM_SPACING_TOLERANCE = 2 ** -22
+
+
+def uniform_spacing(spacing: tuple[float | None, float | None, float | None]) -> float | None:
+    """The X spacing when all three axes record one value, else None.
+
+    For the calibration checks only: it classifies, it never normalises. The
+    recorded tuple and ``calibrated_spacing`` stay as they are.
+    """
+    values = tuple(value for value in spacing if value is not None and math.isfinite(value) and value > 0)
+    if len(values) != 3:
+        return None
+    top = max(values)
+    return values[0] if top - min(values) <= top * UNIFORM_SPACING_TOLERANCE else None
+
+
 def viewport_region(shape_xy: tuple[int, int], size: tuple[int, int], zoom: float | None,
                     centre: tuple[float, float] | None, aspect_y: float = 1) -> tuple[
                         tuple[float, float, float, float], tuple[int, int], tuple[int, int]]:

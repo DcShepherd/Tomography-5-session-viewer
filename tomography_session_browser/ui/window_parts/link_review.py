@@ -1,4 +1,8 @@
-"""One QWidget owns background decision I/O, canonical publication and UI actions."""
+"""One QWidget owns background decision I/O, canonical publication and UI actions.
+
+Parent and alignment decisions live in two stores; every read and write
+returns both snapshots, ``(parent, alignment)``, so one adoption publishes them.
+"""
 from tomography_session_browser.ui.widgets.link_button import link_button
 import logging
 from PySide6.QtCore import QThreadPool, QTimer, Slot
@@ -6,11 +10,13 @@ from PySide6.QtWidgets import QWidget
 
 from tomography_session_browser.domain.link_confirmations import ConfirmationSnapshot
 from tomography_session_browser.presentation.tab_keys import TabKey
-from tomography_session_browser.presentation.tomogram_link_review import name_link_rows
-from tomography_session_browser.services.link_confirmations import LinkConfirmationStore, verify_confirmation_sources
+from tomography_session_browser.presentation.tomogram_link_review import alignment_prompt, name_link_rows
+from tomography_session_browser.services.link_confirmations import (LinkConfirmationStore, verify_alignment_sources,
+                                                                    verify_confirmation_sources)
 from tomography_session_browser.ui.loading.tasks import BackgroundTask, TaskSignals
 from tomography_session_browser.ui.shell.chrome import TAB_LABELS
 from tomography_session_browser.ui.tomograms.link_review import NameLinkReview
+from tomography_session_browser.ui.widgets.message_sheet import choose_action
 
 
 class LinkReviewController(QWidget):
@@ -19,7 +25,9 @@ class LinkReviewController(QWidget):
         self.hide()
         self.window = window
         self.snapshot = ConfirmationSnapshot()
+        self.alignment_snapshot = ConfirmationSnapshot()
         self.store = LinkConfirmationStore()
+        self.alignment_store = LinkConfirmationStore.alignment()
         self.pending = None
         self.busy = False
         self.dialog = None
@@ -50,19 +58,25 @@ class LinkReviewController(QWidget):
             logger=logging.getLogger(__name__), failure_log='Name-link decision storage failed')
         QThreadPool.globalInstance().start(task)
 
+    def read_both(self):
+        stores = self.store, self.alignment_store
+        return lambda: tuple(store.read() for store in stores)
+
     def reload(self):
-        self.run(self.store.read, 'read')
+        self.run(self.read_both(), 'read')
 
     @Slot(object, object)
-    def finished(self, action, snapshot):
+    def finished(self, action, snapshots):
         self.busy = False
         if self.window.parts.loading.closed:
             return
-        if snapshot.issue:
-            self.failed(action, snapshot.issue)
-            return
-        self.pending = snapshot
-        if action == 'write' and self.dialog is not None:
+        # A broken store keeps its last snapshot; the other one still publishes.
+        issue = ' '.join(snapshot.issue for snapshot in snapshots if snapshot.issue)
+        self.pending = tuple(current if snapshot.issue else snapshot
+                             for snapshot, current in zip(snapshots, (self.snapshot, self.alignment_snapshot)))
+        if issue:
+            self.failed(action, issue)
+        elif action == 'write' and self.dialog is not None:
             self.dialog.accept()
         self.adopt()
 
@@ -85,12 +99,18 @@ class LinkReviewController(QWidget):
         if state.loading.loading_task_active or parts.viewers.scope_preparation.running is not None:
             QTimer.singleShot(30, self, self.adopt)
             return
-        snapshot, self.pending = self.pending, None
+        (snapshot, alignment), self.pending = self.pending, None
         changed = snapshot.records != self.snapshot.records
-        self.snapshot = snapshot
-        if changed and state.review.workspace.has_sources:
+        moved = alignment.records != self.alignment_snapshot.records
+        self.snapshot, self.alignment_snapshot = snapshot, alignment
+        if (changed or moved) and state.review.workspace.has_sources:
             parts.viewers.capture_viewer_states()
-            state.review.workspace = state.review.workspace.with_link_confirmations(snapshot.records)
+            workspace = state.review.workspace
+            if changed:
+                workspace = workspace.with_link_confirmations(snapshot.records)
+            if moved:
+                workspace = workspace.with_alignment_confirmations(alignment.records)
+            state.review.workspace = workspace
             state.review.scope = state.review.workspace.rebind_scope(state.review.scope)
             parts.history.prune_history()
             parts.dashboard_host.invalidate()
@@ -111,7 +131,7 @@ class LinkReviewController(QWidget):
             self.window.statusBar().showMessage('Wait for source/decision loading before reviewing name links.')
             return
         self.open_source = source_id
-        self.run(self.store.read, 'review')
+        self.run(self.read_both(), 'review')
 
     def show_review(self, source_id):
         if self.dialog is not None:
@@ -120,7 +140,7 @@ class LinkReviewController(QWidget):
         self.dialog.decisions_requested.connect(self.submit)
         self.dialog.show()
 
-    def submit(self, changes):
+    def submit(self, changes, alignment=()):
         if self.busy or self.window.state.loading.loading_task_active:
             message = 'Wait for source/decision loading, then review the current pairs before saving.'
             self.window.statusBar().showMessage(message)
@@ -128,31 +148,48 @@ class LinkReviewController(QWidget):
                 self.dialog.set_busy(False)
                 self.dialog.feedback.setText(message)
             return
-        current = {(row.source_id, row.tomogram_id): row for row in self.rows()}
-        if any(current.get((record.source_id, record.tomogram_id)) is None or
-               current[(record.source_id, record.tomogram_id)].signature != record.signature or
-               current[(record.source_id, record.tomogram_id)].target_key != record.target_key for record in changes):
+        current = {(row.kind, row.source_id, row.tomogram_id): (row.signature, row.target_key) for row in self.rows()}
+        if any(current.get((kind, record.source_id, record.tomogram_id)) != (record.signature, record.target_key)
+               for kind, records in (('parent', changes), ('alignment', alignment)) for record in records):
             self.failed('write', 'The proposed pairs changed. Reopen Review; no decisions were saved.')
             return
         workspace = self.window.workspace
         protected = workspace.source_roots
-        snapshot, store = self.snapshot, self.store
-        confirmations = tuple(record for record in changes if record.decision == 'confirmed')
-        items = tuple(item for source in workspace.processing_sources for item in source.tomograms
-                      if any(record.tomogram_id == item.id for record in confirmations))
+        snapshots, stores = (self.snapshot, self.alignment_snapshot), (self.store, self.alignment_store)
+        parents = {record.tomogram_id for record in changes if record.decision == 'confirmed'}
+        lent = {record.tomogram_id for record in alignment if record.decision == 'confirmed'}
+        rows = {item.id: item for source in workspace.processing_sources for item in source.tomograms}
         targets = tuple(target for target in workspace.acquisition_index.series
-                        if any(record.target_key == target.key for record in confirmations))
+                        if any(record.target_key == target.key for record in changes if record.decision == 'confirmed'))
+        offers = tuple(link.offer for key, link in workspace.alignment_links.items() if key in lent and link.offer is not None)
         def save():
-            verify_confirmation_sources(items, targets)
-            return store.write(snapshot, changes, protected)
+            verify_confirmation_sources(tuple(rows[key] for key in parents if key in rows), targets)
+            verify_alignment_sources(tuple(rows[key] for key in lent if key in rows), offers)
+            return tuple(store.write(snapshot, records, protected) if records else snapshot
+                         for store, snapshot, records in zip(stores, snapshots, (changes, alignment)))
         self.run(save, 'write')
+
+    def alignment_requested(self, tomogram_id, kind):
+        """The warning card's link: confirm the one same-name alignment job by name, or unlink it."""
+        rows = tuple(row for row in self.rows() if row.kind == 'alignment' and row.tomogram_id == tomogram_id)
+        if len(rows) != 1:
+            return
+        row = rows[0]
+        if kind == 'unlink' and row.decision == 'confirmed':
+            self.submit((), (row.record('revoked'),))
+            return
+        items = [item for source in self.window.workspace.processing_sources for item in source.tomograms
+                 if item.id == tomogram_id]
+        if kind == 'confirm' and row.decision != 'confirmed' and len(items) == 1:
+            if choose_action(self.window, alignment_prompt(row, items[0].name)) == 'confirm':
+                self.submit((), (row.record('confirmed'),))
 
     def sync(self, *_):
         workspace, ui = self.window.workspace, self.window.ui
         current = ui.tomogram_tab.current_object()
         rows = self.rows(current.source_id) if current is not None else ()
         count = sum(row.decision != 'confirmed' for row in rows)
-        self.review.setText(f'{count} match by name only · Review' if count else f'{len(rows)} confirmed name links · Review')
+        self.review.setText(f'{count} by name only · Review' if count else f'{len(rows)} confirmed name links · Review')
         ui.tomogram_tab.status.show_action(self.review, bool(rows))
         self.review.setToolTip("Name-link decisions are being saved." if self.busy else "Review name-only parent links")
         self.unlink.setToolTip("Name-link decisions are being saved." if self.busy else "Remove this confirmed name-only parent link")

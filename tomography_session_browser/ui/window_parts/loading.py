@@ -13,7 +13,7 @@ from tomography_session_browser.domain.tomograms import ProcessingSource
 from tomography_session_browser.diagnostics.profiling import NULL_PROFILE, LoadingProfiler
 from tomography_session_browser.presentation.describe.context import describe_project_group
 from tomography_session_browser.presentation.load_results import (
-    ResultSurface, load_result_content, load_result_state, result_surface,
+    ResultSurface, folder_progress_detail, load_result_content, load_result_state, result_surface,
 )
 from tomography_session_browser.presentation.prepared_session import PreparedSessionUi
 from tomography_session_browser.presentation.project_tree import folded_session_for_sample
@@ -212,12 +212,16 @@ class SessionLoading(QObject):
 
     def apply_workspace(self, workspace: Workspace, scope: Scope) -> None:
         from datetime import datetime
-        records = self.parts.link_review.snapshot.records
-        if workspace.link_confirmations != records:
-            workspace = workspace.with_link_confirmations(records)
+        review = self.parts.link_review
+        if workspace.link_confirmations != review.snapshot.records:
+            workspace = workspace.with_link_confirmations(review.snapshot.records)
+        if workspace.alignment_confirmations != review.alignment_snapshot.records:
+            workspace = workspace.with_alignment_confirmations(review.alignment_snapshot.records)
         self.state.review.workspace, self.state.review.scope = workspace, workspace.rebind_scope(scope)
         self.state.review.tomogram_review.retain_sources(workspace.processing_sources)
-        self.state.review.source_reads = self.state.review.source_reads.admitted(workspace.processing_sources, datetime.now().astimezone())
+        # Processing folders and sessions (D16): a folder read again gets a new time.
+        self.state.review.source_reads = self.state.review.source_reads.admitted(
+            (*workspace.processing_sources, *workspace.sessions), datetime.now().astimezone())
         QTimer.singleShot(0, self.parts.link_review, self.parts.link_review.reload)
 
 
@@ -263,7 +267,9 @@ class SessionLoading(QObject):
         path = request.path
         self.state.loading.loading_task_active = True
         self.parts.loading.set_loading_stage("discover")
-        self.ui.loading_overlay.update_loading_message("Discovering files...", detail=Path(path).name)
+        # "Folder 2 of 4 · name" for a batch (E7); the name alone for one folder.
+        self.ui.loading_overlay.update_loading_message(
+            "Discovering files...", detail=folder_progress_detail(Path(path).name, batch.pass_position(attempt)))
         self.parts.loading.set_loading_status("Discovering files...", force=True)
         # Build the profile on the main thread so the stall monitor can
         # share it with the worker's parsing run. The worker calls
@@ -487,7 +493,7 @@ class SessionLoading(QObject):
         self.state.review.current_path = str(session.path)
         # The load's scope is its project group, known once the sessions are in place.
         # Mid-load this stays off: ``_finish_loading`` turns it on again.
-        self.ui.refresh_button.setEnabled(not self.state.loading.loading_task_active)
+        self.ui.refresh_action.setEnabled(not self.state.loading.loading_task_active)
         self.parts.scopes.populate_tree()
 
 
@@ -517,8 +523,13 @@ class SessionLoading(QObject):
             self.parts.context.show_scope_description(
                 f"{type(active_group).__name__}:{id(active_group)}",
                 active_group.display_name,
-                lambda: describe_project_group(active_group, self.state.review.workspace),
+                lambda: describe_project_group(active_group, self.state.review.workspace, self.state.review.source_reads),
             )
+        elif isinstance(session, ProcessingSource):
+            # A fully placed folder has no row of its own (``initial_source_scope``):
+            # Context describes the scope the load landed on, never the folder object.
+            self.state.review.preserve_tree_root_context = True
+            self.parts.context.sync_context_panel_to_active_scope()
         else:
             self.parts.context.show_scope_description(
                 f"{type(session).__name__}:{id(session)}",
@@ -569,10 +580,12 @@ class SessionLoading(QObject):
         # into a stale profile.
         self.state.loading.instrumentation.unbind()
         self.ui.loading_progress.setVisible(False)
-        self.ui.loading_overlay.show_loading(message)
+        # The first load into an empty project ends in the project tree, however
+        # it started; a later load gives focus back to where it was (D12, Q3).
+        self.ui.loading_overlay.show_loading(message, return_focus=self.state.review.workspace.has_sources)
         self.parts.loading.set_loading_status(message, force=True)
-        self.ui.open_button.setEnabled(False)
-        self.ui.refresh_button.setEnabled(False)
+        self.ui.open_action.setEnabled(False)
+        self.ui.refresh_action.setEnabled(False)
         # A report started now would read the project while it changes.
         self.ui.report_action.setEnabled(False)
         # A drop is refused while this load runs; what an earlier drop
@@ -648,8 +661,8 @@ class SessionLoading(QObject):
         self.pending_receipt_batch = batch.id if batch is not None else None
         self.ui.loading_overlay.hide_loading(fade=fade)
         self.parts.loading.show_pending_load_result()
-        self.ui.open_button.setEnabled(True)
-        self.ui.refresh_button.setEnabled(self.state.review.workspace.has_sources)
+        self.ui.open_action.setEnabled(True)
+        self.ui.refresh_action.setEnabled(self.state.review.workspace.has_sources)
         self.parts.report.refresh_action()
         heap.settle()
 

@@ -116,6 +116,11 @@ QWidget#viewerOverlayPanel QCheckBox:hover {{
     color: {canvas_text};
 }}
 
+/* The presets under Show: the panel's main choice, so in the full text colour. */
+QWidget#viewerOverlayPanel QRadioButton#viewerOverlayPreset {{
+    color: {canvas_text};
+}}
+
 QWidget#viewerOverlayPanel QCheckBox::indicator {{
     border: 1px solid {canvas_border_strong};
     background: {canvas_surface};
@@ -176,6 +181,89 @@ QWidget#viewerOverlayPanel QScrollBar:vertical {{
 
 QWidget#viewerOverlayPanel QScrollBar::handle:vertical {{
     background: {canvas_scroll_thumb};
+}}
+
+/* The Atlas Positions card above the scale bar: the same surface as the panel. */
+QFrame#positionsCard {{
+    background: {canvas_surface};
+    border: 1px solid {canvas_border_strong};
+    border-radius: {radius_card}px;
+}}
+
+QFrame#positionsCard QLabel#positionsCardTitle,
+QFrame#positionsCard QLabel#positionsCardLabel {{
+    color: {canvas_text};
+    background: transparent;
+}}
+
+QFrame#positionsCard QLabel#positionsCardCount {{
+    color: {canvas_text_muted};
+    background: transparent;
+}}
+
+QFrame#positionsCard QFrame#positionsCardRule {{
+    background: {canvas_border_strong};
+    border: none;
+    margin: 0 12px;
+}}
+
+QFrame#positionsCard QToolButton#positionsCardCollapse {{
+    color: {canvas_text_muted};
+    background: transparent;
+    border: none;
+}}
+
+QFrame#positionsCard QPushButton#positionsCardFrom {{
+    background: {canvas_surface};
+    border: 1px solid {canvas_control_border};
+    color: {canvas_text};
+    padding: 3px 8px;
+    text-align: left;
+}}
+
+QFrame#positionsCard QPushButton#positionsCardFrom:hover {{
+    background: {canvas_surface_alt};
+    border-color: {canvas_accent_line};
+}}
+
+/* Colour by in the card's header: names the colour mode, opens its menu. */
+QFrame#positionsCard QPushButton#positionsCardColour {{
+    background: transparent;
+    border: 1px solid {canvas_control_border};
+    color: {canvas_text};
+    padding: 2px 6px;
+}}
+
+QFrame#positionsCard QPushButton#positionsCardColour:hover {{
+    background: {canvas_surface_alt};
+    border-color: {canvas_accent_line};
+}}
+
+/* Why a colour mode returned to Status, for a moment. */
+QFrame#positionsCard QLabel#positionsCardNotice {{
+    color: {canvas_text_muted};
+    background: transparent;
+}}
+
+/* Stands in for the card while a collection is hidden and the card is not open. */
+QPushButton#positionsFromChip {{
+    background: {canvas_surface};
+    border: 1px solid {canvas_border_strong};
+    border-radius: {radius_card}px;
+    color: {canvas_text};
+    padding: 4px 10px;
+}}
+
+QPushButton#positionsFromChip:hover {{
+    background: {canvas_surface_alt};
+    border-color: {canvas_accent_line};
+}}
+
+QToolButton#positionsCardCollapse:focus,
+QPushButton#positionsCardFrom:focus,
+QPushButton#positionsCardColour:focus,
+QPushButton#positionsFromChip:focus {{
+    border: 1px solid {canvas_accent};
 }}
 
 QLabel#viewerImageBadge {{

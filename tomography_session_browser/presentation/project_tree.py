@@ -308,6 +308,25 @@ def build_project_tree_groups(
     return groups
 
 
+#: The application's name: the window title when nothing is loaded.
+APP_TITLE = "Tomography Session Browser"
+
+
+def window_title(groups: Sequence[ProjectTreeGroup]) -> str:
+    """The main window's title: what is loaded, then the application's name.
+
+    One dataset group gives "<name> — Tomography Session Browser", with the
+    reviewer's custom name when there is one; more than one gives the first
+    and a count ("Grid_A + 1 more — …"), so two windows read differently in
+    the taskbar. It does not follow the selection: the breadcrumb does."""
+
+    if not groups:
+        return APP_TITLE
+    first = groups[0].display_name
+    loaded = first if len(groups) == 1 else f"{first} + {len(groups) - 1} more"
+    return f"{loaded} — {APP_TITLE}"
+
+
 def project_group_badge(group: ProjectTreeGroup | None) -> str:
     """The badge for ``group``; an ungrouped session reads as data collection."""
 

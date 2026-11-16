@@ -45,6 +45,7 @@ from tomography_session_browser.presentation.scope_identity import scope_key
 from tomography_session_browser.presentation.tomogram_selection import AllTomograms, FolderTomograms, tree_row_destination, versions_in
 from tomography_session_browser.presentation.scopes import EntityGroup, LinkedSampleGroup
 from tomography_session_browser.presentation.workspace import EntityKind, Workspace, atlas_display_key
+from tomography_session_browser.services.alignment_links import linked_series_line
 from tomography_session_browser.services.settings_service import recent_session_paths
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.presentation.project_folders import UserGroup, UserHeading
@@ -292,11 +293,16 @@ def project_group_tooltip(group: ProjectTreeGroup, workspace: Workspace) -> str:
         lines.append(f"Automatic name: {group.automatic_name}")
     if group.kind == "linked":
         lines.append(f"Linked data collections: {len(group.collection_sessions)}")
-    if group.processing_source is not None:
+    if group.processing_source is not None and group.processing_source.pipeline == 'Alignment':
+        lines.append(str(group.processing_source.path))
+        lines.append(linked_series_line(group.processing_source, workspace.alignment_links))
+    elif group.processing_source is not None:
         lines.append(str(group.processing_source.path))
         count = len(workspace.tomograms(group))
         lines.append(f"{count} residual tomograms ({len(group.processing_source.tomograms)} in source)")
         lines.append("Residual tomograms; placed tomograms are under their acquisition samples.")
+        lines.extend(f"Alignment from {source.name}: {source.path}"
+                     for source in workspace.alignment_companions((group.processing_source.id,)))
     lines.extend(f"{session.name}: {session.path}" for session in group.sessions)
     lines.extend(group.warnings)
     return "\n".join(lines)

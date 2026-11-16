@@ -12,6 +12,7 @@ from tomography_session_browser.domain.models import (
     TiltSeries,
 )
 from tomography_session_browser.domain.status import RowStatus, ValidationStatus, parse_recorded_status
+from tomography_session_browser.presentation.formatting import format_tilt_angle
 from tomography_session_browser.presentation.dashboard.models import (
     StatusTileModel,
     TILE_STATUS_COMPLETE,
@@ -28,7 +29,7 @@ from tomography_session_browser.services.item_status import (
     item_list_status,
     search_map_tile_counts,
 )
-from tomography_session_browser.services.tilt_series_validation import SOURCE_MRC_EXTENDED, SOURCE_SESSION_METADATA, TiltSeriesValidation
+from tomography_session_browser.services.tilt_series_validation import SOURCE_NONE, TiltSeriesValidation, tilt_range_evidence
 
 
 def search_map_is_incomplete(search_map: SearchMap, context: ItemStatusContext) -> bool:
@@ -199,28 +200,25 @@ def outcomes_for(validations: Iterable[TiltSeriesValidation]) -> TiltSeriesOutco
 def validation_tooltip(validation) -> str:
     """Multi-line tooltip used by the tilt-series tile grid and context panel."""
 
+    actual = validation.observation.reported_count
     lines = [
         validation.name,
         validation.status.upper(),
-        f"{validation.actual_count} / {validation.expected_count or '?'} images",
+        f"{'?' if actual is None else actual} / {validation.plan.expected_count or '?'} images",
     ]
-    if validation.min_tilt is not None and validation.max_tilt is not None:
-        range_label = (
-            "Planned tilt range"
-            if validation.evidence_source in {SOURCE_SESSION_METADATA, SOURCE_MRC_EXTENDED}
-            else "Observed tilt range"
-        )
-        if validation.tilt_increment:
+    planned, (low, high, step) = tilt_range_evidence(validation)
+    if low is not None and high is not None:
+        range_label = "Planned tilt range" if planned else "Observed tilt range"
+        if step:
             lines.append(
-                f"{range_label} {validation.min_tilt:g}° to {validation.max_tilt:g}° "
-                f"at {validation.tilt_increment:g}°"
+                f"{range_label} {format_tilt_angle(low)} to {format_tilt_angle(high)} "
+                f"at {format_tilt_angle(step)}"
             )
         else:
-            lines.append(
-                f"{range_label} {validation.min_tilt:g}° to {validation.max_tilt:g}°"
-            )
-    if validation.evidence_source and validation.evidence_source != "none":
-        lines.append(f"Evidence: {validation.evidence_source.replace('_', ' ')}")
+            lines.append(f"{range_label} {format_tilt_angle(low)} to {format_tilt_angle(high)}")
+    source = validation.plan.source
+    if source != SOURCE_NONE:
+        lines.append(f"Evidence: {source.replace('_', ' ')}")
     if validation.reason:
         lines.append(f"Reason: {validation.reason}")
     return "\n".join(lines)

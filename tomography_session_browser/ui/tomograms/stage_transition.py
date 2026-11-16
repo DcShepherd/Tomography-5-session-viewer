@@ -46,6 +46,7 @@ class StageTransition(QObject):
         self.generation: int | None = None
         self.auto_repeat = False
         self.panes: PaneTransition | None = None
+        self.fit_focused_window: Callable[[], None] | None = None
         self.focus: FocusTransition | None = None
         self._changing_layout = False
         self.content.ended.connect(self._ended)
@@ -116,22 +117,53 @@ class StageTransition(QObject):
         finally:
             self._changing_layout = False
 
+    def _move_panes_again(self) -> None:
+        """The platform placed the refitted Focus window late: move over that geometry."""
+        tab, panes = self.tab, self.panes
+        if panes is None:
+            return
+        LOGGER.debug("Focus window placed late after a layout change; moving again")
+        self._changing_layout = True
+        try:
+            self.generation = None
+            tab.request_render()
+            self.content.move(panes.picture_layout(tab.stage), duration_ms=DURATION_PANEL_MS)
+        finally:
+            self._changing_layout = False
+
     def change_layout(self, mode: str) -> None:
         tab = self.tab
         self.content.end("newer_request")
         frame = tab.rendering.accepted
-        if (frame is not None and mode != tab.state.layout and tab.rendering.is_current() and tab.stage.isVisible()
-                and not tab.playback.timer.isActive() and not self.auto_repeat and motion_enabled(tab.stage)):
-            self.panes = PaneTransition(image_bounds(tab.stage, tab.stage), mode)
-            self.target = (frame.job.row_key, frame.job.volume.id)
-            tab.stage.set_annotations_visible(False)
-            self.content.replace(lambda: None)
-        self._changing_layout = True
-        try:
+        fit = self.fit_focused_window if tab.focus_button.isChecked() else None
+        surface = tab.window() if fit is not None else None
+
+        def commit() -> None:
             tab.stage.change_layout(mode)
             settle_layouts(tab.stage, tab)
-            if self.panes is not None:
-                self.content.move(self.panes.picture_layout(tab.stage), duration_ms=DURATION_PANEL_MS)
+            if fit is not None:
+                fit()
+            else:
+                tab.request_render()
+
+        animate = (frame is not None and mode != tab.state.layout and tab.rendering.is_current()
+                   and tab.stage.isVisible() and not tab.playback.timer.isActive()
+                   and not self.auto_repeat and motion_enabled(tab.stage))
+        self._changing_layout = True
+        try:
+            if animate and frame is not None:
+                origin = surface.mapToGlobal(QPoint()) if surface is not None else None
+                self.panes = PaneTransition(image_bounds(tab.stage, surface or tab.stage), mode, origin)
+                self.target = (frame.job.row_key, frame.job.volume.id)
+                tab.stage.set_annotations_visible(False)
+                self.content.replace(commit, surface=surface)
+                if self.panes is not None:
+                    self.content.move(self.panes.picture_layout(tab.stage), duration_ms=DURATION_PANEL_MS)
+                if fit is not None and self.content.in_progress:
+                    # X11 and Wayland window managers apply the Focus refit later.
+                    self.content.follow(self._move_panes_again, within_ms=LATE_PLACEMENT_MS)
+            else:
+                commit()
         finally:
             self._changing_layout = False
         if not self.content.in_progress:

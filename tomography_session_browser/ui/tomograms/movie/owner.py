@@ -36,11 +36,11 @@ if TYPE_CHECKING:
     from tomography_session_browser.ui.tomograms.movie.progress import MovieProgressDialog
     from tomography_session_browser.ui.tomograms.tab import TomogramTab
 
-FILM_TOOLTIP = "Save these planes as a movie (Ctrl+E). The movie starts with this rate and end behaviour."
-LAST_SETTINGS_TOOLTIP = "Save these planes as a movie (Ctrl+E). The dialog starts with the last settings for this tomogram."
+FILM_TOOLTIP = "Save these planes as a movie (Ctrl+E)"
+LAST_SETTINGS_TOOLTIP = "Save these planes as a movie with your last settings (Ctrl+E)"
 NO_TOMOGRAM = "Not available: select a tomogram first."
-ONE_PLANE = "Not available: this tomogram has one plane. A movie needs two or more."
-RUNNING = "Not available: a movie export is running. Wait for it to finish, or cancel it in the progress window."
+ONE_PLANE = "Not available: this tomogram has one plane"
+RUNNING = "Not available: a movie export is running"
 STOPPING = "Not available: the cancelled export is still stopping."
 WAITING = "The movie dialog opens when the requested plane is shown…"
 LOGGER = logging.getLogger(__name__)
@@ -125,7 +125,8 @@ class MovieExport:
         self.button.setAccessibleName("Export movie")
         self.button.setIcon(canvas_icon("film"))
         self.button.setIconSize(QSize(16, 16))
-        self.button.setFixedSize(TOOL_CELL + 2, TOOL_CELL)
+        # Only the width: the rate group's QSS sets the height of both cells (24 px).
+        self.button.setFixedWidth(TOOL_CELL + 2)
         self.button.clicked.connect(self.open)
         # The film button is joined to the rate button: the movie starts with that rate.
         self.group = QFrame(tab)
@@ -151,6 +152,8 @@ class MovieExport:
         #: By tomogram row, for all of its versions. Only memory: closing the app clears it.
         self.last_settings: dict[str, LastSettings] = {}
         self.dialog: MovieDialog | None = None
+        #: The section the next dialog opens: Planes first, then the one left open. Only memory.
+        self.open_section: str | None = None
         self.progress: MovieProgressDialog | None = None
         self.preview_generation = 0
         #: (picture key, source, the generation it serves): a reused source cancels on its newest request.
@@ -252,16 +255,18 @@ class MovieExport:
                                 movie_available=available), ""
 
     def show_dialog(self, view: FrozenView, settings: MovieSettings | None = None) -> None:
-        from tomography_session_browser.ui.tomograms.movie.dialog import MovieDialog
+        from tomography_session_browser.ui.tomograms.movie.dialog import FIRST_SECTION, MovieDialog
         self.check_encoder()
         note = ""
         if settings is None:
             settings, note = self.starting_settings(view)
-        dialog = MovieDialog(self, view, settings, note)
+        dialog = MovieDialog(self, view, settings, note, self.open_section or FIRST_SECTION)
         self.dialog = dialog
         try:
+            # Export, Cancel, Escape and the close button all return here.
             accepted = dialog.exec() == QDialog.DialogCode.Accepted
             chosen, changed = dialog.settings, dialog.changed
+            self.open_section = dialog.open_section()
         finally:
             self.dialog = None
             self.preview_generation += 1
@@ -388,7 +393,7 @@ class MovieExport:
         if kind == "export":
             self.tab.settings.tomogram_movie = remembered(running.settings)
             self.tab.save_settings(self.tab.settings)
-            self.tab.history.movie_saved(running.view, payload)
+            self.tab.history.movies.saved(running.view, payload)
             if self.progress is not None:
                 self.progress.saved(payload)
         elif payload.kind != "cancelled" and not running.cancelled.is_set():

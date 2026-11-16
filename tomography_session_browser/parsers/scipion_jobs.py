@@ -18,10 +18,20 @@ LABELS = {
     "ProtImodTomoReconstruction": "IMOD reconstruction",
     "ProtImodEtomo": "IMOD Etomo",
     "ProtCryoCAREPrediction": "cryoCARE denoised",
+    "ProtImodFiducialAlignment": "IMOD fiducial alignment",
 }
 #: cryoCARE writes ``<ts>_denoised/<ts>_.mrc``: (folder ending, file ending).
 DENOISED_NAMES = {"ProtCryoCAREPrediction": ("_denoised", "_")}
 HALF_SETS = (("_even", "Even"), ("_odd", "Odd"))
+#: Jobs that write a solved tilt alignment, one ``<ts>/`` folder per series, with
+#: the endings of the fiducial model that their ``align.log`` names. The owner's
+#: listing shows ``<ts>_noGaps.fid`` (and no ``<ts>.fid``) in fiducial alignment
+#: jobs; the Etomo sample's ``align.log`` names ``<ts>.fid``. An Etomo job's own
+#: ``<ts>_full_rec.mrc`` is not listed as a tomogram (decision 6, 15 Nov 2026):
+#: the job gives alignment, and a reconstruction job gives the tomograms.
+ALIGNMENT_PROTOCOLS = {"ProtImodFiducialAlignment": ("_noGaps",), "ProtImodEtomo": ("",)}
+#: Reconstruction jobs that keep the ``<ts>.tlt`` and ``<ts>.xf`` they reconstructed with.
+RECORDS_OWN_ALIGNMENT = frozenset({"ProtImodTomoReconstruction"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +51,15 @@ class ScipionJob:
             return None
         name = folder[:-len(endings[0])]
         return name if name and stem == name + endings[1] else None
+
+    @property
+    def model_endings(self) -> tuple[str, ...] | None:
+        """The fiducial model endings when this is an alignment job, else None."""
+        return ALIGNMENT_PROTOCOLS.get(self.protocol)
+
+    @property
+    def records_own_alignment(self) -> bool:
+        return self.protocol in RECORDS_OWN_ALIGNMENT
 
     @staticmethod
     def half_set(tomogram: str, stem: str) -> str | None:

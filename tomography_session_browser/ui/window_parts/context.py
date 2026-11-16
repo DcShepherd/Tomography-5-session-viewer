@@ -12,8 +12,12 @@ from PySide6.QtCore import (
     QTimer,
 )
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
+    QLineEdit,
     QMainWindow,
+    QPlainTextEdit,
+    QTextEdit,
 )
 from tomography_session_browser.ui.shell.chrome import (
     TAB_LABELS,
@@ -58,7 +62,6 @@ from tomography_session_browser.presentation.project_tree import (
 )
 from tomography_session_browser.ui.widgets.toast import (
     TONE_INFO,
-    TONE_SUCCESS,
 )
 from tomography_session_browser.presentation.workspace import (
     Scope,
@@ -201,15 +204,15 @@ class ContextController(QObject):
         # once we know the panel is not already showing this scope.
         if isinstance(context, ProjectTreeGroup):
             title = context.display_name
-            describe = lambda: describe_project_group(context, self.state.review.workspace)  # noqa: E731
+            describe = lambda: describe_project_group(context, self.state.review.workspace, self.state.review.source_reads)  # noqa: E731
         elif context is None:
             groups = self.parts.scopes.project_groups()
             if len(groups) == 1:
                 title = groups[0].display_name
-                describe = lambda: describe_project_group(groups[0], self.state.review.workspace)  # noqa: E731
+                describe = lambda: describe_project_group(groups[0], self.state.review.workspace, self.state.review.source_reads)  # noqa: E731
             else:
                 title = "Project"
-                describe = lambda: describe_loaded_sessions(self.state.review.workspace.sessions)  # noqa: E731
+                describe = lambda: describe_loaded_sessions(self.state.review.workspace.sessions, self.state.review.source_reads)  # noqa: E731
         else:
             title = self.parts.scopes.label_for(context)
             describe = lambda: self.parts.context.context_description(context)  # noqa: E731
@@ -229,7 +232,9 @@ class ContextController(QObject):
         if model is not None:
             self.parts.context_panel.show_model(model, item=self.state.review.scope, scope=True)
         else:
-            self.parts.context_panel.show_scope(scope_key, title, describe)
+            # A folder read again shows its new read time (D16), even where the key is the same.
+            reads = hash(tuple(at for _source, at in self.state.review.source_reads.entries))
+            self.parts.context_panel.show_scope(f"{scope_key}@{reads}", title, describe)
         self.parts.context.sync_context_heading()
 
 
@@ -287,7 +292,10 @@ class ContextController(QObject):
 
 
     def copy_empty_state_details(self) -> None:
-        """Copy the visible empty-state panel's details, and say so."""
+        """Copy the visible empty-state panel's details.
+
+        The control that asked says "Copied" (W4b); only a failed copy needs a toast.
+        """
 
         # Ordered by intent, not by realised visibility: the active tab first,
         # then any panel currently holding details. Keying off ``isVisible()``
@@ -308,7 +316,6 @@ class ContextController(QObject):
             self.parts.context.show_toast("There are no details to copy.")
             return
         clipboard.setText(details)
-        self.parts.context.show_toast("Details copied to the clipboard.", tone=TONE_SUCCESS)
 
 
     def clear_active_tab_filter(self) -> None:
@@ -320,6 +327,38 @@ class ContextController(QObject):
             return
         tab.set_query("")
         self.parts.context.refresh_context_header()
+
+
+    def focus_active_tab_filter(self) -> None:
+        """Ctrl+F: the caret in the current tab's filter, with its query selected (D12).
+
+        Summary has the project filter; an image tab and Tomograms have their
+        list filter. What hides the filter opens first: the project panel, a
+        collapsed one-row list, Tomograms Focus. Nothing happens while the
+        loader or a dialog is up, while another text field is being edited,
+        or on a tab with no list.
+        """
+
+        if self.ui.loading_overlay.isVisible() or QApplication.activeModalWidget() is not None \
+                or QApplication.activePopupWidget() is not None:
+            return
+        editing = QApplication.focusWidget()
+        if isinstance(editing, (QTextEdit, QPlainTextEdit)) and not editing.isReadOnly() \
+                or isinstance(editing, QAbstractSpinBox) \
+                or isinstance(editing, QLineEdit) and editing.objectName() not in ("treeSearch", "viewerFilter"):
+            return
+        label = TAB_LABELS[self.ui.tabs.currentIndex()]
+        if label == TabKey.SESSION:
+            if not self.ui.project_panel_action.isChecked():
+                self.ui.project_panel_action.setChecked(True)
+            field: QLineEdit | None = self.ui.project_filter
+        else:
+            tab = self.ui.review_tabs.get(label)
+            field = tab.reveal_filter() if tab is not None else None
+        if field is None or not field.isVisible():
+            return
+        field.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        field.selectAll()
 
 
     def current_context_stack(self) -> ContextStack:
@@ -570,7 +609,8 @@ class ContextController(QObject):
             sources = tuple(source for source in workspace.processing_sources if source.id == value.source_id)
             return tomogram_context(value, tab.volume() if current else None, workspace.tomogram_links.get(value.id),
                 tab.state.spacing_override if current else None, source=sources[0] if len(sources) == 1 else None,
-                parents=tuple(workspace.entities(EntityKind.TILT_SERIES)))
+                parents=tuple(workspace.entities(EntityKind.TILT_SERIES)), alignment=workspace.alignment_links.get(value.id),
+                denoising=workspace.denoising_links.get(value.id))
         if isinstance(value, AllTomograms | FolderTomograms) or (isinstance(value, ProjectTreeGroup) and value.processing_source is not None):
             payload = summary_input(workspace, value, self.state.review.tomogram_sort, self.state.review.tomogram_review)
             displayed = self.ui.session_dashboard._model
@@ -586,7 +626,7 @@ class ContextController(QObject):
         if model := self.context_model(value):
             return model.to_text()
         batch_tab = self.ui.viewer_tabs.get(TabKey.BATCH_POSITION)
-        return ContextDescriber(self.state.review.workspace, self.parts.scopes.context_for_object).describe(
+        return ContextDescriber(self.state.review.workspace, self.parts.scopes.context_for_object, self.state.review.source_reads).describe(
             value,
             describes_page_item=self.parts.context.describes_page_item(value),
             list_status=(

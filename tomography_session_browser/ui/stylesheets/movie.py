@@ -12,6 +12,15 @@ QFrame#tomogramRateGroup QPushButton#tomogramRate {{
     background: transparent;
     border: 1px solid transparent;
 }}
+/* QSS sizes replace sizes set in code: the generic 28 px button height made
+   the film 30 px tall in a 24 px cell, 3 px below the rate text. Both cells
+   are 24 px: 22 px of content inside a 1 px border. */
+QFrame#tomogramRateGroup QPushButton {{
+    padding-top: 0;
+    padding-bottom: 0;
+    min-height: 22px;
+    max-height: 22px;
+}}
 QPushButton#tomogramFilm {{
     background: transparent;
     color: {canvas_text};
@@ -27,6 +36,11 @@ QPushButton#tomogramFilm:hover {{
 QFrame#tomogramRateGroup QPushButton#tomogramRate:focus,
 QPushButton#tomogramFilm:focus {{
     border-color: {canvas_accent};
+}}
+
+/* Room for the whole timeline handle (see the Image settings sliders). */
+QSlider#movieScrubber {{
+    min-height: {slider_room}px;
 }}
 
 /* The export dialog of board 3: the page background, a panel-coloured footer bar. */
@@ -73,8 +87,13 @@ QLabel#movieResultName {{
     color: {text_strong};
     font-weight: 600;
 }}
-QLabel#movieReadout {{
-    color: {text};
+/* Under the timeline: the plane strong, the time muted. */
+QLabel#movieReadoutPlane {{
+    color: {text_strong};
+    font-weight: 600;
+}}
+QLabel#movieReadoutTime {{
+    color: {text_muted};
 }}
 QLabel#movieHint {{
     color: {text_muted};
@@ -118,7 +137,7 @@ QWidget#movieSettings QLineEdit:disabled {{
 QWidget#movieSettings QToolButton#segmentButton {{
     padding: 0 6px;
 }}
-/* Outlined buttons: First, Middle, Last, Change and Swap; Hold here has the accent outline. */
+/* Outlined buttons: First, Middle, Last (icons), Change and Swap; Hold here has the accent outline. */
 QPushButton#movieStepButton,
 QPushButton#movieOutlineButton,
 QPushButton#movieHoldHere,
@@ -136,6 +155,12 @@ QPushButton#movieOutlineButton {{
 }}
 QToolButton#movieSwap {{
     padding: 0;
+}}
+/* First, Middle and Last are square icon buttons. */
+QPushButton#movieStepButton {{
+    padding: 0;
+    min-width: 28px;
+    max-width: 28px;
 }}
 QPushButton#movieHoldHere {{
     border-color: {accent_line};

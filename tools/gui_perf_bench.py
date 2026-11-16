@@ -37,14 +37,13 @@ def _resolve_lnk(path: Path) -> Path:
         return path
     try:  # pragma: no cover - platform-specific path
         import win32com.client  # type: ignore
-
-        shell = win32com.client.Dispatch("WScript.Shell")
-        target = shell.CreateShortCut(str(path)).TargetPath
-        if target:
-            return Path(target)
-    except Exception:
-        pass
-    return path
+    except ImportError:
+        raise SystemExit(f"{path.name} is a Windows shortcut. pywin32 is not installed, so the bench "
+                         "cannot read it. Give the folder that the shortcut points to.") from None
+    target = win32com.client.Dispatch("WScript.Shell").CreateShortCut(str(path)).TargetPath
+    if not target:
+        raise SystemExit(f"The shortcut {path.name} has no target. Give the folder that it points to.")
+    return Path(target)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -102,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     install_qt_message_handler()
     app = QApplication.instance() or QApplication([])
     settings = load_settings()
-    window = MainWindow(settings=settings)
+    window = MainWindow(settings=settings, save_settings=lambda _settings: None)
     # We don't ``show()`` — offscreen doesn't need it, and avoiding paint
     # cycles for a window we never look at keeps the bench focused on
     # parsing/integration cost rather than redundant initial paints.

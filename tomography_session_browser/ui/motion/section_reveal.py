@@ -107,6 +107,11 @@ class SectionReveal(QWidget):
     retargets the same spring (:meth:`retarget`), so a reversal continues
     from where it is. A resized parent, or the section hidden while it
     opens, removes it at once.
+
+    With ``closed_width``, the width follows the same spring from that width
+    (closed) to the geometry's (open), anchored on the left: the right
+    ``riding_width`` columns (the controls at a header's right end, the
+    border) travel with the right edge and the columns between are clipped.
     """
 
     def __init__(
@@ -124,6 +129,9 @@ class SectionReveal(QWidget):
         kind: str = "",
         conceal: Callable[[bool], None] | None = None,
         spec: SpringSpec | None = None,
+        on_progress: Callable[[float], None] | None = None,
+        closed_width: int | None = None,
+        riding_width: int = 0,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("sectionReveal")
@@ -138,6 +146,12 @@ class SectionReveal(QWidget):
         self._riding = max(0, riding)
         self._open = float(geometry.height())
         self._closed = float(max(0, min(closed, geometry.height())))
+        self._closed_width = None if closed_width is None else max(0, min(closed_width, geometry.width()))
+        self._riding_width = max(0, min(riding_width, self._closed_width if self._closed_width is not None else 0))
+        # Told how far open it is, 0 to 1, on each frame and once at the end
+        # (the end it was heading for, also when dismissed), so a control
+        # beside the section can follow the same spring.
+        self._on_progress = on_progress
         self._conceal = conceal if conceal is not None else (lambda hidden: conceal_with_effect(section, hidden))
         start = self._closed if opening else self._open
         self._shown = start
@@ -175,6 +189,21 @@ class SectionReveal(QWidget):
     def height_shown(self) -> float:
         return self._height.value
 
+    @property
+    def progress(self) -> float:
+        """How far open it is now: 0 closed, 1 open, held inside that range."""
+
+        span = self._open - self._closed
+        return 1.0 if span <= 0 else min(1.0, max(0.0, (self._height.value - self._closed) / span))
+
+    @property
+    def width_shown(self) -> float:
+        """The width painted now: the geometry's, or between ``closed_width`` and it."""
+
+        if self._closed_width is None:
+            return float(self.width())
+        return self._closed_width + (self.width() - self._closed_width) * self.progress
+
     def retarget(self, opening: bool, picture: QPixmap | None = None) -> None:
         """Head open or closed from wherever it is now.
 
@@ -201,8 +230,9 @@ class SectionReveal(QWidget):
     def dismiss(self) -> None:
         """Remove it now, finished or not: the section shows as it really is."""
 
+        opening = self.opening  # before the reset moves the target to here
         self._height.reset(self._height.value)
-        self._finish()
+        self._finish(opening)
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
         kind = event.type()
@@ -217,7 +247,13 @@ class SectionReveal(QWidget):
         return False
 
     def _moved(self, value: float) -> None:
+        if self._on_progress is not None:
+            self._on_progress(self.progress)
         old, self._shown = self._shown, value
+        if self._closed_width is not None and self._closed_width < self.width():
+            # The width moves too: every row's right end moves, so all of it repaints.
+            self.update()
+            return
         low, high = sorted((old, value))
         width = self.width()
         if self._grows_down:
@@ -242,17 +278,37 @@ class SectionReveal(QWidget):
         )
         painter = QPainter(self)
         width = float(self.width())
+        shown = self.width_shown
+        if shown >= width:
+            for source, target, rows in strips:
+                painter.drawPixmap(
+                    QRectF(0.0, target / ratio, width, rows / ratio),
+                    picture,
+                    QRectF(0.0, float(source), float(picture.width()), float(rows)),
+                )
+            return
+        # Narrower than open: the left columns up to the riding ones, then the
+        # riding columns at the right edge shown.
+        ride = float(self._riding_width)
+        left = max(0.0, shown - ride)
         for source, target, rows in strips:
             painter.drawPixmap(
-                QRectF(0.0, target / ratio, width, rows / ratio),
+                QRectF(0.0, target / ratio, left, rows / ratio),
                 picture,
-                QRectF(0.0, float(source), float(picture.width()), float(rows)),
+                QRectF(0.0, float(source), left * ratio, float(rows)),
+            )
+            painter.drawPixmap(
+                QRectF(left, target / ratio, ride, rows / ratio),
+                picture,
+                QRectF((width - ride) * ratio, float(source), ride * ratio, float(rows)),
             )
 
-    def _finish(self) -> None:
+    def _finish(self, opening: bool | None = None) -> None:
         if self._finished:
             return
         self._finished = True
+        if self._on_progress is not None:
+            self._on_progress(1.0 if (self.opening if opening is None else opening) else 0.0)
         section = self._section
         if shiboken6.isValid(section):
             section.removeEventFilter(self)

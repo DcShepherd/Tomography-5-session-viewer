@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 from tomography_session_browser.domain.tomograms import Volume
-from tomography_session_browser.services.movie.compose import NORMALS, bar_notice
+from tomography_session_browser.services.movie.compose import NORMALS, bar_notice, plane_label
 from tomography_session_browser.services.movie.encoder import WIDELY_PLAYED, h264_level
 from tomography_session_browser.services.movie.models import (COMPRESSION, FRAMES_ONLY, MOVIE, MOVIE_AND_FRAMES, SAVES,
                                                               MovieLabels, MovieOutput, MoviePane, MovieRequest)
@@ -507,13 +507,18 @@ def assess(view: FrozenView, settings: MovieSettings, *, movie_available: bool =
     return MovieAssessment(timeline, geometry, lines, tuple(notes), blocked, size_text, estimate, name, path_text)
 
 
-def readout(view: FrozenView, settings: MovieSettings, timeline: MovieTimeline, index: int) -> str:
-    """"Frame 201 of 276 · XY at Z 181 · hold · 20.0 s"; an oblique view names its offset."""
+def readout(view: FrozenView, settings: MovieSettings, timeline: MovieTimeline, index: int) -> tuple[str, str]:
+    """The plane, as the export burns it in ("Z 201 / 282"), and the time ("20.0 / 28.2 s").
+
+    Only what the user needs under the timeline: Timing already shows holds and Bounce.
+    N is the whole grid, as in the burnt-in label, not the From–To range."""
     frame = timeline.frames[index]
-    where = (f"offset {frame.plane + 1}" if view.oblique and settings.view == ACTIVE
-             else f"{NORMALS[settings.sweep]} {frame.plane + 1}")
-    return " · ".join(part for part in (f"Frame {index + 1} of {timeline.count}", f"{settings.sweep} at {where}",
-                                        "hold" if frame.hold else "", duration_text(timeline.time(index))) if part)
+    plane = plane_label(settings.sweep, frame.plane, view.planes(settings.sweep),
+                        oblique=view.oblique and settings.view == ACTIVE, names=False, numbers=True)
+    elapsed, total = timeline.time(index), timeline.duration
+    time = (f"{elapsed:.1f} / {total:.1f} s" if total < 60
+            else f"{duration_text(elapsed)} / {duration_text(total)}")
+    return plane, time
 
 
 def step_hint(timeline: MovieTimeline | None, step: int) -> str:

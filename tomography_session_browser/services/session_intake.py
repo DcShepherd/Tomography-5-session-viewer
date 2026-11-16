@@ -15,10 +15,11 @@ for the drop feedback, the window and the receipt.
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 import time
+from typing import Generic, TypeVar
 
 from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.domain.enums import SessionKind
@@ -115,6 +116,17 @@ class DroppedFolder:
 
         return self.note or _REASONS.get(self.status, "")
 
+    @property
+    def retryable(self) -> bool:
+        """Its result can change on disk, so supplying its path again checks it again (D17).
+
+        A session file, an already loaded source and a ready folder cannot
+        become something else by a second look; a missing folder or one with
+        no session in it can.
+        """
+
+        return self.status in (FolderCheck.MISSING, FolderCheck.NOT_A_SESSION)
+
 
 def source_key(path: str | Path) -> str:
     """The key of the source a path loads: a Scipion job folder loads its ``extra`` folder."""
@@ -134,8 +146,13 @@ def check_folder(
     classify: Callable[[Path], SessionKind],
     *,
     loaded_keys: Collection[str] = (),
+    key: str | None = None,
 ) -> DroppedFolder:
-    """Check one path: exists, is a folder, holds a session, is not loaded."""
+    """Check one path: exists, is a folder, holds a session, is not loaded.
+
+    ``key`` is the path's ``source_key`` when the caller has it already; it is
+    not worked out a second time.
+    """
 
     path = Path(raw_path)
     text = str(path)
@@ -151,7 +168,7 @@ def check_folder(
         return DroppedFolder(text, FolderCheck.NOT_A_SESSION, note=UNREADABLE_REASON)
     if kind == SessionKind.UNKNOWN:
         return DroppedFolder(text, FolderCheck.NOT_A_SESSION, kind=kind)
-    if source_key(path) in loaded_keys:
+    if (source_key(path) if key is None else key) in loaded_keys:
         return DroppedFolder(text, FolderCheck.ALREADY_LOADED, kind=kind)
     return DroppedFolder(text, FolderCheck.READY, kind=kind)
 
@@ -161,6 +178,9 @@ class SessionIntake:
     """The folders of one drop, or of the window's queue, once checked."""
 
     folders: tuple[DroppedFolder, ...]
+    #: One record for every supplied path, in order, when the intake came from
+    #: ``admit``; a drop finishes its unchecked records from these.
+    records: tuple["Admitted", ...] = field(default=(), compare=False)
 
     @property
     def ready(self) -> tuple[DroppedFolder, ...]:
@@ -225,6 +245,181 @@ class SessionIntake:
         return "" if self.can_load else "Releasing here leaves the project unchanged"
 
 
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class QueueEntry(Generic[T]):
+    """One queued source: the spelling supplied first, its source key, its check
+    and a token the caller owns.
+
+    ``key`` is ``None`` only while the check is ``UNCHECKED``. The token is the
+    caller's (the window keys its rows by it); this module never reads it, and a
+    new entry has none until the caller gives it one.
+    """
+
+    spelling: str
+    key: str | None
+    folder: DroppedFolder
+    token: T | None = None
+
+
+@dataclass(frozen=True)
+class Admitted:
+    """What one supplied path came to: its spelling, its source key and its check."""
+
+    spelling: str
+    key: str | None
+    folder: DroppedFolder
+
+
+@dataclass(frozen=True)
+class Admission(Generic[T]):
+    """The proposed queue, and one record for every supplied path, in order."""
+
+    entries: tuple[QueueEntry[T], ...]
+    records: tuple[Admitted, ...]
+
+    @property
+    def intake(self) -> SessionIntake:
+        """The proposed queue as an intake, with the records kept for a later drop."""
+
+        return SessionIntake(tuple(entry.folder for entry in self.entries), self.records)
+
+    @property
+    def supplied(self) -> SessionIntake:
+        """The supplied paths alone, one per source, first spelling first: what a drag shows."""
+
+        seen: set[str] = set()
+        folders: list[DroppedFolder] = []
+        for record in self.records:
+            mark = record.key if record.key is not None else path_identity_key(record.spelling)
+            if mark not in seen:
+                seen.add(mark)
+                folders.append(record.folder)
+        return SessionIntake(tuple(folders), self.records)
+
+
+def _at(folder: DroppedFolder, spelling: str) -> DroppedFolder:
+    return folder if folder.path == spelling else replace(folder, path=spelling)
+
+
+def _merge(queue: list[QueueEntry[T]], key: str | None, folder: DroppedFolder) -> None:
+    """Keep one entry per source: the earliest in the queue, which takes ``folder``."""
+
+    if key is None:
+        return
+    same = [index for index, entry in enumerate(queue) if entry.key == key]
+    if not same:
+        return
+    first = queue[same[0]]
+    survivor = replace(first, folder=_at(folder, first.spelling))
+    queue[:] = [survivor if index == same[0] else entry
+                for index, entry in enumerate(queue) if index == same[0] or entry.key != key]
+
+
+def _stored(queue: list[QueueEntry[T]], text_key: str) -> int | None:
+    return next((index for index, entry in enumerate(queue) if path_identity_key(entry.spelling) == text_key), None)
+
+
+def admit(
+    entries: Iterable[QueueEntry[T]],
+    paths: Iterable[str | Path],
+    classify: Callable[[Path], SessionKind],
+    *,
+    loaded_keys: Collection[str] = (),
+    budget_s: float | None = None,
+    known: Iterable[Admitted] = (),
+    clock: Callable[[], float] = time.monotonic,
+) -> Admission[T]:
+    """Admit ``paths`` to the queue ``entries``. Pure: it returns a result and changes nothing.
+
+    Browse, a Recent chip, a drag, a drop and the Project window's drop all come
+    here, so one loop decides what is looked at. For each supplied path, in order:
+
+    * a spelling the queue holds, whose check cannot change (``retryable`` is
+      false), takes the stored result with no file-system call;
+    * any other path gets a fresh source key and then a check. Within one call a
+      source is checked once: paths that reach the same key share the check.
+      A stored, retryable entry is updated in place (D17, a retry);
+    * entries that reach the same key merge. The earliest entry in the queue
+      survives, keeps its token and spelling, and takes the fresh check; the
+      order of the supplied paths cannot change which one that is.
+
+    Unrelated entries are not looked at again and keep their order. With
+    ``budget_s`` a path still waiting when the time is spent gets no key and an
+    ``UNCHECKED`` check (a drag must not stall on a slow share). ``known`` holds
+    the records of that drag: a drop reuses the completed ones and finishes the
+    rest, so their identity is computed then, not frozen at the drag.
+    """
+
+    started = clock()
+    queue: list[QueueEntry[T]] = list(entries)
+    completed = {path_identity_key(record.spelling): record for record in known
+                 if record.folder.status != FolderCheck.UNCHECKED}
+    checked: dict[str, DroppedFolder] = {record.key: record.folder for record in completed.values() if record.key is not None}
+    this_call: dict[str, Admitted] = {}
+    records: list[Admitted] = []
+    for raw_path in paths:
+        spelling = str(Path(raw_path))
+        text_key = path_identity_key(spelling)
+        if text_key in this_call:
+            earlier = this_call[text_key]
+            records.append(Admitted(spelling, earlier.key, _at(earlier.folder, spelling)))
+            continue
+        index = _stored(queue, text_key)
+        if index is not None and not queue[index].folder.retryable:
+            entry = queue[index]
+            record = Admitted(spelling, entry.key, _at(entry.folder, spelling))
+            this_call[text_key] = record
+            records.append(record)
+            continue
+        if text_key in completed:
+            done = completed[text_key]
+            record = Admitted(spelling, done.key, _at(done.folder, spelling))
+        elif budget_s is not None and checked and clock() - started > budget_s:
+            record = Admitted(spelling, None, DroppedFolder(spelling, FolderCheck.UNCHECKED))
+        else:
+            key = source_key(spelling)
+            if key not in checked:
+                checked[key] = check_folder(spelling, classify, loaded_keys=loaded_keys, key=key)
+            record = Admitted(spelling, key, _at(checked[key], spelling))
+        this_call[text_key] = record
+        records.append(record)
+        if index is not None:
+            entry = queue[index]
+            queue[index] = replace(entry, key=record.key, folder=_at(record.folder, entry.spelling))
+            _merge(queue, record.key, record.folder)
+        elif record.key is not None and any(entry.key == record.key for entry in queue):
+            _merge(queue, record.key, record.folder)
+        else:
+            queue.append(QueueEntry(spelling, record.key, record.folder))
+    return Admission(tuple(queue), tuple(records))
+
+
+def replace_entry(
+    entries: Iterable[QueueEntry[T]],
+    index: int,
+    path: str | Path,
+    classify: Callable[[Path], SessionKind],
+    *,
+    loaded_keys: Collection[str] = (),
+) -> tuple[QueueEntry[T], ...]:
+    """Put ``path`` in place of entry ``index`` ("Use parent folder"), checking only ``path``.
+
+    The entry keeps its position and token; if another entry is the same
+    source, the earlier of the two survives, as in ``admit``.
+    """
+
+    queue = list(entries)
+    spelling = str(Path(path))
+    key = source_key(spelling)
+    folder = check_folder(spelling, classify, loaded_keys=loaded_keys, key=key)
+    queue[index] = QueueEntry(spelling, key, folder, queue[index].token)
+    _merge(queue, key, folder)
+    return tuple(queue)
+
+
 def assess_paths(
     paths: Iterable[str | Path],
     classify: Callable[[Path], SessionKind],
@@ -233,26 +428,14 @@ def assess_paths(
     budget_s: float | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> SessionIntake:
-    """Check each distinct path, in order.
+    """Check each distinct source, in order: ``admit`` to an empty queue.
 
-    With ``budget_s``, paths still waiting when the time is spent are left
-    ``UNCHECKED`` (a drag must not stall on a slow share); the drop checks
-    them again without a budget.
+    The first spelling of a source stands for it. With ``budget_s``, paths still
+    waiting when the time is spent are left ``UNCHECKED``; ``recheck_unchecked``
+    finishes them at the drop.
     """
 
-    started = clock()
-    seen: set[str] = set()
-    folders: list[DroppedFolder] = []
-    for raw_path in paths:
-        key = source_key(raw_path)
-        if key in seen:
-            continue
-        seen.add(key)
-        if budget_s is not None and folders and clock() - started > budget_s:
-            folders.append(DroppedFolder(str(Path(raw_path)), FolderCheck.UNCHECKED))
-            continue
-        folders.append(check_folder(raw_path, classify, loaded_keys=loaded_keys))
-    return SessionIntake(tuple(folders))
+    return admit((), paths, classify, loaded_keys=loaded_keys, budget_s=budget_s, clock=clock).intake
 
 
 def recheck_unchecked(
@@ -261,15 +444,10 @@ def recheck_unchecked(
     *,
     loaded_keys: Collection[str] = (),
 ) -> SessionIntake:
-    """Finish a drag's check at the drop: look at what it had no time for."""
+    """Finish a drag's check at the drop: look at what it had no time for, and nothing else."""
 
     if not intake.unchecked:
         return intake
-    return SessionIntake(
-        tuple(
-            check_folder(folder.path, classify, loaded_keys=loaded_keys)
-            if folder.status == FolderCheck.UNCHECKED
-            else folder
-            for folder in intake.folders
-        )
-    )
+    # An intake built by hand has no records: its folders are what was supplied.
+    records = intake.records or tuple(Admitted(folder.path, None, folder) for folder in intake.folders)
+    return admit((), [record.spelling for record in records], classify, loaded_keys=loaded_keys, known=records).intake

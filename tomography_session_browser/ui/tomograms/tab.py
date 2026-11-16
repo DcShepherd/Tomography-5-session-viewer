@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLayout, QPushButton
 
 from tomography_session_browser.domain.tomograms import Tomogram, Volume
 from tomography_session_browser.presentation.design_tokens import SPACE_S, SPACE_XS
+from tomography_session_browser.presentation.tomogram_arrival import TomogramArrival
 from tomography_session_browser.presentation.tomogram_state import PaneGeometry, TomogramViewState, ReviewSegment
 from tomography_session_browser.presentation.tomogram_tabs import PreparedTomogramTab
 from tomography_session_browser.presentation.tomogram_review_state import TomogramReviewState
@@ -97,8 +98,8 @@ class TomogramTab(QWidget):
                  protected_roots: Callable[[], tuple[Path, ...]],
                  review_state: TomogramReviewState | None = None,
                  navigation_actions_for: Callable[[str], list[ViewerNavigationAction]] | None = None,
-                 tag_projects=None) -> None:
-        super().__init__()
+                 tag_projects=None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self.constructed = False
         self.retired = False
         self.settings, self.save_settings, self.protected_roots = settings, save_settings, protected_roots
@@ -147,7 +148,7 @@ class TomogramTab(QWidget):
         self.cursor_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.slider = PlaneSlider(self)
         self.slider.setAccessibleName("Requested Z plane")
-        self.slider.setToolTip("Go to a different plane (PageUp, PageDown). You can also hold Shift and use the wheel over a pane.")
+        self.slider.setToolTip("Select a plane (PageUp, PageDown or Shift+wheel). F8 shows capture marks.")
         self.slider.setEnabled(False)
         self.status = StatusLine(self)
         outer = self.outer = QVBoxLayout(self)
@@ -278,7 +279,7 @@ class TomogramTab(QWidget):
         self.image_button.toggled.connect(self.image_settings_requested)
         self.image_button.toggled.connect(self.update_commands)
         self.image_button.toggled.connect(lambda _checked: self.focus_refit_requested.emit())
-        self.snapshot_button.setToolTip("Save the view as an image (Ctrl+S). Set the format, size and folder in Image settings.")
+        self.snapshot_button.setToolTip("Save the view as an image (Ctrl+S)")
         self.fit_button.setToolTip("Show the full plane (F)")
         self.folder_button.setToolTip("Select the folder for snapshots (Ctrl+Shift+S)")
         self.image_button.setToolTip("Show or hide Image settings (I)")
@@ -308,6 +309,14 @@ class TomogramTab(QWidget):
 
     def query(self) -> str:
         return self.review_list.query.text()
+
+    def reveal_filter(self) -> QLineEdit | None:
+        """For Ctrl+F: leave Focus, then give the list's filter (None when no list shows)."""
+
+        if self.focus_button.isChecked():
+            self.focus_button.setChecked(False)
+        query = self.review_list.query
+        return query if query.isVisible() else None
 
     def set_query(self, text: str, *, row_keys: frozenset[str] | None = None, scope_label: str = "") -> None:
         self.tags.filters.clear(notify=False)
@@ -353,21 +362,40 @@ class TomogramTab(QWidget):
             while len(self.view_memory) > 256:
                 self.view_memory.popitem(last=False)
 
-    def install_prepared(self, payload: PreparedTomogramTab, restore_state: TomogramViewState | None = None) -> None:
+    population_scope = ""
+    arrival_filters_cleared = False
+
+    def install_prepared(self, payload: PreparedTomogramTab, restore_state: TomogramViewState | None = None,
+                         *, arrival: TomogramArrival | None = None, population_scope: str = "") -> None:
         self.playback.stop()
-        if self.initialised and self.payload == payload and (restore_state is None or restore_state == self.capture_view_state()):
+        same_payload = self.initialised and self.payload == payload and self.population_scope == population_scope
+        if arrival is None and same_payload and (restore_state is None or restore_state == self.capture_view_state()):
             return
         self.remember_view()
-        self.residency.select(None)
-        self.render_timer.stop()
-        self.rendering.invalidate()
-        self.persistence.bind_payload(payload)
-        self.payload = payload
-        self.initialised = True
-        self.pixel_sizes.restored = None
-        self.state = TomogramViewState()
-        self.review_list.install(payload)
-        self.restore_view_state(restore_state or TomogramViewState())
+        if not same_payload or arrival is None:
+            self.residency.select(None)
+            self.render_timer.stop()
+            self.rendering.invalidate()
+            self.persistence.bind_payload(payload)
+            self.payload = payload
+            self.initialised = True
+            self.population_scope = population_scope
+            self.pixel_sizes.restored = None
+            self.state = TomogramViewState()
+            self.review_list.install(payload, rebuild=arrival is None)
+        self.arrival_filters_cleared = False
+        if arrival is None:
+            self.restore_view_state(restore_state or TomogramViewState())
+        else:
+            listing = self.review_list
+            filters, membership = arrival.list_state(frozenset(listing.rows), population_scope)
+            listing.restore_arrival_filters(filters, membership)
+            self.arrival_filters_cleared = arrival.parent_key is not None and arrival.row_key not in listing.ordered_keys
+            if self.arrival_filters_cleared:
+                listing.clear_filters()
+            self.select_key(arrival.row_key, restore=arrival.view, captured=arrival.view is not None)
+            if arrival.anchor[0] and not self.arrival_filters_cleared:
+                listing.restore_anchor(*arrival.anchor)
         self.persistence.offer()
         self.scope_changed.emit()
 
@@ -546,11 +574,7 @@ class TomogramTab(QWidget):
         self.movie.refresh()
         self.pixel_prompt.sync()
         self.pixel_sizes.sync_entries()
-        # The count appears once there is something to count.
-        counts = self.history.count_snapshot
-        self.review_list.capture_column.set_counts(counts.rows if counts else {},
-            (failure.job.request.row_key for failure in self.captures.failures),
-            available=counts is not None, refreshing=self.history.pending_counts is not None, error=self.history.refresh_error)
+        self.history.sync_count_columns()
         self.history.refresh_controls()
         self.status.refresh()
         # Active filters change what the image shows, so Image carries a dot while
@@ -562,7 +586,7 @@ class TomogramTab(QWidget):
             filters.append(f"highpass {self.state.highpass:g} Fourier px")
         self.image_button.set_indicated(bool(filters) and not self.image_button.isChecked())
         self.image_button.setToolTip("Show or hide Image settings (I)" + (
-            f". Filters on: {', '.join(filters)}. Press G to stop them." if filters else ""))
+            f". Filters on: {', '.join(filters)} (G stops them)." if filters else ""))
         self.image_button.setAccessibleDescription(f"Filters on: {', '.join(filters)}" if filters else "")
 
     def update_capture_command(self) -> None:
@@ -572,7 +596,7 @@ class TomogramTab(QWidget):
         except ValueError as exc:
             reason = str(exc)
         self.snapshot_button.setEnabled(self.slider.isEnabled() and self.volume() is not None and not reason)
-        self.snapshot_button.setToolTip(reason or "Save the view as an image (Ctrl+S). Set the format, size and folder in Image settings.")
+        self.snapshot_button.setToolTip(reason or "Save the view as an image (Ctrl+S)")
 
     def step_tomogram(self, delta: int) -> None:
         keys = self.review_list.ordered_keys
@@ -926,9 +950,9 @@ class TomogramTab(QWidget):
 
 # Contextual keys handled by this module; consumed by the shared Help sheet.
 LOCAL_KEYS = (
-    LocalBinding('tomograms.tab.tomograms-esc', 'Tomograms', InteractionKind.KEYBOARD, ('Esc',), 'Dismiss the current menu, dialog, drawer, tooltip or editor first; then clear the filter or leave Focus'),
-    LocalBinding('tomograms.tab.ortho-pane-shift-wheel', 'Ortho pane', InteractionKind.MOUSE, ('Shift+Wheel',), 'Step planes in that pane. Small angle steps accumulate. Pixel-only touchpad gestures do not step planes; use PageUp/PageDown. Pause playback and finish editing or rotating first.'),
-    LocalBinding('tomograms.tab.ortho-pane-pointer', 'Ortho pane', InteractionKind.MOUSE, ('Pointer', 'Double-click'), 'Move into or click a pane to select the snapshot target; double-click to place the intersection. Selection keeps keyboard focus outside the stage.'),
-    LocalBinding('tomograms.tab.image-wheel', 'Image', InteractionKind.MOUSE, ('Wheel', 'Drag'), 'Zoom with the wheel; drag to move the image. Snapshots include the image and scale bar, excluding Ortho lines and chrome.'),
-    LocalBinding('tomograms.tab.orientation-box-drag', 'Orientation box', InteractionKind.MOUSE, ('Drag', 'Double-click'), 'Tilt the plane; double-click to set angles to zero. The arrow points towards PageUp and the dot is the pivot. Link shares physical scale and centre; unlink retains independent views.'),
+    LocalBinding('tomograms.tab.tomograms-esc', 'Tomograms', InteractionKind.KEYBOARD, ('Esc',), 'Close the open menu, dialog or editor; then clear the filter or leave Focus'),
+    LocalBinding('tomograms.tab.ortho-pane-shift-wheel', 'Ortho pane', InteractionKind.MOUSE, ('Shift+Wheel',), 'Step planes in that pane. On a touchpad, use PageUp/PageDown. Pause playback first.'),
+    LocalBinding('tomograms.tab.ortho-pane-pointer', 'Ortho pane', InteractionKind.MOUSE, ('Pointer', 'Double-click'), 'Select a pane for snapshots; double-click to move the intersection'),
+    LocalBinding('tomograms.tab.image-wheel', 'Image', InteractionKind.MOUSE, ('Wheel', 'Drag'), 'Zoom with the wheel; drag to move the image'),
+    LocalBinding('tomograms.tab.orientation-box-drag', 'Orientation box', InteractionKind.MOUSE, ('Drag', 'Double-click'), 'Tilt the plane; double-click to set the angles to zero'),
 )

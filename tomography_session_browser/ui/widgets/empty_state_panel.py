@@ -29,6 +29,7 @@ from tomography_session_browser.presentation.empty_states import (
 from tomography_session_browser.ui.widgets.empty_sprite import EmptySprite
 from tomography_session_browser.ui.theme import current_palette
 from tomography_session_browser.ui.icons import themed_icon
+from tomography_session_browser.ui.widgets.copy_feedback import CopyFeedback
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 from tomography_session_browser.ui.widgets.link_button import link_button
 from tomography_session_browser.ui.theme import (
@@ -127,7 +128,8 @@ class EmptyStatePanel(QWidget):
         self.copy_button.setToolTip("Copy the path")
         self.copy_button.setAccessibleName("Copy the path")
         self.copy_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.copy_button.clicked.connect(lambda: self._emit(COMMAND_COPY_DETAILS))
+        self.copy_feedback = CopyFeedback(self.copy_button)
+        self.copy_button.clicked.connect(lambda: self._copy(self.copy_feedback))
         path_layout.addWidget(self.copy_button)
         path_layout.addStretch(1)
         self.path_row.setVisible(False)
@@ -146,6 +148,9 @@ class EmptyStatePanel(QWidget):
         # The one primary recipe, shared with the dialogs (#primaryButton).
         self.primary_button.setObjectName("primaryButton")
         self.primary_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Return as well as Space: outside a dialog a push button takes only
+        # Space, and this is where an empty project starts (D12).
+        self.primary_button.setAutoDefault(True)
         self.primary_button.clicked.connect(self._emit_primary)
         button_row.addWidget(self.primary_button)
         self._secondary_row = button_row
@@ -219,8 +224,16 @@ class EmptyStatePanel(QWidget):
 
     # -- public API ---------------------------------------------------------
 
+    def _copy(self, feedback: CopyFeedback) -> None:
+        # The window's handler copies at once; the control then says so. With
+        # nothing to copy the handler says that instead.
+        self._emit(COMMAND_COPY_DETAILS)
+        if self.copyable_details():
+            feedback.confirm()
+
     def set_state(self, state: EmptyState | None) -> None:
         self._state = state
+        self.copy_feedback.reset()
         decoration = DECORATIONS.get(state.kind) if state else None
         self.aside.setText(decoration.aside if decoration else "")
         self.aside.setVisible(decoration is not None)
@@ -265,9 +278,13 @@ class EmptyStatePanel(QWidget):
         insert_at = self._secondary_row.count() - 1
         for action in state.secondary:
             button = link_button(action.label, self.card)
-            button.clicked.connect(
-                lambda _checked=False, command=action.command: self._emit(command)
-            )
+            if action.command == COMMAND_COPY_DETAILS:
+                feedback = CopyFeedback(button)
+                button.clicked.connect(lambda _checked=False, feedback=feedback: self._copy(feedback))
+            else:
+                button.clicked.connect(
+                    lambda _checked=False, command=action.command: self._emit(command)
+                )
             self._secondary_row.insertWidget(insert_at, button)
             # Qt otherwise queues the new button's first show. Include it now
             # when choosing the row direction and the fixed composition height.

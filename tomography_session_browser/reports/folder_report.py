@@ -172,7 +172,7 @@ def folder_section(section: TomogramSection, scoped: ScopedTomograms, position: 
     flowables += [facts_row(summary), Spacer(1, styles.CARD_GAP),
                   graphics.section_heading("Tomograms", anchor=f"{section.anchor}-tomograms",
                                            meta=count_phrase(len(section.members), "tomogram")),
-                  folder_table(section, scoped), Spacer(1, 8), *recorded_values(section.members)]
+                  folder_table(section, scoped), Spacer(1, 8), *recorded_values(section.members, scoped)]
     flagged = attention(section, scoped, summary)
     if flagged:
         flowables += [Spacer(1, 8), *flagged]

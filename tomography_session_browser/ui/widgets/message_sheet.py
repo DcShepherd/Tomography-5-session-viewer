@@ -15,6 +15,7 @@ from tomography_session_browser.presentation.messages import (
     ActionPrompt, ActionRole, Cancelled, ItemAccepted, ItemChoice, MessageAction,
     MessageContent, TextAccepted,
 )
+from tomography_session_browser.ui.widgets.copy_feedback import CopyFeedback
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 from tomography_session_browser.ui.widgets.link_button import link_button
 from tomography_session_browser.ui.widgets.section_header import SectionHeader
@@ -82,7 +83,8 @@ class MessageSheet(QDialog, Generic[Identity]):
         self.details.setMaximumHeight(180)
         self.details.hide()
         self.disclosure.toggled.connect(self.details.setVisible)
-        self.copy_button.clicked.connect(lambda: QApplication.clipboard().setText(self.copy_text()))
+        self.copy_feedback = CopyFeedback(self.copy_button)
+        self.copy_button.clicked.connect(self.copy_details)
         self.body.addWidget(self.details)
         self.body.addStretch(1)
         safe = QHBoxLayout()
@@ -113,6 +115,10 @@ class MessageSheet(QDialog, Generic[Identity]):
     def copy_text(self) -> str:
         return MessageContent(self.title.text(), self.consequence.text(), self.prompt.content.items,
                               self.details.toPlainText()).copy_text()
+
+    def copy_details(self) -> None:
+        QApplication.clipboard().setText(self.copy_text())
+        self.copy_feedback.confirm()
 
     def choose(self, identity: Identity) -> None:
         if identity not in self.buttons:

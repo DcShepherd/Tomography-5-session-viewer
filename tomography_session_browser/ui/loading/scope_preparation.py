@@ -6,6 +6,7 @@ from typing import Any, Callable
 from PySide6.QtCore import QThreadPool
 from tomography_session_browser.presentation.navigation_history import HistoryLocation
 from tomography_session_browser.presentation.prepared_session import PreparedSessionUi, prepare_session_ui_payload
+from tomography_session_browser.presentation.tomogram_arrival import TomogramArrival
 from tomography_session_browser.presentation.tab_keys import TabKey
 from tomography_session_browser.presentation.workspace import Scope, Workspace
 from tomography_session_browser.presentation.dashboard.models import DashboardModel
@@ -32,12 +33,13 @@ class ScopeRequest:
     departure: HistoryLocation | None = None
     cached_dashboard: tuple[DashboardModel, SessionTimeline | None] | None = None
     cached_viewer_tabs: PreparedViewerTabs | None = None
+    arrival: TomogramArrival | None = None
 
 
 class ScopePreparation:
     """One running operation and one replaceable pending request per window."""
     def __init__(self, *, publish: Callable[[ScopeRequest, PreparedSessionUi], None],
-                 report_error: Callable[[str], None]) -> None:
+                 report_error: Callable[[ScopeRequest, str], None]) -> None:
         self.signals = TaskSignals()
         self.publish, self.report_error = publish, report_error
         self.generation = 0
@@ -51,10 +53,11 @@ class ScopePreparation:
     def request(self, workspace: Workspace, scope: Scope, viewer_scope: Scope, value: Any, label: str,
                 destination_tab: TabKey, *, departure: HistoryLocation | None = None,
                 cached_dashboard: tuple[DashboardModel, SessionTimeline | None] | None = None,
-                cached_viewer_tabs: PreparedViewerTabs | None = None) -> None:
+                cached_viewer_tabs: PreparedViewerTabs | None = None,
+                arrival: TomogramArrival | None = None) -> None:
         self.generation += 1
         self.pending = ScopeRequest(self.generation, workspace, scope, viewer_scope, value, label, destination_tab,
-                                    departure, cached_dashboard, cached_viewer_tabs)
+                                    departure, cached_dashboard, cached_viewer_tabs, arrival)
         self.start_pending()
 
     def start_pending(self) -> None:
@@ -82,5 +85,5 @@ class ScopePreparation:
     def failed(self, request: ScopeRequest, error: str) -> None:
         self.running = None
         if request.generation == self.generation:
-            self.report_error(f"Could not prepare {request.label}: {error}")
+            self.report_error(request, f"Could not prepare {request.label}: {error}")
         self.start_pending()

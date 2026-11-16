@@ -47,9 +47,10 @@ if TYPE_CHECKING:
 
 FROZEN_NOTE = "The movie uses the view as it was when this dialog opened. Changes in the viewer do not change it."
 NO_HOLDS = "To hold on another frame, move the timeline to it and click Hold here."
-CLIP_TOOLTIP = "Save 3 seconds from the timeline position as a test MP4, then open it in your video player"
+CLIP_TOOLTIP = "Save a 3 s test MP4 from the timeline position and play it"
 CHECKING = "Not available yet: the app is checking for FFmpeg."
 PRESS_O = "Press O in the viewer first."
+NO_PIXEL_SIZE_TIP = "Not available: the file has no pixel size"
 SHAPE_HINT = "Extra space is black. The image is not stretched or cut."
 SWEEP_LABELS = {"XY": "XY · Z", "XZ": "XZ · Y", "YZ": "YZ · X"}
 #: The preview waits this long after the last change before it asks for a frame.
@@ -57,8 +58,19 @@ PREVIEW_DELAY_MS = 60
 #: Board 3b: a 1200 × 1000 dialog with a 552 px settings column; the preview column takes the rest.
 DIALOG_SIZE, SETTINGS_WIDTH, PREVIEW_MIN_WIDTH = QSize(1200, 1000), 552, 400
 TITLE_WIDTH, FROZEN_WIDTH = 220, 400
-#: The section that is open when the dialog opens: its values change most from movie to movie.
-OPEN_AT_START = "Timing"
+#: The section open in the app's first movie dialog. Later dialogs open the one
+#: left open when the previous dialog closed (``MovieExport.open_section``).
+FIRST_SECTION = SECTIONS[0]
+
+
+def widest_number(label: QLabel, text: str) -> int:
+    """The width of ``text`` with its plane number at its widest digit: "Z 9 / 282" reserves "Z 888 / 282"."""
+    head, _, tail = text.partition(" / ")
+    stem = head.rstrip("0123456789")
+    count = len(tail.split(" ")[0]) if tail else len(head) - len(stem)
+    metrics = label.fontMetrics()
+    return max(metrics.horizontalAdvance(f"{stem}{digit * count} / {tail}" if tail else f"{stem}{digit * count}")
+               for digit in "0123456789")
 
 
 def outlined(text: str, parent: QWidget, tip: str, name: str = "movieStepButton") -> QPushButton:
@@ -81,9 +93,11 @@ def field_height(*fields: QWidget) -> None:
 
 
 class MovieDialog(QDialog):
-    def __init__(self, owner: MovieExport, view: FrozenView, settings: MovieSettings, start_note: str = "") -> None:
+    def __init__(self, owner: MovieExport, view: FrozenView, settings: MovieSettings, start_note: str = "",
+                 open_section: str = FIRST_SECTION) -> None:
         super().__init__(owner.tab.window())
         self.owner, self.view, self.settings = owner, view, settings
+        self.open_at_start = open_section
         #: What of the tomogram's last settings could not apply to this view.
         self.start_note = start_note
         self.setObjectName("movieDialog")
@@ -170,21 +184,32 @@ class MovieDialog(QDialog):
         column.addLayout(track)
         row = QHBoxLayout()
         row.setSpacing(SPACE_S)
-        # A readout that does not fit elides: it never pushes the buttons beside it out of the column.
-        self.readout = ElidedLabel("", mode=Qt.TextElideMode.ElideRight, parent=holder)
-        self.readout.setObjectName("movieReadout")
-        self.readout.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        row.addWidget(self.readout, 1)
+        # The plane never elides and keeps the width of its widest number, so nothing moves while
+        # scrubbing; the time after it elides first, and never pushes the buttons out of the column.
+        self.plane_readout = QLabel("", holder)
+        self.plane_readout.setObjectName("movieReadoutPlane")
+        self.plane_readout.setAccessibleName("Shown plane")
+        row.addWidget(self.plane_readout)
+        self.time_readout = ElidedLabel("", mode=Qt.TextElideMode.ElideRight, parent=holder)
+        self.time_readout.setObjectName("movieReadoutTime")
+        self.time_readout.setAccessibleName("Frame time and movie length")
+        self.time_readout.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        row.addWidget(self.time_readout, 1)
         self.hold_here = outlined("Hold here", holder, "", "movieHoldHere")
         self.hold_here.setIcon(themed_icon("pause", color=current_palette().accent, size=12))
         self.hold_here.setIconSize(QSize(12, 12))
         self.hold_here.clicked.connect(self.add_hold)
         row.addWidget(self.hold_here)
         row.addSpacing(SPACE_XS)
-        for label, where in (("First", 0), ("Middle", 1), ("Last", 2)):
-            button = outlined(label, holder, f"Show the {label.lower()} frame")
+        self.jumps: list[QPushButton] = []
+        for label, where in (("first", 0), ("middle", 1), ("last", 2)):
+            button = outlined("", holder, f"Show the {label} frame")
+            button.setAccessibleName(f"Show the {label} frame")
+            button.setIcon(themed_icon(f"frame-{label}", color=current_palette().text, size=14))
+            button.setIconSize(QSize(14, 14))
             button.clicked.connect(lambda _checked=False, where=where: self.jump(where))
             row.addWidget(button)
+            self.jumps.append(button)
         column.addLayout(row)
         self.notes = QVBoxLayout()
         self.notes.setSpacing(SPACE_XS)
@@ -205,7 +230,7 @@ class MovieDialog(QDialog):
         self.sections: list[MovieSection] = []
         builds = (self.build_planes, self.build_timing, self.build_picture, self.build_file)
         for title, build in zip(SECTIONS, builds, strict=True):
-            section = MovieSection(title, content, open_=title == OPEN_AT_START)
+            section = MovieSection(title, content, open_=title == self.open_at_start)
             build(section.body, section.layout_)
             section.line.toggled.connect(lambda open_, section=section: self.section_toggled(section, open_))
             section.opened.connect(lambda section=section: self.show_section(section))
@@ -224,6 +249,12 @@ class MovieDialog(QDialog):
         for name in names:
             name.setFixedWidth(column)
         return scroll
+
+    def open_section(self) -> str:
+        """The section to open next time: the one open now, or the first when all are closed.
+
+        The line's checked state, not the body: a closing spring still shows its body."""
+        return next((section.line.title for section in self.sections if section.line.isChecked()), FIRST_SECTION)
 
     def section_toggled(self, section: MovieSection, open_: bool) -> None:
         """One section at a time: the open one closes as another opens, each on its own spring."""
@@ -306,7 +337,7 @@ class MovieDialog(QDialog):
                             tips=("Sweep once, from From to To", "Sweep to To, then back to From"))
         self.end.currentIndexChanged.connect(lambda index: self.change_timeline(end=self.end.itemText(index)))
         self.loop_ready = Switch(parent, name="Loop-ready")
-        self.loop_ready.setToolTip("Leave out the last frame, so a looped movie does not stop on its first plane")
+        self.loop_ready.setToolTip("Leave out the last frame for a smooth loop")
         self.loop_ready.toggled.connect(lambda checked: self.change_timeline(loop_ready=checked))
         self.loop_label = QLabel("Loop-ready", parent)
         self.loop_label.setBuddy(self.loop_ready)
@@ -331,7 +362,7 @@ class MovieDialog(QDialog):
 
     def build_picture(self, parent: QWidget, layout: QVBoxLayout) -> None:
         self.framing = Segments(parent, FRAMINGS, "Framing",
-                                tips=("Keep the zoom, pan, orientation and pane proportions that the viewer shows",
+                                tips=("Use the zoom, pan and orientation of the viewer",
                                       "Show the full planes"))
         self.framing.currentIndexChanged.connect(lambda index: self.change(framing=FRAMINGS[index]))
         layout.addWidget(SettingRow(parent, "Framing", self.framing.segments))
@@ -368,7 +399,7 @@ class MovieDialog(QDialog):
         show_row.caption.setBuddy(self.scale_bar)
         if not self.view.calibrated:
             self.scale_bar.setEnabled(False)
-            self.scale_bar.setToolTip(NO_PIXEL_SIZE)
+            self.scale_bar.setToolTip(NO_PIXEL_SIZE_TIP)
             show_row.lines.addWidget(note(parent, NO_PIXEL_SIZE))
         layout.addWidget(show_row)
 
@@ -583,7 +614,10 @@ class MovieDialog(QDialog):
         with QSignalBlocker(self.scrubber):
             self.scrubber.setValue(index)
         self.bar.set_timeline(timeline, index)
-        self.readout.setText(readout(self.view, self.settings, timeline, index))
+        plane, time = readout(self.view, self.settings, timeline, index)
+        self.plane_readout.setText(plane)
+        self.plane_readout.setMinimumWidth(widest_number(self.plane_readout, plane))
+        self.time_readout.setText(time)
         reason = hold_here_reason(timeline, index)
         self.hold_here.setEnabled(not reason)
         self.hold_here.setToolTip(reason or "Hold this frame for 1 s. Change the time under Timing.")
@@ -626,7 +660,7 @@ class MovieDialog(QDialog):
         self.turn_hold.setToolTip("Hold the turning plane")
         self.end_hold.setEnabled(timing.end_available)
         self.end_hold.setToolTip("Hold the last frame" if timing.end_available
-                                 else "A loop-ready movie has no last plane to hold. Use Start or Turn.")
+                                 else "Not available: a loop-ready movie has no last frame")
         self.start_hold.setToolTip("Hold the first frame")
         self.step_hint.setText(step_hint(plan.timeline, timing.step))
         self.rate_note.setText(rate_hint(view, timing.fps))
@@ -663,7 +697,8 @@ class MovieDialog(QDialog):
         self.hold_here.setEnabled(False)
         if timeline is None:
             self.bar.set_timeline(None, 0)
-            self.readout.setText("")
+            self.plane_readout.setText("")
+            self.time_readout.setText("")
             self.preview.set_message(plan.blocked or "No preview")
             return
         with QSignalBlocker(self.scrubber):

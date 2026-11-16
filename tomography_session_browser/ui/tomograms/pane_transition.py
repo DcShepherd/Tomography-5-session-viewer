@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from PySide6.QtCore import QPoint, QRectF
+from PySide6.QtCore import QPoint, QPointF, QRectF
 from PySide6.QtWidgets import QWidget
 from tomography_session_browser.presentation.design_tokens import CANVAS_CHROME
 from tomography_session_browser.ui.motion.picture_layout import (
@@ -31,19 +31,27 @@ def image_bounds(stage: VolumeStage, surface: QWidget) -> dict[str, QRectF]:
 class PaneTransition:
     source: dict[str, QRectF]
     destination_mode: str
+    origin: QPoint | None = None
 
     def picture_layout(self, stage: VolumeStage) -> PictureLayout:
         destination = pane_bounds(stage)
+        offset = QPointF()
+        moved = QPointF()
+        if self.origin is not None:
+            window = stage.window()
+            offset = QPointF(stage.mapTo(window, QPoint()))
+            moved = QPointF(self.origin - window.mapToGlobal(QPoint()))
+        destination = {axis: rect.translated(offset) for axis, rect in destination.items()}
         reveal_ms = DURATION_SMALL_MS if self.destination_mode == "Ortho" else 0
-        background = QRectF(stage.rect())
+        background = QRectF(stage.rect()).translated(offset)
         elements = [PictureElement(CANVAS_CHROME.background, RectMotion(background, background),
                     OpacityWindow(1., 1.+reveal_ms/DURATION_PANEL_MS, 1., 0.) if reveal_ms else OpacityWindow())]
         # The XY backing stays opaque when side panes reveal the live destination.
         xy = destination["XY"]
         elements.append(PictureElement(CANVAS_CHROME.background, RectMotion(xy, xy)))
         if self.destination_mode == "Single":
-            elements.extend(PictureElement(rect, RectMotion(rect, rect), OpacityWindow(0., .25, 1., 0.))
+            elements.extend(PictureElement(rect, RectMotion(rect.translated(moved), rect.translated(moved)), OpacityWindow(0., .25, 1., 0.))
                             for axis, rect in self.source.items() if axis != "XY")
         source = self.source["XY"]
-        elements.append(PictureElement(source, RectMotion(source, fit_rect(source, xy))))
+        elements.append(PictureElement(source, RectMotion(source.translated(moved), fit_rect(source, xy))))
         return PictureLayout(tuple(elements), reveal_ms)

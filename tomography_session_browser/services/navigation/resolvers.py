@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from tomography_session_browser.domain.identity import entity_key_text
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
 from tomography_session_browser.domain.models import (
     Atlas,
@@ -22,8 +23,10 @@ from tomography_session_browser.services.entity_links import (
     planned_exposures_from_metadata,
     shares_linked_tilt_series,
     tilt_on_batch,
+    tilt_parent_candidates,
 )
 from tomography_session_browser.services.tilt_series_validation import (
+    TiltSeriesValidation,
     validate_tilt_series,
 )
 
@@ -247,6 +250,8 @@ def resolve_tilt_series_navigation_targets(
     search_maps: Iterable[SearchMap],
     overviews: Iterable[Overview],
     search_tiles: Iterable[SearchTile] = (),
+    tilt_series: Iterable[TiltSeries] = (),
+    validation: TiltSeriesValidation | None = None,
 ) -> TiltSeriesNavigationTargets:
     """Resolve metadata-linked objects for a selected tilt series."""
 
@@ -255,7 +260,9 @@ def resolve_tilt_series_navigation_targets(
     tiles = tuple(search_tiles)
     overview_items = tuple(overviews)
 
-    batch_resolution = _resolve_batch_for_tilt(tilt, batches)
+    same_id = {entity_key_text(series): series for series in tilt_series if series.id == tilt.id}
+    same_id[entity_key_text(tilt)] = tilt
+    batch_resolution = _resolve_batch_for_tilt(tilt, batches, tuple(same_id.values()))
     batch = batch_resolution.target
     tile_resolution = _resolve_search_tile_for_tilt(tilt, batch, tiles)
     map_resolution = _resolve_search_map_for_tilt(tilt, batch, maps)
@@ -269,7 +276,7 @@ def resolve_tilt_series_navigation_targets(
     inferred_label = None
     # Failed is decided by the series' own image count, never by its grid's
     # expected count, so validating it alone gives its grid verdict here.
-    if batch is None and validate_tilt_series(tilt).status == ValidationStatus.FAILED:
+    if batch_resolution.unresolved and (validation or validate_tilt_series(tilt)).status == ValidationStatus.FAILED:
         inferred_label = inferred_batch_label_for_tilt(tilt)
 
     return TiltSeriesNavigationTargets(
@@ -288,25 +295,25 @@ def resolve_tilt_series_navigation_targets(
 def _resolve_batch_for_tilt(
     tilt: TiltSeries,
     batch_positions: tuple[BatchPosition, ...],
+    same_id: tuple[TiltSeries, ...],
 ) -> NavigationResolution:
-    # A recorded ID outside the current scope is not a failure on its own;
-    # reciprocal metadata may still identify the batch.
-    if tilt.linked_batch_position_id and (
-        explicit := explicit_id_resolution(
-            (batch for batch in batch_positions if batch.id == tilt.linked_batch_position_id),
-            provenance="tilt.linked_batch_position_id",
-            navigable_explanation="Resolved from the tilt series' explicit batch-position ID.",
-            ambiguous_explanation="More than one batch position has the tilt series' explicit batch-position ID.",
-        )
-    ) is not None:
+    tilt_id_collides = len(same_id) > 1
+    candidates, forward = tilt_parent_candidates(tilt, batch_positions, tilt_id_collides=tilt_id_collides)
+    if forward and (explicit := explicit_id_resolution(
+        candidates,
+        provenance="tilt.linked_batch_position_id",
+        navigable_explanation="Resolved from the tilt series' explicit batch-position ID.",
+        ambiguous_explanation="More than one batch position has the tilt series' explicit batch-position ID.",
+    )) is not None:
         return explicit
-
+    if tilt_id_collides and any(tilt.id in batch.linked_tilt_series_ids for batch in batch_positions):
+        return ambiguous_resolution(
+            same_id,
+            provenance="batch.linked_tilt_series_ids",
+            explanation="The recorded tilt-series ID belongs to more than one physical series.",
+        )
     return navigation_resolution_from_candidates(
-        [
-            batch
-            for batch in batch_positions
-            if tilt.id in (batch.linked_tilt_series_ids or [])
-        ],
+        candidates,
         provenance="batch.linked_tilt_series_ids",
         navigable_explanation="Resolved from the batch position's linked tilt-series IDs.",
         ambiguous_prefix="Batch-position link is ambiguous between",

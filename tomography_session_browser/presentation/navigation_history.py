@@ -20,12 +20,19 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from tomography_session_browser.presentation.context_stack import ENTITY_DISPLAY_LABELS
 from tomography_session_browser.presentation.tomogram_state import TomogramViewState
 from tomography_session_browser.presentation.tomogram_selection import TomogramLocation
 
 from tomography_session_browser.presentation.tomogram_tag_filters import TagFilter
 
 DEFAULT_HISTORY_LIMIT = 50
+
+#: The Back and Forward tooltips when there is nowhere to go.
+IDLE_TEXT = {
+    "Back": "Return to the previous navigation step.",
+    "Forward": "Move forward again after going back.",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +48,9 @@ class HistoryLocation:
     objects sharing an ``id`` stay two places. The list anchor (the object row
     at the top of the list and its offset) puts the list back where it was; it
     is not part of what makes a place the same place.
+
+    ``label`` names the object and ``scope_label`` the scope it was in, for
+    the Back and Forward tooltips; neither is part of the place.
     """
 
     scope_key: str
@@ -53,11 +63,15 @@ class HistoryLocation:
     filter_keys: frozenset[str] | None = None
     filter_scope_label: str = ""
     label: str = ""
+    scope_label: str = ""
     list_anchor_key: str = ""
     list_anchor_offset: int = 0
     tomogram_state: TomogramViewState | None = None
     tomogram_selection: TomogramLocation | None = None
     tag_filter: TagFilter = TagFilter()
+    list_membership: frozenset[str] | None = None
+    list_population: frozenset[str] = frozenset()
+    list_population_scope: str = ""
 
     def same_place_as(self, other: "HistoryLocation | None") -> bool:
         """Whether two entries denote the same destination.
@@ -83,6 +97,7 @@ class NavigationHistory:
     limit: int = DEFAULT_HISTORY_LIMIT
     _entries: list[HistoryLocation] = field(default_factory=list)
     _index: int = -1
+    revision: int = field(default=0, init=False)
 
     # -- state --------------------------------------------------------------
 
@@ -107,6 +122,16 @@ class NavigationHistory:
     def can_go_forward(self) -> bool:
         return -1 < self._index < len(self._entries) - 1
 
+    def peek_back(self) -> HistoryLocation | None:
+        """Where Back goes, without going there."""
+
+        return self._entries[self._index - 1] if self.can_go_back else None
+
+    def peek_forward(self) -> HistoryLocation | None:
+        """Where Forward goes, without going there."""
+
+        return self._entries[self._index + 1] if self.can_go_forward else None
+
     # -- mutation -----------------------------------------------------------
 
     def record(self, location: HistoryLocation) -> bool:
@@ -117,6 +142,7 @@ class NavigationHistory:
         history step.
         """
 
+        self.revision += 1
         if location.same_place_as(self.current()):
             # Still refresh the stored entry so frame/filter stay accurate.
             self._entries[self._index] = location
@@ -126,6 +152,12 @@ class NavigationHistory:
         self._entries.append(location)
         self._index = len(self._entries) - 1
         self._enforce_limit()
+        return True
+
+    def commit_cursor(self, index: int, revision: int) -> bool:
+        if revision != self.revision or not 0 <= index < len(self._entries):
+            return False
+        self._index = index
         return True
 
     def back(self) -> HistoryLocation | None:
@@ -141,6 +173,7 @@ class NavigationHistory:
         return self._entries[self._index]
 
     def clear(self) -> None:
+        self.revision += 1
         self._entries.clear()
         self._index = -1
 
@@ -165,6 +198,8 @@ class NavigationHistory:
                 new_index = len(surviving) - 1
 
         removed = len(self._entries) - len(surviving)
+        if removed:
+            self.revision += 1
         self._entries = surviving
         if not surviving:
             self._index = -1
@@ -180,3 +215,22 @@ class NavigationHistory:
         if overflow > 0:
             del self._entries[:overflow]
             self._index = max(self._index - overflow, 0)
+
+
+def destination_text(direction: str, location: HistoryLocation) -> str:
+    """The Back or Forward tooltip: where the step goes.
+
+    "Back to Position_2 in Grid_A · Tilt series". The scope is left out when
+    it is the object itself; a place with no object (the Summary tab) is
+    named by its scope. The shortcut hint is the caller's.
+    """
+
+    item, scope = location.label, location.scope_label
+    if item:
+        text = f"{direction} to {item}" + (f" in {scope}" if scope and scope != item else "")
+    elif scope:
+        text = f"{direction} to {scope}"
+    else:
+        text = f"{direction} to the {'previous' if direction == 'Back' else 'next'} step"
+    tab = ENTITY_DISPLAY_LABELS.get(location.tab, location.tab)
+    return f"{text} · {tab}" if tab else text

@@ -34,7 +34,6 @@ from tomography_session_browser.reports.graphics.overlays import PRINT_DASHES as
 from tomography_session_browser.reports.graphics.overlays import STATUS_REASONS as _STATUS_REASONS
 from tomography_session_browser.reports.graphics.overlays import batch_label_pdf_origin as _batch_label_pdf_origin
 from tomography_session_browser.reports.graphics.atlas_figure import draw_pdf_atlas_leaf as _draw_pdf_atlas_leaf
-from tomography_session_browser.reports.graphics.atlas_figure import natural_key as _natural_key
 from tomography_session_browser.reports.graphics.atlas_figure import overlaps as _overlaps
 from tomography_session_browser.reports.graphics.overlays import print_style as _print_style
 from tomography_session_browser.reports.graphics.text import caption_width

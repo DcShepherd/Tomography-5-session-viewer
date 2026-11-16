@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import PurePath
 from typing import Literal
 
 from tomography_session_browser.domain.display_names import count_phrase
@@ -129,6 +130,7 @@ class ScopedTomograms:
     stated: tuple[tuple[str, float], ...]
     acquisition_sessions: int
     folder_report: bool = False
+    loaded: tuple[ReportSource, ...] = ()   # every loaded folder, ticked or not, for print_source
 
     @property
     def members(self) -> tuple[ReportRow, ...]:
@@ -216,7 +218,7 @@ def select_report_tomograms(snapshot: ReportTomograms, sessions: Sequence[Sessio
 
     def scoped(sections, session_notes=(), incomplete=(), folder_report=False) -> ScopedTomograms:
         return ScopedTomograms(tuple(sections), tuple(session_notes), tuple(incomplete), sources, left_out,
-                               snapshot.stated, snapshot.acquisition_sessions, folder_report)
+                               snapshot.stated, snapshot.acquisition_sessions, folder_report, snapshot.sources)
 
     if not sessions:
         sections = tuple(TomogramSection(f"folder-{index}", source.label,
@@ -315,8 +317,21 @@ def exclusion_reason(row: ReportRow) -> str:
     }[row.state]
 
 
-def link_state_label(row: ReportRow) -> str:
-    return "Linked" if row.link.status == 'resolved' else "Not linked"
+def print_source(source: str, scoped: ScopedTomograms) -> str:
+    """A metric source in print (ruling R1).
+
+    A relative source is inside its own folder and prints unchanged. An
+    absolute one was lent by another loaded job and prints as that job's name
+    and the path inside it, never as a path on this computer. With no single
+    loaded folder that holds it, only the file name prints.
+    """
+    path = PurePath(source)
+    if not path.is_absolute():
+        return source
+    owners = [loaded for loaded in scoped.loaded if path.is_relative_to(loaded.source.path)]
+    if len(owners) != 1:
+        return path.name
+    return f"{owners[0].label}, {path.relative_to(owners[0].source.path).as_posix()}"
 
 
 def print_warning(text: str) -> str:

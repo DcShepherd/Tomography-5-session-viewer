@@ -315,8 +315,10 @@ class ProjectActions(QObject):
     def refresh_processing_source(self, source_id: str) -> None:
         sources = [source for source in self.state.review.workspace.processing_sources if source.id == source_id]
         if len(sources) == 1:
-            source = sources[0]
-            self.parts.loading.queue_session_loads([LoadRequest(str(source.path), LoadIntent.RELOAD)])
+            # A merged alignment job has no row of its own, so it reloads with its reconstruction.
+            companions = self.state.review.workspace.alignment_companions((source_id,))
+            self.parts.loading.queue_session_loads([LoadRequest(str(source.path), LoadIntent.RELOAD)
+                                                    for source in (*sources, *companions)])
 
     def remove_processing_source(self, source_id: str) -> None:
         sources = [source for source in self.state.review.workspace.processing_sources if source.id == source_id]
@@ -355,19 +357,23 @@ class ProjectActions(QObject):
 
 
     def remove_project_group(self, group: ProjectTreeGroup) -> None:
-        session_word = "processing folder" if group.processing_source is not None else "session"
-        source_count = 1 if group.processing_source is not None else len(group.sessions)
+        workspace = self.state.review.workspace
+        # A merged alignment job has no row of its own, so it leaves with the reconstruction it lends to.
+        leaving = () if group.processing_source is None else (
+            group.processing_source, *workspace.alignment_companions((group.processing_source.id,)))
+        session_word = "processing folder" if leaving else "session"
+        source_count = len(leaving) if leaving else len(group.sessions)
         response = message_sheet.choose_action(self.window, ActionPrompt(
             MessageContent(f"Remove “{group.display_name}” from the project?",
                 f"Its {count_phrase(source_count, session_word)} leave this review. Source files stay unchanged.",
-                tuple(str(s.path) for s in group.sessions) if group.processing_source is None else (str(group.processing_source.path),)),
+                tuple(str(s.path) for s in (leaving or group.sessions))),
             (MessageAction("cancel", "Cancel"), MessageAction("remove", "Remove group", ActionRole.DESTRUCTIVE)), "cancel", "cancel"))
         if response != "remove":
             return
         remove_keys = {session_key(session) for session in group.sessions}
         self.parts.project.forget_project_group_name(group)
-        processing = tuple(source for source in self.state.review.workspace.processing_sources
-                           if source is not group.processing_source)
+        gone = {source.id for source in leaving}
+        processing = tuple(source for source in workspace.processing_sources if source.id not in gone)
         self.parts.project.refresh_project_state_after_edit(
             [session for session in self.state.review.workspace.sessions if session_key(session) not in remove_keys],
             processing_sources=processing,
@@ -416,7 +422,7 @@ class ProjectActions(QObject):
             self.parts.viewers.render_viewer_tabs()
             self.parts.context.sync_context_panel_to_active_scope()
             self.parts.chrome.update_tab_counts()
-        self.ui.refresh_button.setEnabled(self.state.review.workspace.has_sources)
+        self.ui.refresh_action.setEnabled(self.state.review.workspace.has_sources)
         self.parts.report.refresh_action()
 
 

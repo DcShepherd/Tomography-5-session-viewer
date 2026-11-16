@@ -547,7 +547,7 @@ def _check_targets_land_on_their_cells(
 
     sample = session.samples[0]
     markers = search_map_markers(search_map, sample.batch_positions, tilt_series=sample.tilt_series,
-                                 validations=GridValidations().for_series(sample.tilt_series))
+                                 validations=GridValidations([sample]).for_series(sample.tilt_series))
     for batch, target in zip(sample.batch_positions, targets):
         marker = next(
             (item for item in markers if item.marker_type == MarkerType.BATCH_POSITION and item.linked_object_id == batch.id),

@@ -9,7 +9,7 @@ from typing import Any
 from tomography_session_browser.domain.models import Atlas
 from tomography_session_browser.parsers.mrc_parser import read_mrc_metadata
 from tomography_session_browser.parsers.path_utils import safe_id, sorted_paths
-from tomography_session_browser.parsers.xml_parser import find_first, parse_xml_file
+from tomography_session_browser.parsers.xml_parser import find_first, parse_xml_file, parse_xml_metadata
 from tomography_session_browser.services.atlas_metadata import atlas_projection_mismatch, referenced_atlas_stem
 
 LOGGER = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ def parse_atlas_folder(path: Path) -> Atlas | None:
     warnings: list[str] = []
     dm_path = path / "Atlas.dm"
     if dm_path.exists():
-        metadata["Atlas.dm"] = _parse_xml_metadata(dm_path, warnings)
+        metadata["Atlas.dm"] = parse_xml_metadata(dm_path, warnings, "atlas")
 
     # Tomography 5 keeps every acquisition when a grid's atlas is re-acquired,
     # so one Atlas folder can hold several Atlas_<id> mosaics. Atlas.dm names
@@ -45,7 +45,7 @@ def parse_atlas_folder(path: Path) -> Atlas | None:
     if atlas_stem is not None:
         atlas_xmls = [item for item in atlas_xmls if item.stem == atlas_stem]
     for xml_path in atlas_xmls[:5]:
-        metadata[xml_path.name] = _parse_xml_metadata(xml_path, warnings)
+        metadata[xml_path.name] = parse_xml_metadata(xml_path, warnings, "atlas")
 
     # Prefer the Atlas MRC over the JPG when both exist: the MRC is the
     # native-resolution stitched mosaic (e.g. 4005x3971 px at 4.66 µm/px),
@@ -326,12 +326,6 @@ def _read_image_dimensions(path: Path) -> tuple[int, int] | None:
         return None
 
 
-def _parse_xml_metadata(path: Path, warnings: list[str]) -> dict:
-    data = parse_xml_file(path)
-    message = data.get("_parse_error") or data.get("_read_error")
-    if message:
-        warnings.append(f"Could not parse atlas metadata XML {path.name}: {message}")
-    return data
 
 
 def _xml_problem(data: Any) -> bool:

@@ -11,6 +11,7 @@ from tomography_session_browser.presentation.tomogram_context import ContextFile
 from tomography_session_browser.ui.file_actions import add_path_actions, copy_text
 from tomography_session_browser.ui.motion import SmoothScroller
 from tomography_session_browser.ui.tomograms.folding_section import FoldingSection
+from tomography_session_browser.ui.widgets.copy_feedback import CopyFeedback
 from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 from tomography_session_browser.ui.widgets.metadata_callout import MetadataCallout
 from tomography_session_browser.ui.widgets.metadata_text import display_value
@@ -36,7 +37,8 @@ def copy_button(value: str, parent: QWidget, *, label: str = 'Copy') -> QToolBut
     button.setToolTip(value)
     button.setAccessibleName(label)
     button.setAccessibleDescription(value)
-    button.clicked.connect(lambda: copy_text(value))
+    feedback = CopyFeedback(button)
+    button.clicked.connect(lambda: (copy_text(value), feedback.confirm()))
     return button
 
 

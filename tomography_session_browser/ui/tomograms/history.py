@@ -3,18 +3,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import time
 from types import MappingProxyType
 from typing import Literal
 from PySide6.QtCore import QThreadPool
 
 from tomography_session_browser.presentation.tomogram_capture_history import (CaptureEntry, HistoryContext,
                                                                             CapturePage, capture_page, scope_history)
-from tomography_session_browser.presentation.tomogram_movie import FrozenView
-from tomography_session_browser.presentation.tomogram_movie_history import MOVIE_KIND, MovieMark, newest_marks
-from tomography_session_browser.presentation.tomogram_state import TomogramViewState
-from tomography_session_browser.services.movie.models import MovieResult
+from tomography_session_browser.presentation.tomogram_movie_history import MovieCounts, movie_counts
 from tomography_session_browser.ui.tomograms.history_loading import HistoryJob, HistoryLoader
+from tomography_session_browser.ui.tomograms.movie_history import MovieHistory
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,11 +41,9 @@ class CaptureHistory:
         self.unrecorded: dict[str, CaptureEntry] = {}
         self.opened_revision: dict[str, int] = {}
         self.count_snapshot: CountSnapshot | None = None
-        #: Saved movies from the last full-scope read, and this window's own exports since.
-        self.stored_movies: dict[str, MovieMark] = {}
-        self.local_movies: dict[str, MovieMark] = {}
         self.pending_counts: HistoryJob | None = None
         self.refresh_error = ""
+        self.movies = MovieHistory(self)
 
     def begin_counts(self, job: HistoryJob) -> None:
         """Dispatch grants publication rights only to a full-scope request."""
@@ -59,16 +54,15 @@ class CaptureHistory:
         self.tab.update_commands()
         self.tab.review_metadata_changed.emit()
 
-    def complete_counts(self, job: HistoryJob, page: CapturePage, *,
+    def complete_counts(self, job: HistoryJob, page: CapturePage, *, movies: MovieCounts | None = None,
                         recent: Literal["replace", "merge", "keep"] = "keep") -> None:
         if self.pending_counts is not job or job.stamp != self.stamp() or job.cancelled.is_set():
             return
         self.count_snapshot = CountSnapshot(page.total, MappingProxyType(dict(page.counts)))
         self.pending_counts, self.refresh_error = None, ""
         self.publish_review_counts(dict(page.counts))
-        if page.movies is not None:
-            self.stored_movies = dict(page.movies)
-            self.publish_movies()
+        if movies is not None:  # A capture history page leaves the last movie counts.
+            self.movies.counts_arrived(movies)
         if recent != "keep":
             values = {} if recent == "replace" else {entry.id: entry for entry in self.entries}
             values.update((entry.id, entry) for entry in page.entries)
@@ -89,18 +83,13 @@ class CaptureHistory:
         self.tab.review_state.capture_counts((row.tomogram for row in self.tab.payload.rows),
                                               self.tab.payload.sources, counts, note)
 
-    def movie_saved(self, view: FrozenView, result: MovieResult) -> None:
-        """Mark the row at once, and record the export so the mark returns after a restart."""
-        output = result.movie or result.path
-        mark = MovieMark(time.time_ns(), output.name)
-        self.local_movies[view.row_key] = mark
-        self.publish_movies()
-        volume = view.volume
-        state = TomogramViewState(view.row_key, volume.id, volume_signature=(volume.fingerprint.size, volume.fingerprint.mtime_ns))
-        self.tab.persistence.write(MOVIE_KIND, str(output), state, output=str(output), created_ns=mark.created_ns)
-
-    def publish_movies(self) -> None:
-        self.tab.review_list.movie_marks.set_marks(newest_marks(self.stored_movies, self.local_movies))
+    def sync_count_columns(self) -> None:
+        """The camera and film counts appear once there is something to count."""
+        counts = self.count_snapshot
+        self.tab.review_list.capture_column.set_counts(counts.rows if counts else {},
+            (failure.job.request.row_key for failure in self.tab.captures.failures),
+            available=counts is not None, refreshing=self.pending_counts is not None, error=self.refresh_error)
+        self.movies.sync_slot()
 
     def cancel_counts(self, job: HistoryJob | None, *, replace: bool = False) -> None:
         if job is not None and self.pending_counts is job:
@@ -120,9 +109,12 @@ class CaptureHistory:
     def refresh_recent(self) -> None:
         stamp = self.stamp()
         repository, context, extra = self.tab.persistence.repository, self.context(), self.extras()
+        movie_extra = self.movies.extras()
         writer = self.tab.persistence.writer
-        job = self.recent_loader.request(lambda cancelled: writer.read(lambda: capture_page(
-            repository, context, limit=200, extra=extra, with_movies=True, cancelled=cancelled)), stamp=stamp)
+        # One full-scope read gives the capture and movie counts together.
+        job = self.recent_loader.request(lambda cancelled: writer.read(lambda: (
+            capture_page(repository, context, limit=200, extra=extra, cancelled=cancelled),
+            movie_counts(repository, context.identities, extra=movie_extra, cancelled=cancelled))), stamp=stamp)
         self.begin_counts(job)
 
     def refresh_captures(self) -> None:
@@ -153,12 +145,14 @@ class CaptureHistory:
                 self.popup.cancel()
                 self.popup.close()
             self.count_snapshot, self.pending_counts = None, None
+            self.movies.scope_changed()
             self.refresh_error = ""
             self.recent_loader.cancel()
             self.scope_choice_revision = self.tab.persistence.choice_revision
         generation = self.generation
         revision = self.revision
         repository, context, extra = self.tab.persistence.repository, self.context(), self.extras()
+        movie_extra = self.movies.extras()
         writer = self.tab.persistence.writer
         self.opened_revision = {key: value for key, value in self.opened_revision.items()
                                 if key in self.tab.review_list.rows}
@@ -173,7 +167,7 @@ class CaptureHistory:
         self.entries[:] = [entry for entry in self.entries
                                        if (entry.state.row_key, entry.state.volume_id) in context.identities]
         job = self.loader.request(lambda cancelled: (revisions, choice, writer.read(lambda: scope_history(
-            repository, context, extra=extra, cancelled=cancelled))), stamp=(generation, revision))
+            repository, context, extra=extra, movie_extra=movie_extra, cancelled=cancelled))), stamp=(generation, revision))
         self.begin_counts(job)
         if invalidate and self.browser is not None:
             self.browser.scope_changed()
@@ -184,7 +178,8 @@ class CaptureHistory:
         if self.recent_loader.running is job:
             if self.recent_loader.retire(job) and result is not None:
                 if job.stamp == self.stamp():
-                    self.complete_counts(job, result, recent="replace")
+                    captures, movies = result
+                    self.complete_counts(job, captures, movies=movies, recent="replace")
                 else:
                     self.refresh_recent()
             return
@@ -198,7 +193,7 @@ class CaptureHistory:
             self.load_scope(invalidate=False)
             return
         self.tab.persistence.history_loading = False
-        self.complete_counts(job, snapshot.captures, recent="replace")
+        self.complete_counts(job, snapshot.captures, movies=snapshot.movies, recent="replace")
         self.tab.persistence.apply_history(snapshot, revisions, choice)
 
     def failed(self, job: HistoryJob, message: str) -> None:
@@ -270,6 +265,7 @@ class CaptureHistory:
         if self.popup is not None:
             for row in self.popup.rows:
                 row.refresh_theme()
+        self.movies.refresh_theme()
 
     def removal_failed(self, identity: str, message: str) -> None:
         if self.browser is not None and self.browser.selected_id == identity:
@@ -280,6 +276,7 @@ class CaptureHistory:
         if self.popup is not None:
             self.popup.cancel()
             self.popup.close()
+        self.movies.close_menu()
         self.loader.cancel()
         self.recent_loader.cancel()
         for dialog in (self.browser, self.contact_dialog):

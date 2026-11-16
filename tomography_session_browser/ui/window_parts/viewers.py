@@ -34,7 +34,9 @@ from tomography_session_browser.presentation.viewer_tabs import (
     PreparedViewerTab,
     prepare_viewer_tabs,
 )
-from tomography_session_browser.services.markers.builders import atlas_lod_markers, markers_for_object
+from tomography_session_browser.services.markers.builders import markers_for_object
+from tomography_session_browser.presentation.atlas_colouring import TAGS
+from tomography_session_browser.ui.viewer.atlas_overlay_state import AtlasOverlayState
 from tomography_session_browser.services.navigation import (
     tab_label_for_object,
 )
@@ -74,9 +76,11 @@ from tomography_session_browser.ui.window_parts.contracts import (
 from tomography_session_browser.ui.window_parts.state import (
     WindowState,
 )
-from tomography_session_browser.ui.window_parts.support import format_tilt_angle, VIEWER_STATE_CACHE_LIMIT
+from tomography_session_browser.presentation.formatting import format_tilt_angle
+from tomography_session_browser.ui.window_parts.support import VIEWER_STATE_CACHE_LIMIT
 from tomography_session_browser.presentation.tab_keys import TabKey, VIEWER_TAB_KEYS
 from tomography_session_browser.presentation.tomogram_tabs import prepare_tomogram_tab
+from tomography_session_browser.presentation.tomogram_arrival import TomogramArrival, valid_arrival
 from tomography_session_browser.presentation.tomogram_state import TomogramViewState
 from tomography_session_browser.domain.tomograms import Tomogram
 from tomography_session_browser.presentation.workspace import EntityKind
@@ -96,7 +100,10 @@ class ViewerCoordinator(QObject):
         super().__init__(window)
         self.window, self.state, self.ui, self.parts = window, state, ui, parts
         self.prepared_tabs = PreparedTabsCache()
+        #: The Atlas tab's colour mode and what it colours (batch 4).
+        self.atlas_overlay = AtlasOverlayState()
         self.applying_payload: PreparedSessionUi | None = None
+        self.applying_arrival: TomogramArrival | None = None
         self.applied_tabs: dict[str, tuple[object, object, PreparedViewerTab]] = {}
         #: The scope whose rows the viewer tabs list right now. Remembered tab
         #: state is saved under this, never under a scope already installed
@@ -105,9 +112,11 @@ class ViewerCoordinator(QObject):
         self.scope_preparation = ScopePreparation(
             publish=self.publish_scope, report_error=self.scope_failed)
 
-    def scope_failed(self, message: str) -> None:
-        with QSignalBlocker(self.ui.tree):
-            self.ui.tree.setCurrentItem(None)
+    def scope_failed(self, request: ScopeRequest, message: str) -> None:
+        if request.arrival is None:
+            with QSignalBlocker(self.ui.tree):
+                self.ui.tree.setCurrentItem(None)
+        self.parts.history.update_history_actions()
         self.window.statusBar().showMessage(message)
 
     def cancel_scope_preparation(self) -> None:
@@ -116,10 +125,13 @@ class ViewerCoordinator(QObject):
         if current is not None and current.generation == owner.generation:
             # A superseding viewer action keeps the committed scope. Do not
             # leave the uncommitted tree row governing tab scope resolution.
-            with QSignalBlocker(self.ui.tree):
-                self.ui.tree.setCurrentItem(None)
+            if current.arrival is None:
+                with QSignalBlocker(self.ui.tree):
+                    self.ui.tree.setCurrentItem(None)
             self.window.statusBar().clearMessage()
         owner.invalidate()
+        if current is not None and current.arrival is not None and current.arrival.history_index is not None:
+            self.parts.history.update_history_actions()
 
     def request_tree_selection(self, value: Any, label: str) -> None:
         if not isinstance(value, (ProjectTreeGroup, Session, Sample, LinkedSampleGroup, AllTomograms, FolderTomograms)):
@@ -151,7 +163,7 @@ class ViewerCoordinator(QObject):
                 and scope_key(self.state.review.scope) == scope_key(destination)):
             # Installed already, so only the tab changes. An earlier request
             # still being prepared must not publish over this choice.
-            self.scope_preparation.invalidate()
+            self.cancel_scope_preparation()
             if TAB_LABELS[self.ui.tabs.currentIndex()] != TabKey.TOMOGRAMS:
                 self.ui.tabs.setCurrentIndex(TAB_LABELS.index(TabKey.TOMOGRAMS))
                 if departure is not None:
@@ -176,12 +188,11 @@ class ViewerCoordinator(QObject):
         return not isinstance(destination, TreeRowRefusal) and scope_key(destination) == scope_key(selection)
 
     def request_scope(self, value: Any, label: str, *, destination_tab: TabKey,
-                      departure: HistoryLocation | None = None) -> None:
+                      departure: HistoryLocation | None = None, arrival: TomogramArrival | None = None) -> None:
         """Prepare a broad scope, to be published with ``destination_tab`` shown.
 
-        The one path both ordinary tree selection and an explicit route
-        (``open_scope``) take. A request for the scope and tab already being
-        prepared is kept as it is, with its original departure.
+        Ordinary requests for the same scope and tab coalesce. A tomogram
+        arrival replaces the pending intent, including its history policy.
         """
 
         scope = acquisition_scope(value)
@@ -191,14 +202,20 @@ class ViewerCoordinator(QObject):
                 and current.workspace is self.state.review.workspace
                 and current.destination_tab == destination_tab
                 and scope_key(current.viewer_scope) == scope_key(value)):
-            return
+            if arrival is None and current.arrival is None:
+                return
+            if (arrival is not None and arrival.history_index is None and current.arrival is not None
+                    and current.arrival.history_index is None):
+                departure = current.departure
         self.window.statusBar().showMessage(f"Preparing {label}...")
         viewer_scope = value  # The typed selection owns folder and version; the request derives its acquisition scope.
         scope_value = dashboard_scope_value(self.state.review.workspace, viewer_scope, self.state.review.workspace.atlas_label)
         owner.request(self.state.review.workspace, scope, viewer_scope, value, label, destination_tab,
             departure=departure,
             cached_dashboard=self.parts.dashboard_host.model_cache.get(dashboard_key(scope_value)),
-            cached_viewer_tabs=self.prepared_tabs.get(self.state.review.workspace, viewer_scope))
+            cached_viewer_tabs=self.prepared_tabs.get(self.state.review.workspace, viewer_scope), arrival=arrival)
+        if current is not None and current.arrival is not None and current.arrival.history_index is not None:
+            self.parts.history.update_history_actions()
 
     def open_scope(self, target: Any, *, destination_tab: TabKey, departure: HistoryLocation | None = None) -> None:
         """Go to a broad scope on purpose: a summary's own link, not a tree click.
@@ -213,6 +230,7 @@ class ViewerCoordinator(QObject):
 
         if (self.state.review.preserve_tree_root_context
                 and scope_key(self.state.review.scope) == scope_key(target)):
+            self.cancel_scope_preparation()
             if TAB_LABELS[self.ui.tabs.currentIndex()] != destination_tab:
                 self.ui.tabs.setCurrentIndex(TAB_LABELS.index(destination_tab))
                 if departure is not None:
@@ -244,13 +262,46 @@ class ViewerCoordinator(QObject):
             return item.text(0)
         return getattr(target, "label", None) or getattr(target, "name", None) or "dataset"
 
+    def open_tomogram_arrival(self, key: str, parent_key: str) -> None:
+        workspace = self.state.review.workspace
+        owner = workspace.tomogram_placement.owner_by_row.get(key)
+        if owner is None or not any(row.id == key for row in workspace.tomogram_placement.by_parent.get(parent_key, ())):
+            self.parts.context.post_navigation_message("The selected tomogram link is no longer available.")
+            return
+        tab = self.ui.tomogram_tab
+        scope = self.parts.scopes.viewer_tab_context()
+        population = frozenset(row.id for row in workspace.tomograms(scope))
+        if key not in population:
+            scope = AllTomograms(owner)
+        listing = tab.review_list
+        arrival = TomogramArrival(key, parent_key, listing.filter_value(), listing.membership,
+                                  frozenset(listing.rows), population_scope=tab.population_scope)
+        self.request_scope(scope, self.scope_label_for(scope), destination_tab=TabKey.TOMOGRAMS,
+                           departure=self.parts.history.begin_navigation(), arrival=arrival)
+
     def publish_scope(self, request: ScopeRequest, payload: PreparedSessionUi) -> None:
         if request.workspace is not self.state.review.workspace:
+            self.parts.history.update_history_actions()
             return
+        arrival = request.arrival
+        history = self.state.history.history
+        if arrival is not None:
+            link = request.workspace.tomogram_links.get(arrival.row_key)
+            valid_link = arrival.parent_key is None or (
+                link is not None and link.status == "resolved" and link.target_key == arrival.parent_key
+            )
+            live_row = any(row.id == arrival.row_key for row in request.workspace.tomograms(request.viewer_scope))
+            if not valid_link or not live_row or not valid_arrival(arrival, payload.tomograms, history.revision):
+                self.parts.history.update_history_actions()
+                self.parts.context.post_navigation_message("The selected tomogram destination is no longer available.")
+                return
         scope_value = dashboard_scope_value(request.workspace, payload.tomograms.selection or request.viewer_scope, request.workspace.atlas_label)
         if payload.dashboard_model is not None:
             self.parts.dashboard_host.model_cache[dashboard_key(scope_value)] = (payload.dashboard_model, payload.timeline)
         self.applying_payload = payload
+        self.applying_arrival = arrival
+        if arrival is not None:
+            self.ui.tomogram_tab.render_timer.stop()
         previous = self.state.review.suppress_viewer_context
         self.state.review.suppress_viewer_context = True
         try:
@@ -261,20 +312,31 @@ class ViewerCoordinator(QObject):
             # not cancel the preparation it belongs to.
             counts = {key: len(tab.items) for key, tab in payload.viewer_tabs.tabs.items()}
             counts[TabKey.TOMOGRAMS] = len(payload.tomograms.rows)
-            self.parts.chrome.apply_tab_availability(counts, request.destination_tab,
-                processing_only=payload.tomograms.processing_only)
+            if arrival is None:
+                self.parts.chrome.apply_tab_availability(counts, request.destination_tab,
+                    processing_only=payload.tomograms.processing_only)
             selected = payload.tomograms.selection or request.value
             if isinstance(selected, AllTomograms | FolderTomograms) and not self.current_row_opens(selected):
                 with QSignalBlocker(self.ui.tree):
                     self.ui.tree.setCurrentItem(self.tree_item_for_scope(selected))
             self.select_from_left_tree(selected, request.label)
             self.window.statusBar().clearMessage()
-            if payload.tomograms.notice:
+            if arrival is not None:
+                self.parts.chrome.apply_tab_availability(counts, request.destination_tab,
+                    processing_only=payload.tomograms.processing_only)
+                if self.ui.tomogram_tab.arrival_filters_cleared:
+                    self.state.review.pending_filter_notice = "Filters cleared to show the selected tomogram."
+                message = "Opened the verified tomogram." if arrival.history_index is None else "Restored the saved tomogram."
+                self.parts.context.show_arrival_message(" ".join(filter(None, (message, payload.tomograms.notice))))
+            elif payload.tomograms.notice:
                 self.parts.context.post_navigation_message(payload.tomograms.notice)
         finally:
             self.state.review.suppress_viewer_context = previous
             self.applying_payload = None
-        self.parts.history.finish_scope_restore(request.generation)
+            self.applying_arrival = None
+        if arrival is not None and arrival.history_index is not None and arrival.history_revision is not None:
+            history.commit_cursor(arrival.history_index, arrival.history_revision)
+            self.parts.history.update_history_actions()
         if request.departure is not None:
             self.parts.history.record_history(request.departure)
 
@@ -364,6 +426,7 @@ class ViewerCoordinator(QObject):
         # session atlases) keep the fallback so we don't silently hide them.
         # The workspace keeps it, so the navigation planner shares this one.
         fallback_context = self.state.review.workspace.project_marker_context(failed_tilt_ids)
+        self.atlas_overlay.install(self.state.review.workspace)
 
         def scoped(value: Any) -> list[ImageMarker]:
             return markers_for_object(
@@ -378,11 +441,13 @@ class ViewerCoordinator(QObject):
                 value,
                 fallback_context,
             )
-            return atlas_lod_markers(
+            # The whole grid builds the markers; hidden collections are only
+            # left out of what is drawn, so they never change a status.
+            return self.atlas_overlay.markers(
                 value,
-                self.parts.scopes.atlas_marker_context_for_collection_scope(
+                base_context,
+                display_filter=self.parts.scopes.atlas_display_filter_for_collection_scope(
                     value,
-                    base_context,
                     scope_context,
                 ),
             )
@@ -422,7 +487,8 @@ class ViewerCoordinator(QObject):
             if TabKey.TOMOGRAMS in requested_labels:
                 remembered = self.state.viewer.viewer_states.get((self.viewer_state_scope_key(), TabKey.TOMOGRAMS))
                 self.ui.tomogram_tab.install_prepared(volume_payload,
-                    remembered if isinstance(remembered, TomogramViewState) else None)
+                    remembered if isinstance(remembered, TomogramViewState) else None,
+                    arrival=self.applying_arrival, population_scope=scope_key(scope_context))
             labels_to_render = [label for label in requested_labels if label in VIEWER_TAB_KEYS]
             counts = {key: len(tab.items) for key, tab in tab_payloads.items()}
             counts[TabKey.TOMOGRAMS] = len(volume_payload.rows)
@@ -447,6 +513,7 @@ class ViewerCoordinator(QObject):
                 if label == TabKey.ATLAS:
                     tab.set_atlas_collection_overlay_provider(
                         atlas_collection_options, atlas_collection_visibility_changed)
+                    tab.set_atlas_overlay_state(self.atlas_overlay)
                 tab.install_prepared(
                     payload, label_for=self.parts.scopes.label_for,
                     markers_for=markers_by_label[label], auto_load_preview=auto_load_preview,
@@ -457,6 +524,14 @@ class ViewerCoordinator(QObject):
             self.state.review.suppress_viewer_context = previous
         self.parts.context.refresh_context_header()
 
+    def atlas_tags_changed(self) -> None:
+        """Tags changed (an edit, a save, a project opened or closed): recolour a Tags-mode Atlas."""
+
+        self.atlas_overlay.tags_changed()
+        if self.atlas_overlay.mode == TAGS:
+            tab = self.ui.viewer_tabs.get(TabKey.ATLAS)
+            if tab is not None:
+                tab.parts.colour_by.recolour()
 
     def select_tomogram_version(self, version: str, state: TomogramViewState) -> None:
         from dataclasses import replace
@@ -540,7 +615,7 @@ class ViewerCoordinator(QObject):
             def describe_scope() -> None:
                 self.parts.context.show_scope_description(
                     f"{type(value).__name__}:{id(value)}", value.display_name,
-                    lambda: describe_project_group(value, self.state.review.workspace)
+                    lambda: describe_project_group(value, self.state.review.workspace, self.state.review.source_reads)
                 )
 
             self.show_installed_scope(describe_scope)
@@ -559,7 +634,7 @@ class ViewerCoordinator(QObject):
 
             def describe_project() -> None:
                 self.parts.context.show_scope_description(
-                    "sessions:project", label, lambda: describe_loaded_sessions(sessions)
+                    "sessions:project", label, lambda: describe_loaded_sessions(sessions, self.state.review.source_reads)
                 )
 
             self.show_installed_scope(describe_project)
@@ -776,7 +851,7 @@ class ViewerCoordinator(QObject):
         angle = angles[index]
         if isinstance(angle, int | float):
             suffix = " (inferred)" if source == "inferred" else ""
-            return f"{format_tilt_angle(float(angle))}\N{DEGREE SIGN}{suffix}"
+            return f"{format_tilt_angle(float(angle))}{suffix}"
         return None
 
 

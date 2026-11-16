@@ -37,6 +37,7 @@ MONO_FONT_FAMILY: Final[str] = f'"{MONO_FONT_NAME}"'
 RADIUS_CONTROL: Final[int] = 4
 RADIUS_CARD: Final[int] = 8
 RADIUS_POPOVER: Final[int] = 12
+#: The radius scale; the style-guide tests hold every QSS radius to it.
 RADIUS_TOKENS: Final[tuple[int, ...]] = (RADIUS_CONTROL, RADIUS_CARD, RADIUS_POPOVER)
 
 # Spacing on a 4 px grid. The chrome had 23 margin tuples and 13 spacing
@@ -55,6 +56,7 @@ SPACE_M: Final[int] = 12
 SPACE_L: Final[int] = 16
 SPACE_XL: Final[int] = 24
 SPACE_XXL: Final[int] = 32
+#: The spacing scale; the style-guide tests hold every layout literal to it.
 SPACE_SCALE: Final[tuple[int, ...]] = (SPACE_XS, SPACE_S, SPACE_M, SPACE_L, SPACE_XL, SPACE_XXL)
 
 # Type scale in points. Thirteen sizes (8–26 pt) had accumulated; these six
@@ -75,6 +77,7 @@ TYPE_LEAD: Final[int] = 11
 TYPE_TITLE: Final[int] = 13
 TYPE_HEADING: Final[int] = 16
 TYPE_DISPLAY: Final[int] = 22
+#: The type scale; the style-guide tests hold every font size to it.
 TYPE_SCALE: Final[tuple[int, ...]] = (
     TYPE_CAPTION,
     TYPE_BODY,
@@ -325,7 +328,7 @@ def palette_for(name: str | None) -> ThemePalette:
 
 
 #: Chrome drawn over the image canvas: the zoom stack, Overlays and its panel,
-#: the image badge, the Atlas marker legend and the cluster popup. The canvas
+#: the image badge, the Atlas Positions card and the cluster popup. The canvas
 #: is near-black in both themes (``canvas``), so these keep the dark palette in
 #: both: white controls on a black canvas were the loudest thing on a light
 #: theme's viewer, and the painted legend and popup were already dark.

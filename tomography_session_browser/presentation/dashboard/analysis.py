@@ -16,10 +16,7 @@ from tomography_session_browser.services.tilt_series_validation import validatio
 from tomography_session_browser.domain.status import ValidationStatus
 from tomography_session_browser.presentation.dashboard.models import DashboardScope, InferredBatchGroup
 from tomography_session_browser.presentation.dashboard.scopes import scope_samples
-from tomography_session_browser.presentation.dashboard.sections.batches import (
-    group_matches_any_batch,
-    inferred_failed_batch_groups,
-)
+from tomography_session_browser.presentation.dashboard.sections.batches import inferred_failed_batch_groups
 from tomography_session_browser.services.batch_inference import entity_owner_keys
 from tomography_session_browser.services.tilt_series_validation import GridValidations, TiltSeriesValidation
 
@@ -56,11 +53,7 @@ class ScopeAnalysis:
             validations=validations,
             validation_by_key=validation_by_id,
             inferred_batch_groups=inferred_batch_groups,
-            orphaned_failed_tilts=sum(
-                len(group.tilt_series)
-                for group in inferred_batch_groups
-                if not group_matches_any_batch(group, scope.batch_positions)
-            ),
+            orphaned_failed_tilts=sum(len(group.tilt_series) for group in inferred_batch_groups),
             successful_tilt_ids=frozenset(
                 key for key, validation in validation_by_id.items() if validation.status == ValidationStatus.COMPLETE
             ),

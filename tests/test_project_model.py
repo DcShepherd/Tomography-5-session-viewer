@@ -10,17 +10,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QTreeWidgetItem
 
+from tomography_session_browser.domain.identity import entity_key_text
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.ui.project_tree.widgets import HIGHLIGHT_ROLE
 from tomography_session_browser.domain.models import Atlas, BatchPosition, Overview, Sample, SearchMap, SearchTile, Session, TiltSeries
 from tomography_session_browser.presentation.report_scope import ProjectReportGroup
-from tomography_session_browser.reports import build_session_report
+from tomography_session_browser.reports.report_generator import build_session_report
 from tomography_session_browser.presentation.project_tree import build_project_tree_groups
 from tomography_session_browser.services.session_linking import (
     ATLAS_MATCH_EXACT,
     ATLAS_MATCH_SUFFIX,
     _atlas_lookup,
-    matching_atlas_sample,
     resolve_atlas_for_sample,
 )
 from tomography_session_browser.ui.project_tree.widgets import OBJECT_ROLE
@@ -80,7 +80,6 @@ def test_atlas_links_multiple_collection_sessions_under_one_group() -> None:
 
 
 def test_atlas_batch_marker_scope_follows_selected_collection_session() -> None:
-    from tomography_session_browser.services.markers.context import MarkerContext
     from tomography_session_browser.ui.main_window import MainWindow
 
     QApplication.instance() or QApplication([])
@@ -103,28 +102,15 @@ def test_atlas_batch_marker_scope_follows_selected_collection_session() -> None:
     root = build_project_tree_groups(
         [atlas_session, first, second]
     )[0]
-    base = MarkerContext(
-        batch_positions=(first_batch, second_batch),
-    )
     window = MainWindow()
     window.parts.loading.set_loaded_sessions([atlas_session, first, second])
 
-    root_context = window.parts.scopes.atlas_marker_context_for_collection_scope(
-        atlas,
-        base,
-        root,
-    )
-    first_context = window.parts.scopes.atlas_marker_context_for_collection_scope(
-        atlas,
-        base,
-        first,
-    )
+    root_filter = window.parts.scopes.atlas_display_filter_for_collection_scope(atlas, root)
+    first_filter = window.parts.scopes.atlas_display_filter_for_collection_scope(atlas, first)
 
-    assert root_context.batch_positions == (
-        first_batch,
-        second_batch,
-    )
-    assert first_context.batch_positions == (first_batch,)
+    assert root_filter is not None and first_filter is not None
+    assert root_filter.visible_batch_keys == {entity_key_text(first_batch), entity_key_text(second_batch)}
+    assert first_filter.visible_batch_keys == {entity_key_text(first_batch)}
     options = window.parts.scopes.atlas_collection_overlay_options(atlas, root)
     assert [option.label for option in options] == [
         "DataCollection_01 (1)",
@@ -133,7 +119,6 @@ def test_atlas_batch_marker_scope_follows_selected_collection_session() -> None:
 
 
 def test_linked_root_collection_toggle_does_not_hide_narrow_node_batches() -> None:
-    from tomography_session_browser.services.markers.context import MarkerContext
     from tomography_session_browser.ui.main_window import MainWindow
     from tomography_session_browser.presentation.project_tree import session_key
 
@@ -157,9 +142,6 @@ def test_linked_root_collection_toggle_does_not_hide_narrow_node_batches() -> No
     root = build_project_tree_groups(
         [atlas_session, first, second]
     )[0]
-    base = MarkerContext(
-        batch_positions=(first_batch, second_batch),
-    )
     window = MainWindow()
     window.parts.loading.set_loaded_sessions([atlas_session, first, second])
     window.state.viewer.atlas_collection_visibility[
@@ -169,23 +151,15 @@ def test_linked_root_collection_toggle_does_not_hide_narrow_node_batches() -> No
         )
     ] = False
 
-    root_context = window.parts.scopes.atlas_marker_context_for_collection_scope(
-        atlas,
-        base,
-        root,
-    )
-    second_context = window.parts.scopes.atlas_marker_context_for_collection_scope(
-        atlas,
-        base,
-        second,
-    )
+    root_filter = window.parts.scopes.atlas_display_filter_for_collection_scope(atlas, root)
+    second_filter = window.parts.scopes.atlas_display_filter_for_collection_scope(atlas, second)
 
-    assert root_context.batch_positions == (first_batch,)
-    assert second_context.batch_positions == (second_batch,)
+    assert root_filter is not None and second_filter is not None
+    assert root_filter.visible_batch_keys == {entity_key_text(first_batch)}
+    assert second_filter.visible_batch_keys == {entity_key_text(second_batch)}
 
 
 def test_session_level_batch_fallback_is_kept_when_scope_is_unambiguous() -> None:
-    from tomography_session_browser.services.markers.context import MarkerContext
     from tomography_session_browser.ui.main_window import MainWindow
 
     QApplication.instance() or QApplication([])
@@ -202,13 +176,9 @@ def test_session_level_batch_fallback_is_kept_when_scope_is_unambiguous() -> Non
     window = MainWindow()
     window.parts.loading.set_loaded_sessions([atlas_session, collection])
 
-    scoped = window.parts.scopes.atlas_marker_context_for_collection_scope(
-        atlas,
-        MarkerContext(batch_positions=(sample_batch,)),
-        collection,
-    )
+    scoped = window.parts.scopes.atlas_display_filter_for_collection_scope(atlas, collection)
 
-    assert scoped.batch_positions == (sample_batch,)
+    assert scoped is not None and scoped.visible_batch_keys == {entity_key_text(sample_batch)}
     assert window.parts.scopes.atlas_collection_overlay_options(
         atlas,
         collection,
@@ -236,10 +206,14 @@ def test_rendered_atlas_marker_provider_uses_tree_collection_scope(
     atlas = atlas_session.samples[0].atlas
     assert atlas is not None
     captured = []
+    from tomography_session_browser.services.markers.builders import AtlasMarkerSet
+    from tomography_session_browser.ui.viewer import atlas_overlay_state
+
+    # The Atlas state builds the markers with their members (batch 4).
     monkeypatch.setattr(
-        viewers,
-        "atlas_lod_markers",
-        lambda _atlas, context: captured.append(context) or [],
+        atlas_overlay_state,
+        "atlas_lod_marker_set",
+        lambda _atlas, context, *, display_filter: captured.append((context, display_filter)) or AtlasMarkerSet([], {}),
     )
     window = MainWindow()
     window.parts.loading.set_loaded_sessions([atlas_session, first, second], scope=first)
@@ -248,9 +222,13 @@ def test_rendered_atlas_marker_provider_uses_tree_collection_scope(
     window.ui.viewer_tabs['Atlas'].parts.tab_selection.markers_for(atlas)
 
     assert len(captured) == 1
-    assert captured[0].batch_positions == tuple(
-        first.samples[0].batch_positions
-    )
+    context, display_filter = captured[0]
+    # The provider passes the whole grid and filters for display (batch 0b).
+    assert context is window.state.review.workspace.marker_context(
+        atlas, window.state.review.workspace.project_marker_context(context.failed_tilt_ids))
+    assert display_filter.visible_batch_keys == {
+        entity_key_text(batch) for batch in first.samples[0].batch_positions
+    }
 
 
 def test_unrelated_collection_sessions_remain_separate() -> None:
@@ -437,7 +415,7 @@ def test_atlas_link_suffix_must_start_at_path_component_boundary() -> None:
         "C:/archive/XAtlas_A/Sample1/Atlas/Atlas.dm",
     )
 
-    assert matching_atlas_sample(collection.samples[0], _atlas_lookup([atlas])) is None
+    assert resolve_atlas_for_sample(collection.samples[0], _atlas_lookup([atlas])).sample is None
 
 
 def test_custom_project_group_name_is_display_only() -> None:

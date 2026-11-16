@@ -27,6 +27,7 @@ from tomography_session_browser.services.volume.scale_bar import BAR_COLOURS
 
 from tomography_session_browser.presentation.design_tokens import SPACE_L, SPACE_M, SPACE_S, SPACE_XS
 from tomography_session_browser.presentation.tomogram_calibration import CALIBRATION_SCOPE_NOTE
+from tomography_session_browser.presentation.volume_formatting import per_axis_text
 
 if TYPE_CHECKING:
     from tomography_session_browser.ui.tomograms.tab import TomogramTab
@@ -224,10 +225,8 @@ class ImageSettings(QWidget):
         self.highpass = QDoubleSpinBox(self)
         self.highpass.setRange(.1, 10000)
         self.highpass.setValue(HIGHPASS_DEFAULT)
-        self.lowpass.setToolTip("Remove structures that are smaller than this. The value is the sigma of a 2D Gaussian filter, in cycles "
-                                "per pixel. A smaller value gives a smoother image.")
-        self.highpass.setToolTip("Remove slow changes in brightness across the image. The value is the radius of a 2D "
-                                 "Gaussian filter, in Fourier pixels.")
+        self.lowpass.setToolTip("Remove structures smaller than this. A smaller value gives a smoother image.")
+        self.highpass.setToolTip("Remove slow changes in brightness across the image")
         # The lowpass slider is logarithmic over 0.01–0.5 cycles/px; it publishes on release.
         self.lowpass_slider = QSlider(Qt.Orientation.Horizontal, self)
         self.lowpass_slider.setRange(0, 100)
@@ -253,10 +252,7 @@ class ImageSettings(QWidget):
             if control is self.lowpass:
                 self.lowpass_on.toggled.connect(self.lowpass_slider.setEnabled)
                 self.lowpass.valueChanged.connect(self.sync_lowpass_slider)
-                slider_row = QHBoxLayout()
-                slider_row.setContentsMargins(LABEL_WIDTH + SPACE_S, 0, 0, 0)
-                slider_row.addWidget(self.lowpass_slider)
-                layout.addLayout(slider_row)
+                layout.addLayout(under_control(self.lowpass_slider))
         self.filter_units = note(self)
         layout.addWidget(self.filter_units)
         layout.addSpacing(SPACE_XS)
@@ -275,12 +271,11 @@ class ImageSettings(QWidget):
         self.mode = Versions(self)
         self.mode.addItems(("Auto", "±3σ", "Manual"))
         for index, explanation in enumerate((
-                "Set black and white from the 0.5th and 99.5th percentiles of this plane",
-                "Set black and white to the mean ± 3 standard deviations of this plane",
-                "Type black and white, or drag the B and W lines on the histogram")):
+                "The 0.5th to 99.5th percentile of this plane",
+                "The mean ± 3 standard deviations of this plane",
+                "Type the levels, or drag B and W on the histogram")):
             self.mode.setItemData(index, explanation, Qt.ItemDataRole.ToolTipRole)
-        self.mode.setToolTip("How the app sets black and white. Auto and ±3σ measure one plane and keep those levels "
-                             "until you click Relevel.")
+        self.mode.setToolTip("Select how to set black and white")
         self.mode.currentTextChanged.connect(self.mode_changed)
         self.mode.rebuild()
         self.mode.buttons.button(1).setAccessibleName("Mean plus or minus 3 standard deviations")
@@ -330,7 +325,7 @@ class ImageSettings(QWidget):
         layout.addLayout(inline_row("Brightness", self.brightness_slider, self.brightness, parent=self))
         layout.addLayout(inline_row("Contrast", self.contrast_slider, self.contrast, parent=self))
         self.brightness.setToolTip("Make the image lighter or darker")
-        self.contrast.setToolTip("Increase or decrease the difference between light and dark. 1.00 makes no change.")
+        self.contrast.setToolTip("Change the contrast. 1.00 makes no change.")
         self.brightness_slider.setToolTip(self.brightness.toolTip())
         self.contrast_slider.setToolTip(self.contrast.toolTip())
         self.invert = Switch(self)
@@ -339,7 +334,7 @@ class ImageSettings(QWidget):
         self.smooth = Switch(self)
         self.smooth.setChecked(True)
         self.smooth.toggled.connect(self.display_changed)
-        self.smooth.setToolTip("Show a smooth image when you zoom in. Set to off to see each voxel as a square.")
+        self.smooth.setToolTip("Smooth the zoomed image. Off shows square voxels.")
         layout.addLayout(control_row("Invert", parent=self, switch=self.invert))
         layout.addLayout(control_row("Smooth pixels", parent=self, switch=self.smooth))
         layout.addWidget(rule(self))
@@ -355,11 +350,9 @@ class ImageSettings(QWidget):
         self.sampling = Versions(self)
         self.sampling.setAccessibleName("Snapshot size")
         self.sampling.addItems(("Screen", "Native"))
-        self.sampling.setItemData(0, "Save the view with the pixels that you see on the screen", Qt.ItemDataRole.ToolTipRole)
-        self.sampling.setItemData(1, "Save the same part of the view with one pixel for each voxel. "
-                                     "The zoom does not change the number of pixels.", Qt.ItemDataRole.ToolTipRole)
-        self.sampling.setToolTip("The number of pixels in the saved image. The two alternatives save only the part of the plane "
-                                 "that is in view.")
+        self.sampling.setItemData(0, "Save the pixels that the screen shows", Qt.ItemDataRole.ToolTipRole)
+        self.sampling.setItemData(1, "Save one pixel for each voxel, for the same part of the view", Qt.ItemDataRole.ToolTipRole)
+        self.sampling.setToolTip("Select the number of pixels in the saved image")
         self.sampling.rebuild()
         self.sampling.hide()
         share_width(self.export_format)
@@ -412,7 +405,7 @@ class ImageSettings(QWidget):
         self.spacing.setToolTip("The voxel size, the same in X, Y and Z")
         self.spacing.valueChanged.connect(self.refresh_actions)
         confirm = self.confirm_button = QPushButton("Confirm", self)
-        confirm.setToolTip("Use this voxel size for this version in the app. The MRC file does not change.")
+        confirm.setToolTip("Use this voxel size for this version. The MRC file does not change.")
         confirm.clicked.connect(self.confirm_spacing)
         undo = self.header_button = QPushButton("Use header", self)
         undo.setObjectName("secondaryAction")
@@ -430,8 +423,7 @@ class ImageSettings(QWidget):
         calibration.addLayout(buttons)
         self.several_button = QPushButton("Apply to several…", self)
         self.several_button.setObjectName("secondaryAction")
-        self.several_button.setToolTip("Use this voxel size for other versions that need one. You review the list "
-                                       "before the app changes a value. The MRC files do not change.")
+        self.several_button.setToolTip("Use this voxel size for other versions that need one. You review the list first.")
         self.several_button.clicked.connect(self.open_review)
         self.several_button.hide()
         several = QHBoxLayout()
@@ -453,13 +445,12 @@ class ImageSettings(QWidget):
         self.memory_share.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.memory_share.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.memory_share.setFixedWidth(self.memory_share.fontMetrics().horizontalAdvance("60 % of RAM") + 24)
-        self.memory_share.setToolTip("The part of the computer memory that tomograms can use. If free memory is low, "
-                                     "the app uses less.")
+        self.memory_share.setToolTip("Memory that tomograms can use. The app uses less when free memory is low.")
         self.memory_share.valueChanged.connect(self.memory_changed)
         self.memory_usage = note(self)
         clear_cache = QPushButton("Release idle planes", self)
         clear_cache.setObjectName("secondaryAction")
-        clear_cache.setToolTip("Remove the planes that are not on the screen from memory")
+        clear_cache.setToolTip("Free the memory of planes that are not shown")
         clear_cache.clicked.connect(self.clear_cache)
         memory = self.memory_section.layout_
         memory.addLayout(inline_row("Limit", self.memory_share, parent=self, stretch=True))
@@ -534,7 +525,7 @@ class ImageSettings(QWidget):
         default = tab.recipes.is_default()
         self.reset_button.setEnabled(loaded and not default)
         self.reset_button.setToolTip("All values are at their defaults" if default else
-                                     "Set the filters, contrast and scale bar to their defaults. The voxel size does not change.")
+                                     "Set filters, contrast and scale bar to defaults. The voxel size does not change.")
         undo = tab.recipes.can_undo()
         self.undo_button.setEnabled(undo)
         self.undo_button.setToolTip("Undo the last image change (Ctrl+Z)" if undo else "There is no image change to undo")
@@ -557,7 +548,7 @@ class ImageSettings(QWidget):
         self.relevel_button.setToolTip(
             "Set Auto levels from this plane (Shift+A)" if manual
             else f"Set the {state.levels_mode} levels again from this plane (Shift+A)" if relevel
-            else "The levels come from this plane. Go to a different plane to set them again.")
+            else "Not available: the levels come from this plane")
 
     def sync_sliders(self, *_args) -> None:
         with QSignalBlocker(self.brightness_slider), QSignalBlocker(self.contrast_slider):
@@ -606,10 +597,8 @@ class ImageSettings(QWidget):
         sigma = self.lowpass.value()
         if spacing:
             sx, sy = plane_spacing(spacing, self.tab.state.axis)
-            wavelength = f"≈ {sx / sigma:.0f} Å" if sx == sy else f"≈ {sx / sigma:.0f} × {sy / sigma:.0f} Å"
-            self.lowpass_unit.setText(wavelength)
-            self.lowpass_unit.setToolTip(f"Sigma {sigma:g} cycles per pixel removes structures smaller than approximately {sx / sigma:.0f} Å"
-                                         if sx == sy else f"Sigma {sigma:g} cycles per pixel: {sx / sigma:g} × {sy / sigma:g} Å")
+            self.lowpass_unit.setText(f"≈ {per_axis_text((sx / sigma, sy / sigma), '.0f')} Å")
+            self.lowpass_unit.setToolTip(f"Sigma {sigma:g} cycles per pixel")
         else:
             self.lowpass_unit.setText("cycles/px")
             self.lowpass_unit.setToolTip("Sigma in cycles per pixel")

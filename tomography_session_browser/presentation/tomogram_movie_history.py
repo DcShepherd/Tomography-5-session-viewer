@@ -1,61 +1,108 @@
-"""Saved movie exports, newest per tomogram, for the list's film mark (B5, owner 9 Nov 2026).
+"""Saved movie exports: counts per row for the film slot and pages for the Movies menu.
 
-A record says that an export finished: MP4, PNG frames or both. It lives in the
-app-owned review repository, never beside the movie. The app never checks that
-the saved file is still there, so the mark means "exported", not "the file
-exists". A cancelled or failed export writes no record.
+A record says that an export finished: an MP4, PNG frames or both. It lives in
+the app-owned review repository, never beside the movie. Its identity is the
+output path, so an export that overwrites a file replaces that file's record. The
+records and counts do not check that a file is still there; the Movies menu
+checks each row it shows. A cancelled or failed export writes no record.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from datetime import datetime
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from tomography_session_browser.services.volume.review_repository import ReviewRecord, ReviewRepository
+from tomography_session_browser.domain.display_names import count_phrase
+from tomography_session_browser.presentation.tomogram_state import TomogramViewState
+from tomography_session_browser.services.volume.review_repository import ReviewRecord, ReviewRepository, record_id
 
 MOVIE_KIND = "movie"
+#: Rows on one page of the Movies menu.
+PAGE_SIZE = 12
 
 
 @dataclass(frozen=True, slots=True)
-class MovieMark:
+class MovieWrite:
+    """What a movie's history write reports back: the record and this window's export token.
+
+    The token never goes into the record on disk.
+    """
+    identity: str
+    token: int
+
+
+@dataclass(frozen=True, slots=True)
+class MovieEntry:
+    identity: str
     created_ns: int
-    name: str
+    row_key: str
+    volume_id: str
+    #: The movie file, or the frames folder of a frames-only export.
+    output: Path
 
 
-def movie_mark(record: ReviewRecord, identities: frozenset[tuple[str, str]]) -> tuple[str, MovieMark] | None:
-    """The row and mark a record gives, or None for a record outside the scope or not usable."""
+@dataclass(frozen=True, slots=True)
+class MovieCounts:
+    total: int
+    rows: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class MoviePage:
+    entries: tuple[MovieEntry, ...]
+    next_cursor: tuple[int, str] | None
+    total: int
+
+
+def decode_movie(record: ReviewRecord) -> MovieEntry | None:
+    """The entry a record gives, or None for a record that cannot be used."""
     state, output = record.data.get("state"), record.data.get("output")
     if not isinstance(state, dict) or not isinstance(output, str) or not Path(output).is_absolute():
         return None
     row, volume = state.get("row_key"), state.get("volume_id")
-    if not isinstance(row, str) or not isinstance(volume, str) or (row, volume) not in identities:
+    if not isinstance(row, str) or not isinstance(volume, str):
         return None
-    return row, MovieMark(record.order[0], Path(output).name)
+    return MovieEntry(record.identity, record.order[0], row, volume, Path(output))
 
 
-def movie_marks(repository: ReviewRepository, identities: frozenset[tuple[str, str]], *,
-                cancelled: Callable[[], bool] = lambda: False) -> tuple[tuple[str, MovieMark], ...]:
-    """The newest saved export of each row in the scope."""
-    newest: dict[str, MovieMark] = {}
-    for record in repository.iter_records(MOVIE_KIND, cancelled=cancelled):
-        found = movie_mark(record, identities)
-        if found is not None and (found[0] not in newest or found[1].created_ns > newest[found[0]].created_ns):
-            newest[found[0]] = found[1]
-    return tuple(sorted(newest.items()))
+def movie_record(state: TomogramViewState, output: Path, created_ns: int) -> ReviewRecord:
+    """The record that the history write of this export saves, for use before it is on disk."""
+    identity = record_id(str(output))
+    return ReviewRecord(identity, (created_ns, identity), {
+        "schema": 1, "kind": MOVIE_KIND, "state": asdict(state), "output": str(output), "created_ns": created_ns})
 
 
-def newest_marks(*sources: Mapping[str, MovieMark]) -> dict[str, MovieMark]:
-    """One mark per row: the newest of the stored and the window's own exports."""
-    marks: dict[str, MovieMark] = {}
-    for source in sources:
-        for row, mark in source.items():
-            if row not in marks or mark.created_ns > marks[row].created_ns:
-                marks[row] = mark
-    return marks
+def usable(record: ReviewRecord) -> bool:
+    return decode_movie(record) is not None
 
 
-def movie_tooltip(mark: MovieMark) -> str:
-    when = datetime.fromtimestamp(mark.created_ns / 1e9)
-    return (f"Movie saved on {when.day} {when:%b %Y} at {when:%H:%M}: {mark.name}. "
-            "The app does not check that the file is still there.")
+def movie_counts(repository: ReviewRepository, identities: frozenset[tuple[str, str]], *,
+                 extra: tuple[ReviewRecord, ...] = (), cancelled: Callable[[], bool] = lambda: False) -> MovieCounts:
+    """The movies of each row in the scope; an unrecorded export and its durable record count once."""
+    page = repository.page(MOVIE_KIND, identities, limit=1, accept=usable, extra=extra, cancelled=cancelled)
+    return MovieCounts(page.total, page.counts)
+
+
+def movie_page(repository: ReviewRepository, identities: frozenset[tuple[str, str]], *,
+               before: tuple[int, str] | None = None, limit: int = PAGE_SIZE,
+               extra: tuple[ReviewRecord, ...] = (), cancelled: Callable[[], bool] = lambda: False) -> MoviePage:
+    """One page of movies, newest first."""
+    page = repository.page(MOVIE_KIND, identities, before=before, limit=limit, accept=usable, extra=extra,
+                           cancelled=cancelled)
+    entries = tuple(entry for entry in map(decode_movie, page.records) if entry is not None)
+    return MoviePage(entries, page.next_cursor, page.total)
+
+
+def movie_count_tooltip(count: int, *, available: bool, refreshing: bool, error: str) -> str:
+    if not available:
+        return "Movie count unavailable." + (" Loading movie history." if refreshing else "")
+    text = f"Show the {count_phrase(count, 'movie')} of this tomogram."
+    if refreshing:
+        text += " Refreshing; this is the last known count."
+    if error:
+        text += " Refresh unavailable."
+    return text
+
+
+#: Why a Movies… command is off for a row with no saved movie (D8).
+NO_MOVIES = "Not available: no saved movies. Press Ctrl+E to save one."

@@ -153,14 +153,10 @@ class PreviewLoader:
             self.view.viewer.arrive_at_marker(None)
         self.view.parts.tab_selection.show_item(value)
         self.view.viewer.clear_exposure_highlights(redraw=False)
-        self.view.parts.overlay_panel.update_atlas_collection_overlay_controls(value)
+        self.view.parts.collection_filter.update(value)
         self.view.parts.viewer_header.update_header(value)
-        markers = self.view.parts.tab_selection.markers_of(value)
-        self.view.parts.overlay_panel.update_marker_type_availability(markers)
-        self.view.viewer.set_markers(markers, selected_marker_id=self.view.parts.tab_selection.active_selected_marker_id(value, markers))
+        self.view.parts.tab_selection.publish(value)
         self.view.parts.tab_selection.sync_exposure_chooser()
-        if self.view.parts.overlay_panel.atlas_lod:
-            self.view.atlas_marker_legend.set_markers(markers)
         if path is None:
             self.current_path = None
             self.current_fallback = None

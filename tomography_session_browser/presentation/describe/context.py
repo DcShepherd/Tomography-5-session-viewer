@@ -24,6 +24,7 @@ from tomography_session_browser.domain.traversal import has_collection_data
 from tomography_session_browser.presentation.describe.entities import describe_object
 from tomography_session_browser.presentation.describe.sections import emit_section
 from tomography_session_browser.presentation.describe.summary import sessions_summary_lines
+from tomography_session_browser.presentation.read_times import SourceReadTimes
 from tomography_session_browser.presentation.project_tree import ProjectTreeGroup
 from tomography_session_browser.presentation.scopes import LinkedSampleGroup
 from tomography_session_browser.presentation.workspace import (
@@ -39,7 +40,8 @@ from tomography_session_browser.services.item_status import ItemListStatus
 ContextFor = Callable[[Any], "Session | Sample | LinkedSampleGroup | ProjectTreeGroup | None"]
 
 
-def describe_project_group(group: ProjectTreeGroup, workspace: Workspace | None = None) -> str:
+def describe_project_group(group: ProjectTreeGroup, workspace: Workspace | None = None,
+                           read_times: SourceReadTimes | None = None) -> str:
     """A project group's source folders and shared settings (design review B2.6).
 
     The page titles the group and carries its counts, so this is only where
@@ -58,15 +60,15 @@ def describe_project_group(group: ProjectTreeGroup, workspace: Workspace | None 
         # Only a custom name has an automatic one worth saying; otherwise it
         # is the same words twice. The tree and report tooltips follow the rule.
         lines.append(f"Automatic name: {group.automatic_name}")
-    lines += sessions_summary_lines(group.sessions)
+    lines += sessions_summary_lines(group.sessions, read_times)
     emit_section(lines, "Warnings", [f"- {warning}" for warning in group.warnings])
     return "\n".join(lines)
 
 
-def describe_loaded_sessions(sessions: Sequence[Session]) -> str:
+def describe_loaded_sessions(sessions: Sequence[Session], read_times: SourceReadTimes | None = None) -> str:
     """The project with no one group in scope: every session it holds."""
 
-    return "\n".join(sessions_summary_lines(sessions))
+    return "\n".join(sessions_summary_lines(sessions, read_times))
 
 
 def samples_for_context(context: Any) -> list[Sample]:
@@ -86,9 +88,10 @@ def samples_for_context(context: Any) -> list[Sample]:
 class ContextDescriber:
     """Describes items in ``workspace``; ``context_for`` places an item in it."""
 
-    def __init__(self, workspace: Workspace, context_for: ContextFor) -> None:
+    def __init__(self, workspace: Workspace, context_for: ContextFor, read_times: SourceReadTimes | None = None) -> None:
         self._workspace = workspace
         self._context_for = context_for
+        self._read_times = read_times
 
     def describe(
         self,
@@ -110,6 +113,7 @@ class ContextDescriber:
             grid_validations=self._workspace.tilt_validations,
             list_status=list_status,
             describes_page_item=describes_page_item,
+            read_times=self._read_times,
         )
         if isinstance(value, Session | Sample | LinkedSampleGroup):
             # A scope's summary is its source folders and settings; which atlas

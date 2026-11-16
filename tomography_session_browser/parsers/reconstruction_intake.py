@@ -6,8 +6,9 @@ from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.domain.reconstruction_names import reconstruction_name
 from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogram, Volume
 from tomography_session_browser.parsers.acquisition_evidence import reconstruction_evidence
+from tomography_session_browser.parsers.denoising_config import denoising_input
 from tomography_session_browser.parsers.path_utils import natural_key
-from tomography_session_browser.parsers.recorded_metrics import read_imod_processing_evidence
+from tomography_session_browser.parsers.recorded_metrics import read_imod_processing_evidence, read_own_alignment
 from tomography_session_browser.parsers.scipion_jobs import ScipionJob, scipion_job
 from tomography_session_browser.parsers.volume_header import fingerprint, is_cloud_placeholder, read_volume, records_volume
 
@@ -142,8 +143,10 @@ def load_reconstructions(root: Path) -> ProcessingSource:
                     issues.append(f'{half.relative_to(root).as_posix()}: {exc}')
             evidence = reconstruction_evidence(path)
             processing = read_imod_processing_evidence(path.parent, path)
+            own = read_own_alignment(path.parent, path.stem) if job is not None and job.records_own_alignment else None
+            denoised, config_warnings = denoising_input(root, job, path.parent, name)
             items.append(Tomogram(f'{key}::{relative}', name, key, tuple(volumes), evidence,
-                                  processing.warnings, processing))
+                                  (*processing.warnings, *config_warnings), processing, own, denoised))
         except (OSError, ValueError) as exc:
             issues.append(f'{relative}: {exc}')
     return ProcessingSource(key, job.label if job is not None else root.name, root, tuple(items),

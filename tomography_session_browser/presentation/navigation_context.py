@@ -81,6 +81,8 @@ class NavigationContext:
         targets = resolve_tilt_series_navigation_targets(
             tilt,
             batch_positions=marker_context.batch_positions,
+            tilt_series=marker_context.tilt_series,
+            validation=self.workspace.tilt_validations.verdict(tilt),
             search_maps=marker_context.search_maps,
             overviews=marker_context.overviews,
             search_tiles=self.workspace.entities(EntityKind.SEARCH_TILE, self.context_for_object(tilt)),

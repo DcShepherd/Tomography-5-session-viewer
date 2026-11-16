@@ -35,7 +35,8 @@ from tomography_session_browser.ui.dashboard_host import (
 from tomography_session_browser.domain.models import (
     Session,
 )
-from tomography_session_browser.presentation.project_tree import ProjectTreeGroup
+from tomography_session_browser.presentation.project_tree import APP_TITLE, ProjectTreeGroup
+from tomography_session_browser.presentation.tab_keys import TabKey
 from tomography_session_browser.presentation.workspace import (
     Workspace,
 )
@@ -106,9 +107,7 @@ from tomography_session_browser.ui.window_parts.navigation import (
 )
 from tomography_session_browser.ui.window_parts.link_review import LinkReviewController
 
-from tomography_session_browser.ui.shell.chrome import TAB_LABELS
 from tomography_session_browser.ui.viewer.preview_scheduler import shutdown_preview_scheduler
-from tomography_session_browser.ui.window_parts.support import LOADER_PREWARM_DELAY_MS, WINDOW_MIN_SIZE
 LOGGER = logging.getLogger(__name__)
 
 class MainWindow(QMainWindow):
@@ -126,7 +125,7 @@ class MainWindow(QMainWindow):
         self.parts.context = ContextController(self, self.state, self.ui, self.parts)
         self.parts.viewers = ViewerCoordinator(self, self.state, self.ui, self.parts)
         self.parts.navigation = MarkerNavigation(self, self.state, self.ui, self.parts)
-        self.setWindowTitle("Tomography Session Browser")
+        self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(brand_window_icon())
         self.setMinimumSize(QSize(*WINDOW_MIN_SIZE))
         self.parts.shell.apply_initial_geometry()
@@ -187,66 +186,13 @@ class MainWindow(QMainWindow):
             freeze_tomograms=lambda workspace: self.parts.tag_projects.report_snapshot(
                 workspace, self.state.review.tomogram_review),
         )
-        self.ui.toast = Toast(self, clearance=self.parts.shell.toast_clearance)
+        self.ui.toast = Toast(self, clearance=self.parts.shell.toast_clearance, above=self.parts.shell.toast_above)
+        if (atlas_tab := self.ui.viewer_tabs.get(TabKey.ATLAS)) is not None:
+            self.ui.toast.follow(atlas_tab.parts.colour_by.key)
         self.ui.tomogram_tab.plane_band.installEventFilter(self)
-        self._context_shell = self.ui.context_shell
-        self._drop_receipt_wrap = self.ui.drop_receipt_wrap
-        self._project_drop_target = self.ui.project_drop_target
-        self._theme_actions = self.ui.theme_actions
-        self._toolbar_spacer = self.ui.toolbar_spacer
-        self._viewer_tabs = self.ui.viewer_tabs
-        self.back_action = self.ui.back_action
-        self.brand_label = self.ui.brand_label
-        self.compact_action = self.ui.compact_action
-        self.compact_button = self.ui.compact_button
-        self.context_dock = self.ui.context_dock
-        self.context_drawer = self.ui.context_drawer
-        self.context_header = self.ui.context_header
-        self.context_panel = self.ui.context_panel
-        self.context_panel_action = self.ui.context_panel_action
-        self.context_panel_button = self.ui.context_panel_button
-        self.drop_receipt = self.ui.drop_receipt
-        self.forward_action = self.ui.forward_action
-        self.loading_overlay = self.ui.loading_overlay
-        self.loading_progress = self.ui.loading_progress
-        self.main_toolbar = self.ui.main_toolbar
-        self.open_action = self.ui.open_action
-        self.open_button = self.ui.open_button
-        self.project_badge_legend = self.ui.project_badge_legend
-        self.project_dock = self.ui.project_dock
-        self.project_drop_hint = self.ui.project_drop_hint
-        self.project_drop_overlay = self.ui.project_drop_overlay
-        self.project_filter = self.ui.project_filter
-        self.project_panel_action = self.ui.project_panel_action
-        self.project_panel_button = self.ui.project_panel_button
-        self.refresh_action = self.ui.refresh_action
-        self.refresh_button = self.ui.refresh_button
-        self.report_action = self.ui.report_action
-        self.report_button = self.ui.report_button
-        self.session_dashboard = self.ui.session_dashboard
-        self.status_runtime = self.ui.status_runtime
-        self.tabs = self.ui.tabs
-        self.theme_action = self.ui.theme_action
-        self.toast = self.ui.toast
-        self.tree = self.ui.tree
-        self.shell_chrome = self.parts.chrome
-        self.theme_switch = self.parts.theme
-        self.report_flow = self.parts.report
-        self.dashboard_host = self.parts.dashboard_host
-        self.project_tree_panel = self.parts.project_panel
-        self.workspace_width = self.parts.chrome.workspace_width
-        self.open_session = self.parts.loading.open_session
-        self.refresh_session = self.parts.loading.refresh_session
-        self.load_session = self.parts.loading.load_session
-        self.set_loaded_sessions = self.parts.loading.set_loaded_sessions
-        self.show_parsed_sessions = self.parts.loading.show_parsed_sessions
+        # A named hook, not an alias: ui/motion/fade.py asks any window
+        # for ``motion_held`` by name, so page fades wait for the loader.
         self.motion_held = self.parts.loading.motion_held
-        self.navigate_to_tilt_series = self.parts.dashboard.navigate_to_tilt_series
-        self.navigate_history_back = self.parts.history.navigate_history_back
-        self.navigate_history_forward = self.parts.history.navigate_history_forward
-        self.current_context_stack = self.parts.context.current_context_stack
-        self.clear_viewer_states = self.parts.viewers.clear_viewer_states
-        self.show_toast = self.parts.context.show_toast
         self.parts.link_review = LinkReviewController(self)
         self._constructed = True
         self.parts.chrome.fit_docks()
@@ -365,6 +311,8 @@ class MainWindow(QMainWindow):
         if not self.state.shell.loader_prewarm_scheduled:
             self.state.shell.loader_prewarm_scheduled = True
             QTimer.singleShot(LOADER_PREWARM_DELAY_MS, self, self.parts.shell.prewarm_loader)
+            # Once Qt has placed its default focus: the keyboard's starting point.
+            QTimer.singleShot(0, self, self.parts.shell.focus_starting_point)
             # At once, on a worker: the first character a font lacks costs a
             # ~400 ms system font search, which a tab's first visit used to pay.
             warm_font_fallback()
@@ -386,7 +334,6 @@ class MainWindow(QMainWindow):
             # In drawer mode the button says whether the drawer is open, which
             # is never saved; the docked preference already is.
             self.state.review.settings.context_panel_visible = self.ui.context_panel_action.isChecked()
-        self.state.review.settings.compact = self.ui.compact_action.isChecked()
         if 0 <= self.ui.tabs.currentIndex() < len(TAB_LABELS):
             self.state.review.settings.last_tab = str(TAB_LABELS[self.ui.tabs.currentIndex()])
         # Write synchronously here so a debounced tab-change save cannot be

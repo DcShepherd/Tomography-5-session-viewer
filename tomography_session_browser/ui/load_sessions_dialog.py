@@ -22,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QPainter, QPen
 from PySide6.QtWidgets import (
     QDialog,
@@ -40,10 +40,14 @@ from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.services.session_intake import (
+    DRAG_CHECK_BUDGET_S,
+    Admission,
     DroppedFolder,
     FolderCheck,
+    QueueEntry,
     SessionIntake,
-    assess_paths,
+    admit,
+    replace_entry,
 )
 from tomography_session_browser.services.settings_service import recent_session_paths
 from tomography_session_browser.ui.folder_picker import select_session_folder
@@ -73,6 +77,9 @@ LOAD_SESSIONS_SUBTITLE = (
 DROP_WELL_TITLE = "Drop session folders here"
 BROWSE_HINT = "Browse adds one folder at a time; drop several at once"
 NOTHING_QUEUED_NOTE = "Nothing queued yet"
+#: The footer's second line while a queued folder can change on disk (D14, D17;
+#: board Q3). Browse and a drop are the routes: a queued folder's chip is off.
+RETRY_NOTE = "To check a folder again, add it again."
 #: How many recent folders the window offers.
 RECENT_CHIPS = 3
 MINIMUM_WIDTH = 560
@@ -122,52 +129,80 @@ class _DropWell(QFrame):
 
 
 class QueuedFolderRow(QFrame):
-    """One queued folder: what it holds, or why it will not load."""
+    """One queued folder: what it holds, or why it will not load.
+
+    A row lives as long as its queue entry. When the entry's check changes (a
+    retry, or "Use parent folder"), ``show_folder`` shows it in the same row.
+    """
 
     remove_requested = Signal(str)
     use_parent_requested = Signal(str)
 
     def __init__(self, folder: DroppedFolder, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.folder = folder
         self.setObjectName("queuedFolderRow")
-        self.setProperty("tone", "bad" if folder.problem else "")
-        layout = QHBoxLayout(self)
+        self._layout = layout = QHBoxLayout(self)
         layout.setContentsMargins(SPACE_M, SPACE_S, SPACE_S, SPACE_S)
         layout.setSpacing(SPACE_M)
 
-        self.badge = QLabel(folder.badge or "–", self)
+        self.badge = QLabel("", self)
         self.badge.setObjectName("queuedFolderBadge")
-        self.badge.setProperty("empty", not folder.badge)
         self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.badge.setFixedSize(30, 20)
         layout.addWidget(self.badge)
 
-        text = QVBoxLayout()
-        text.setSpacing(0)
-        self.name = ElidedLabel(folder.name, mode=Qt.TextElideMode.ElideMiddle, parent=self)
+        self._text = QVBoxLayout()
+        self._text.setSpacing(0)
+        self.name = ElidedLabel("", mode=Qt.TextElideMode.ElideMiddle, parent=self)
         self.name.setObjectName("queuedFolderName")
-        text.addWidget(self.name)
+        self._text.addWidget(self.name)
+        self.detail: ElidedLabel | None = None
+        layout.addLayout(self._text, 1)
+
+        self.kind = QLabel("", self)
+        self.kind.setObjectName("queuedFolderKind")
+        layout.addWidget(self.kind)
+
+        self.parent_button: QPushButton | None = None
+        self.status: Glyph | None = None
+        self.remove_button = GlyphButton("x", "", self, size=28)
+        self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self.folder.path))
+        layout.addWidget(self.remove_button)
+        self.show_folder(folder)
+
+    def show_folder(self, folder: DroppedFolder) -> None:
+        """Show ``folder``'s check. Controls that no longer apply are retired."""
+
+        self.folder = folder
+        self.setProperty("tone", "bad" if folder.problem else "")
+        self.badge.setText(folder.badge or "–")
+        self.badge.setProperty("empty", not folder.badge)
+        self.name.setText(folder.name)
+        if self.detail is not None:
+            self._text.removeWidget(self.detail)
+            self.detail.deleteLater()
         if folder.problem:
             self.detail = ElidedLabel(folder.reason, parent=self)
             self.detail.setObjectName("queuedFolderReason")
         else:
             self.detail = ElidedLabel(folder.path, mode=Qt.TextElideMode.ElideMiddle, parent=self)
             self.detail.setObjectName("queuedFolderPath")
-        text.addWidget(self.detail)
-        layout.addLayout(text, 1)
-
-        self.kind = QLabel(folder.kind_label, self)
-        self.kind.setObjectName("queuedFolderKind")
+        self._text.addWidget(self.detail)
+        self.kind.setText(folder.kind_label)
         self.kind.setHidden(not folder.kind_label)
-        layout.addWidget(self.kind)
 
-        self.parent_button: QPushButton | None = None
+        for old in (self.parent_button, self.status):
+            if old is not None:
+                self._layout.removeWidget(old)
+                old.hide()
+                old.deleteLater()
+        self.parent_button = self.status = None
+        slot = self._layout.indexOf(self.remove_button)
         if folder.status == FolderCheck.SESSION_FILE and folder.parent_folder:
             self.parent_button = QPushButton("Use parent folder", self)
             self.parent_button.setToolTip(folder.parent_folder)
-            self.parent_button.clicked.connect(lambda: self.use_parent_requested.emit(folder.path))
-            layout.addWidget(self.parent_button)
+            self.parent_button.clicked.connect(lambda: self.use_parent_requested.emit(self.folder.path))
+            self._layout.insertWidget(slot, self.parent_button)
         else:
             glyph, tone, status = (
                 ("check-circle", "good", "Ready")
@@ -176,13 +211,38 @@ class QueuedFolderRow(QFrame):
             )
             self.status = Glyph(glyph, tone, 18, self)
             self.status.setAccessibleName(status)
-            layout.addWidget(self.status)
+            self._layout.insertWidget(slot, self.status)
 
-        self.remove_button = GlyphButton("x", f"Remove {folder.name}", self, size=28)
-        self.remove_button.clicked.connect(lambda: self.remove_requested.emit(folder.path))
-        layout.addWidget(self.remove_button)
+        self.remove_button.setAccessibleName(f"Remove {folder.name}")
         parts = (folder.name, folder.kind_label, folder.reason or "ready")
         self.setAccessibleName(", ".join(part for part in parts if part))
+        for widget in (self, self.badge):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+
+    @property
+    def controls(self) -> tuple[QWidget, ...]:
+        """The row's keyboard stops, in Tab order."""
+
+        return (self.parent_button, self.remove_button) if self.parent_button is not None else (self.remove_button,)
+
+
+class _RevealOnFocus(QObject):
+    """Scrolls a row control into view when it takes focus.
+
+    The queue's scroll area is not a Tab stop (board Q1), and Qt scrolls only
+    when focus moves between its own children, not when it arrives from Clear
+    list or Cancel.
+    """
+
+    def __init__(self, scroll: QScrollArea) -> None:
+        super().__init__(scroll)
+        self._scroll = scroll
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt API
+        if event.type() == QEvent.Type.FocusIn and isinstance(watched, QWidget):
+            self._scroll.ensureWidgetVisible(watched, 0, 0)
+        return False
 
 
 class LoadSessionsDialog(QDialog):
@@ -204,9 +264,12 @@ class LoadSessionsDialog(QDialog):
         self._loader = loader
         self._start_path = start_path
         self._loaded_keys = frozenset(path_identity_key(path) for path in loaded_paths)
-        self._paths: list[str] = []
-        self._intake = SessionIntake(())
+        # The queue: entries in order, each row keyed by its entry's token.
+        self._entries: tuple[QueueEntry[object], ...] = ()
+        self._row_for: dict[object, QueuedFolderRow] = {}
         self.rows: list[QueuedFolderRow] = []
+        # What a drag would add, until it drops or leaves; the queue waits for the drop.
+        self._preview: Admission[object] | None = None
         self.setObjectName("loadSessionsDialog")
         self.setWindowTitle(LOAD_SESSIONS_TITLE)
         self.setAcceptDrops(True)
@@ -310,6 +373,9 @@ class LoadSessionsDialog(QDialog):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Not a Tab stop: Tab goes from Clear list to the rows (board Q1).
+        self.scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._reveal = _RevealOnFocus(self.scroll)
         self.list = QFrame()
         self.list.setObjectName("queuedFolderList")
         self._list_layout = QVBoxLayout(self.list)
@@ -325,15 +391,32 @@ class LoadSessionsDialog(QDialog):
         footer_layout = QHBoxLayout(footer)
         footer_layout.setContentsMargins(SPACE_XXL, SPACE_L, SPACE_XL, SPACE_L)
         footer_layout.setSpacing(SPACE_S)
+        # The note, and under it the retry line (board Q2, Q3), shown only while a
+        # queued folder can change on disk. The icon stays with the first line.
+        notes = QVBoxLayout()
+        notes.setSpacing(SPACE_XS)
+        first = QHBoxLayout()
+        first.setSpacing(SPACE_S)
         self.footer_icon = Glyph("info", "muted", 14, footer)
-        footer_layout.addWidget(self.footer_icon)
+        first.addWidget(self.footer_icon)
         self.footer_note = QLabel("", footer)
         self.footer_note.setObjectName("loadSessionsFooterNote")
-        footer_layout.addWidget(self.footer_note)
+        first.addWidget(self.footer_note)
+        notes.addLayout(first)
+        second = QHBoxLayout()
+        # Qt puts no spacing beside a spacer, so the indent carries the icon's gap too.
+        second.addSpacing(self.footer_icon.width() + SPACE_S)
+        self.retry_note = QLabel(RETRY_NOTE, footer)
+        self.retry_note.setObjectName("loadSessionsFooterNote")
+        self.retry_note.setHidden(True)
+        second.addWidget(self.retry_note)
+        notes.addLayout(second)
+        footer_layout.addLayout(notes)
         footer_layout.addStretch(1)
         self.cancel_button = QPushButton("Cancel", footer)
         self.cancel_button.clicked.connect(self.reject)
-        footer_layout.addWidget(self.cancel_button)
+        # At the bottom, so a taller footer (the retry line) moves neither button.
+        footer_layout.addWidget(self.cancel_button, 0, Qt.AlignmentFlag.AlignBottom)
         self.load_button = QPushButton(load_button_text(0), footer)
         self.load_button.setObjectName("primaryButton")
         self._load_arrow = themed_icon("arrow-right", color=current_palette().primary_text)
@@ -341,26 +424,29 @@ class LoadSessionsDialog(QDialog):
         self.load_button.setDefault(True)
         self.load_button.setAutoDefault(True)
         self.load_button.clicked.connect(self.accept)
-        footer_layout.addWidget(self.load_button)
+        footer_layout.addWidget(self.load_button, 0, Qt.AlignmentFlag.AlignBottom)
         outer.addWidget(footer)
 
-        self._refresh()
+        # Focus moves on after a choice, a removal or a chip that goes while its
+        # key is held; the key's repeats must not then act where it lands. Each
+        # row's controls join when the row is made.
+        self._held_enter = HeldEnterFilter(self, (self.browse_button, self.load_button, self))
+        self._publish(())
         if self.recent_row is not None:
             self._hold_the_queue_area()
-            self._order_the_keyboard()
 
     def _order_the_keyboard(self) -> None:
-        """Tab goes Browse, the chips, then on as before; queue rows come last.
+        """Tab goes Browse, the chips, Clear list, the rows' controls, Cancel, Load (D13).
 
-        Qt skips hidden and disabled chips itself, so fitting changes no order.
+        Qt skips hidden and disabled controls itself, so fitting changes no order.
+        Set again whenever the rows change.
         """
 
-        chain = (self.browse_button, *self.recent_row.chips, self.clear_button, self.scroll, self.cancel_button, self.load_button)
+        chips = self.recent_row.chips if self.recent_row is not None else ()
+        controls = [control for row in self.rows for control in row.controls]
+        chain = (self.browse_button, *chips, self.clear_button, *controls, self.cancel_button, self.load_button)
         for first, second in zip(chain, chain[1:]):
             QWidget.setTabOrder(first, second)
-        # Focus moves on to Browse or Load after a choice, or when a chip goes
-        # while its key is held; the key's repeats must not then act there.
-        self._held_enter = HeldEnterFilter(self, (self.browse_button, self.load_button, self))
 
     def _hold_the_queue_area(self) -> None:
         """Give the queue its room from the start, so that no chip ever moves.
@@ -377,6 +463,8 @@ class LoadSessionsDialog(QDialog):
         self._remeasure.setSingleShot(True)
         self._remeasure.setInterval(0)
         self._remeasure.timeout.connect(self._fit_minimum_to_contents)
+        # The chips fit themselves after a style change, perhaps after this window measured.
+        self.recent_row.refitted.connect(self._remeasure.start)
         self._fit_minimum_to_contents()
 
     def _queue_row_height(self) -> int:
@@ -410,10 +498,22 @@ class LoadSessionsDialog(QDialog):
         self.queue.updateGeometry()
         self.queue.parentWidget().updateGeometry()
         layout = self.layout()
+        # Measured with the retry line shown, so the line never makes the window
+        # grow and one whole queue row still fits while it shows.
+        hidden = not self.retry_note.isVisibleTo(self)
+        footer = self.retry_note.parentWidget()
+        if hidden:
+            self.retry_note.setVisible(True)
+            footer.layout().invalidate()
+            footer.updateGeometry()
         layout.invalidate()
-        self.setMinimumHeight(
-            max(BASE_MINIMUM_HEIGHT, layout.minimumSize().height(), layout.minimumHeightForWidth(MINIMUM_WIDTH))
-        )
+        needed = max(layout.minimumSize().height(), layout.minimumHeightForWidth(MINIMUM_WIDTH))
+        if hidden:
+            self.retry_note.setVisible(False)
+            footer.layout().invalidate()
+            footer.updateGeometry()
+            layout.invalidate()
+        self.setMinimumHeight(max(BASE_MINIMUM_HEIGHT, needed))
 
     def event(self, event) -> bool:  # noqa: D102 - Qt override
         if self._remeasure is not None and event.type() in METRIC_CHANGE_EVENTS:
@@ -421,81 +521,97 @@ class LoadSessionsDialog(QDialog):
         return super().event(event)
 
     # -- the queue ------------------------------------------------------------
+    # Admission (``services/session_intake.admit``) owns every file-system look.
+    # Everything below works from the stored entries: rows, counts, the footer
+    # and Load are derived, and Remove and Clear look at nothing.
 
     @property
     def intake(self) -> SessionIntake:
-        return self._intake
+        return SessionIntake(tuple(entry.folder for entry in self._entries))
 
     def selected_paths(self) -> list[str]:
         """The folders that will load, in the order they were queued."""
 
-        return list(self._intake.ready_paths)
+        return list(self.intake.ready_paths)
 
-    def add_paths(self, paths: Iterable[str | Path]) -> None:
-        known = {path_identity_key(path) for path in self._paths}
-        for path in paths:
-            text = str(Path(path))
-            if path_identity_key(text) not in known:
-                known.add(path_identity_key(text))
-                self._paths.append(text)
-        self._refresh()
+    def add_paths(self, paths: Iterable[str | Path]) -> Admission[object]:
+        """Queue ``paths``. Only new paths, and paths of rows that can change on disk, are looked at."""
+
+        admission = admit(self._entries, paths, self._loader.classify, loaded_keys=self._loaded_keys)
+        self._publish(admission.entries)
+        return admission
 
     def _add_recent(self, path: str, activation: Activation) -> None:
         """Queue a recent folder. After the keyboard, Enter then loads it, or
         Browse is offered if it will not load, even when other folders will."""
 
-        self.add_paths([path])
+        admission = self.add_paths([path])
         if activation is Activation.KEYBOARD:
-            key = path_identity_key(path)
-            folder = next((value for value in self._intake.folders if path_identity_key(value.path) == key), None)
-            target = self.load_button if folder is not None and folder.ready else self.browse_button
+            ready = bool(admission.records) and admission.records[0].folder.ready
+            target = self.load_button if ready else self.browse_button
             target.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def remove_path(self, path: str) -> None:
         key = path_identity_key(path)
-        self._paths = [value for value in self._paths if path_identity_key(value) != key]
-        self._refresh()
+        self._publish(tuple(entry for entry in self._entries if path_identity_key(entry.spelling) != key))
 
     def use_parent_folder(self, path: str) -> None:
-        """Swap a session file for the folder that holds it."""
+        """Swap a session file for the folder that holds it, in the same place. Only that folder is looked at."""
 
-        folder = next((value for value in self._intake.folders if value.path == path), None)
-        if folder is None or not folder.parent_folder:
+        index = next((index for index, entry in enumerate(self._entries) if entry.folder.path == path), None)
+        if index is None or not self._entries[index].folder.parent_folder:
             return
-        key = path_identity_key(path)
-        replaced: list[str] = []
-        seen: set[str] = set()
-        for value in self._paths:
-            target = folder.parent_folder if path_identity_key(value) == key else value
-            target_key = path_identity_key(target)
-            if target_key not in seen:
-                seen.add(target_key)
-                replaced.append(target)
-        self._paths = replaced
-        self._refresh()
+        parent = self._entries[index].folder.parent_folder
+        self._publish(replace_entry(self._entries, index, parent, self._loader.classify, loaded_keys=self._loaded_keys))
 
     def clear(self) -> None:
-        self._paths = []
-        self._refresh()
+        self._publish(())
 
-    def _refresh(self) -> None:
-        # Before any chip changes: Qt moves focus on from a chip it turns off.
+    def _publish(self, entries: Iterable[QueueEntry[object]]) -> None:
+        """Show ``entries``: rows are kept, updated, made or retired by token."""
+
+        # Before any chip or row changes: Qt moves focus on from a control that goes.
         focus = self.focusWidget()
-        self._intake = assess_paths(self._paths, self._loader.classify, loaded_keys=self._loaded_keys)
-        for row in self.rows:
-            row.deleteLater()
-        self.rows = []
-        for index, folder in enumerate(self._intake.folders):
-            row = QueuedFolderRow(folder, self.list)
-            row.setProperty("last", index == len(self._intake.folders) - 1)
-            row.remove_requested.connect(self.remove_path)
-            row.use_parent_requested.connect(self.use_parent_folder)
-            self._list_layout.insertWidget(index, row)
-            self.rows.append(row)
+        old_rows = list(self.rows)
+        focus_row = next((row for row in old_rows if focus is not None and row.isAncestorOf(focus)), None)
+        focus_slot = focus_row.controls.index(focus) if focus_row is not None and focus in focus_row.controls else 0
 
-        queued = len(self._intake.folders)
-        ready = len(self._intake.ready)
-        problems = len(self._intake.problems)
+        published: list[QueueEntry[object]] = []
+        rows: list[QueuedFolderRow] = []
+        for entry in entries:
+            if entry.token is None:
+                entry = QueueEntry(entry.spelling, entry.key, entry.folder, object())
+            row = self._row_for.get(entry.token)
+            if row is None:
+                row = self._make_row(entry.folder)
+            elif row.folder != entry.folder:
+                row.show_folder(entry.folder)
+                self._watch(row)
+            published.append(entry)
+            rows.append(row)
+        kept = set(map(id, rows))
+        retired = [row for row in old_rows if id(row) not in kept]
+        self._entries = tuple(published)
+        self._row_for = {entry.token: row for entry, row in zip(published, rows)}
+        self.rows = rows
+
+        for row in old_rows:
+            self._list_layout.removeWidget(row)
+        for index, row in enumerate(rows):
+            self._list_layout.insertWidget(index, row)
+            row.setProperty("last", index == len(rows) - 1)
+            row.style().unpolish(row)
+            row.style().polish(row)
+        target = self._hand_off(focus_row, focus_slot, old_rows, rows) if focus_row in retired else None
+        if focus_row is not None and focus_row in rows and focus not in focus_row.controls:
+            # The row stays, but the control that had focus went ("Use parent folder").
+            target = focus_row.controls[min(focus_slot, len(focus_row.controls) - 1)]
+        for row in retired:
+            row.hide()
+            row.deleteLater()
+
+        intake = self.intake
+        queued, ready, problems = len(intake.folders), len(intake.ready), len(intake.problems)
         self.queue.setVisible(bool(queued))
         # With nothing queued the drop well takes the room the list would, unless
         # it holds chips, which must stay where they are.
@@ -504,8 +620,7 @@ class LoadSessionsDialog(QDialog):
             QSizePolicy.Policy.Fixed if queued or self.recent_row is not None else QSizePolicy.Policy.Expanding,
         )
         if self.recent_row is not None:
-            self.recent_row.set_queued({path_identity_key(folder.path) for folder in self._intake.folders})
-            self._keep_focus(focus)
+            self.recent_row.set_queued({path_identity_key(entry.spelling) for entry in self._entries})
         self.ready_count.setText(f"{ready} ready")
         self.ready_count.setVisible(bool(ready))
         self.problem_count.setText(f"{problems} won’t load")
@@ -515,24 +630,63 @@ class LoadSessionsDialog(QDialog):
         # The arrow is drawn in the enabled label colour; a muted button drops it.
         self.load_button.setIcon(self._load_arrow if ready else QIcon())
         self.footer_note.setText(footer_note(queued, len(self._loaded_keys)))
+        # The window minimum already holds the line (``_fit_minimum_to_contents``).
+        self.retry_note.setVisible(any(entry.folder.retryable for entry in self._entries))
+        self._order_the_keyboard()
+        self._keep_focus(focus, target)
 
-    def _keep_focus(self, focus: QWidget | None) -> None:
-        """Leave focus where it was; a chip that turned off hands it to Browse.
+    def _make_row(self, folder: DroppedFolder) -> QueuedFolderRow:
+        row = QueuedFolderRow(folder, self.list)
+        row.remove_requested.connect(self.remove_path)
+        row.use_parent_requested.connect(self.use_parent_folder)
+        self._watch(row)
+        return row
 
-        Qt would pass it to the next control, which can be Clear list.
+    def _watch(self, row: QueuedFolderRow) -> None:
+        """A row's controls drop held-key repeats and scroll into view on focus."""
+
+        for control in row.controls:
+            control.installEventFilter(self._held_enter)
+            control.installEventFilter(self._reveal)
+
+    def _hand_off(self, row: QueuedFolderRow, slot: int, old_rows: list[QueuedFolderRow],
+                  rows: list[QueuedFolderRow]) -> QWidget:
+        """Where focus goes when its row is retired: the same control in the next
+        row, else in the previous row, else Browse."""
+
+        position = old_rows.index(row)
+        after = [candidate for candidate in old_rows[position + 1:] if candidate in rows]
+        before = [candidate for candidate in old_rows[:position] if candidate in rows]
+        destination = after[0] if after else (before[-1] if before else None)
+        if destination is None:
+            return self.browse_button
+        controls = destination.controls
+        if len(controls) == len(row.controls):
+            return controls[slot]
+        return destination.remove_button
+
+    def _keep_focus(self, focus: QWidget | None, target: QWidget | None = None) -> None:
+        """Leave focus where it was, or hand it on when its control went.
+
+        Qt would pass it to the next control, which can be Clear list, or drop it
+        when a row is deleted. A chip that turned off, and Clear list when the
+        queue empties, hand it to Browse.
         """
 
+        if target is not None:
+            target.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
         if focus is None or self.focusWidget() is focus:
             return
-        if focus.isVisible() and focus.isEnabled():
+        if focus.isVisibleTo(self) and focus.isEnabled():
             focus.setFocus(Qt.FocusReason.OtherFocusReason)
-        elif focus in self.recent_row.chips:
+        elif focus is self.clear_button or (self.recent_row is not None and focus in self.recent_row.chips):
             self.browse_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
     # -- browsing and dropping ------------------------------------------------------
 
     def _browse(self) -> None:
-        start = str(Path(self._paths[-1]).parent) if self._paths else self._start_path
+        start = str(Path(self._entries[-1].spelling).parent) if self._entries else self._start_path
         path = select_session_folder(self, "Select session folder", start, "Add folder")
         if path:
             self.add_paths([path])
@@ -542,8 +696,10 @@ class LoadSessionsDialog(QDialog):
         if not paths:
             event.ignore()
             return
-        preview = assess_paths(paths, self._loader.classify, loaded_keys=self._loaded_keys)
-        self.drop_well.set_tone(preview.tone)
+        # A preview within the drag budget; the queue does not change until the drop.
+        self._preview = admit(self._entries, paths, self._loader.classify,
+                              loaded_keys=self._loaded_keys, budget_s=DRAG_CHECK_BUDGET_S)
+        self.drop_well.set_tone(self._preview.supplied.tone)
         event.setDropAction(Qt.DropAction.CopyAction)
         event.accept()
 
@@ -552,21 +708,30 @@ class LoadSessionsDialog(QDialog):
         event.accept()
 
     def dragLeaveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        self._preview = None
         self.drop_well.set_tone("")
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event) -> None:  # noqa: N802 - Qt API
         self.drop_well.set_tone("")
+        preview, self._preview = self._preview, None
         paths = dropped_paths(event.mimeData())
         if not paths:
             event.ignore()
             return
         event.setDropAction(Qt.DropAction.CopyAction)
         event.accept()
-        # Even folders that will not load are queued, so the list can say why.
-        self.add_paths(paths)
+        # Even folders that will not load are queued, so the list can say why. The
+        # drag's completed checks are reused; only what it had no time for is looked at.
+        known = preview.records if preview is not None else ()
+        admission = admit(self._entries, paths, self._loader.classify, loaded_keys=self._loaded_keys, known=known)
+        self._publish(admission.entries)
+
+    def done(self, result: int) -> None:  # noqa: D102 - Qt override
+        self._preview = None
+        super().done(result)
 
     def accept(self) -> None:  # noqa: D102 - Qt override
-        if not self._intake.ready:
+        if not self.intake.ready:
             return
         super().accept()

@@ -11,7 +11,7 @@ from tomography_session_browser.reports import graphics, styles
 from tomography_session_browser.reports.pdf_export import PORTRAIT_USABLE_W
 from tomography_session_browser.reports.constants import CARD_INNER_W, PROJECT_BADGE_MEANINGS
 from tomography_session_browser.reports.context import ReportSection, SessionContext
-from tomography_session_browser.reports.formatting import acquisition_window_text, report_title, session_kind_label
+from tomography_session_browser.reports.formatting import acquisition_window_text, report_title, print_session_kind
 from tomography_session_browser.reports.layout import meta_row, stat_card_data, stat_cards_block
 from tomography_session_browser.reports.sections.contents import contents_card
 from tomography_session_browser.reports.sections.totals import Totals, aggregate_totals, dashboard_tile_statuses, report_atlas_statuses
@@ -98,7 +98,7 @@ def cover_meta(contexts: Sequence[SessionContext], generated_at: datetime) -> li
     datasets = sum(len(ctx.collection_samples) for ctx in contexts)
     items: list[tuple[str, str | None]] = []
     if len(contexts) == 1:
-        items.append(("Kind", f"{session_kind_label(contexts[0].session.kind)} session"))
+        items.append(("Kind", f"{print_session_kind(contexts[0].session.kind)} session"))
     else:
         atlas = sum(1 for ctx in contexts if ctx.session.kind == SessionKind.ATLAS_SCREENING)
         items.append(("Sessions", f"{len(contexts)} ({atlas} atlas, {len(contexts) - atlas} data collection)"))

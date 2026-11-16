@@ -3,7 +3,8 @@
 Stores a small JSON document under the user's per-OS config directory so the
 window restores theme, panel visibility, and last-tab choice between runs.
 Deliberately tolerant: a corrupted or partially-written settings file is
-treated as "no saved state" rather than an error.
+treated as "no saved state" rather than an error. Saves replace the file
+atomically, so a crash during a save no longer leaves a partial file.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from tomography_session_browser.domain.identity import path_identity_key
+from tomography_session_browser.services.atomic_files import atomic_write
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,7 +39,6 @@ def _recent_history(value: Any) -> list[str]:
 @dataclass
 class Settings:
     theme: str = "dark"
-    compact: bool = False
     project_panel_visible: bool = True
     context_panel_visible: bool = True
     last_tab: str = "Session"
@@ -71,7 +72,6 @@ class Settings:
         geometry = data.get("window_geometry")
         return cls(
             theme=str(data.get("theme", defaults.theme)) or defaults.theme,
-            compact=bool(data.get("compact", defaults.compact)),
             project_panel_visible=bool(data.get("project_panel_visible", defaults.project_panel_visible)),
             context_panel_visible=bool(data.get("context_panel_visible", defaults.context_panel_visible)),
             last_tab=str(data.get("last_tab", defaults.last_tab)) or defaults.last_tab,
@@ -123,11 +123,22 @@ def load_settings(path: Path | None = None) -> Settings:
 
 
 def save_settings(settings: Settings, path: Path | None = None) -> None:
+    """Replace the settings file in one step; never raise.
+
+    The text goes to a sibling temporary first, so a crash or a refused
+    replace leaves the earlier file whole. The settings folder is outside
+    every source root, so no root is protected. Callers are on the GUI thread
+    and expect no exception: a refused path (``ValueError``) or an unresolvable
+    one (``RuntimeError``) is logged like a disk error.
+    """
+
     target = path or settings_path()
+    # Same bytes as the earlier ``write_text``, which wrote the platform's line endings.
+    content = json.dumps(asdict(settings), indent=2).replace("\n", os.linesep).encode("utf-8")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(asdict(settings), indent=2), encoding="utf-8")
-    except OSError as exc:
+        atomic_write(target, content, protected_roots=())
+    except (OSError, ValueError, RuntimeError) as exc:
         LOGGER.warning("Could not save settings to %s: %s", target, exc)
 
 

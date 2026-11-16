@@ -239,7 +239,7 @@ def _inferred_link(dashboard: SessionDashboard, inferred: DashboardFilterModel) 
 
     evidence = link_button(style="table")
     evidence.setText("View failed series")
-    evidence.setToolTip(f"{inferred.label}. Batch position metadata is absent. {inferred.tooltip}")
+    evidence.setToolTip(f"{inferred.label}. No recorded Batch position link. {inferred.tooltip}")
     evidence.setAccessibleDescription(f"{inferred.label}. {inferred.tooltip}")
     evidence.clicked.connect(lambda: dashboard.filter_requested.emit(inferred))
     return evidence

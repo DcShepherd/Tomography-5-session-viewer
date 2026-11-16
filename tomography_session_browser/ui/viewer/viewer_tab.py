@@ -3,10 +3,10 @@ from __future__ import annotations
 from tomography_session_browser.presentation.help_content import LocalBinding, InteractionKind
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from PySide6.QtCore import QEvent, QObject, QRect, Qt, QThreadPool, Signal
 from PySide6.QtGui import QImage, QKeyEvent
-from PySide6.QtWidgets import QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLineEdit, QTreeWidgetItem, QVBoxLayout, QWidget
 from tomography_session_browser.services.preview_sources import PreviewSources
 from tomography_session_browser.domain.markers import ImageMarker
 from tomography_session_browser.presentation.empty_states import EmptyState
@@ -24,9 +24,15 @@ from tomography_session_browser.ui.viewer.mrc_loading import PreviewLoader
 from tomography_session_browser.ui.viewer.overlay_panel import OverlayPanel
 from tomography_session_browser.ui.viewer.tab_selection import TabSelection
 from tomography_session_browser.ui.viewer.viewer_header import ViewerHeader
+from tomography_session_browser.ui.viewer.collection_filter import CollectionFilter
+from tomography_session_browser.ui.viewer.colour_by import ColourBy
+from tomography_session_browser.ui.viewer.outside_close import OutsideClose
 from tomography_session_browser.ui.viewer.parts import TabParts
 from tomography_session_browser.presentation.viewer_tabs import PreparedViewerTab
 from tomography_session_browser.ui.viewer.prepared import install_prepared_raster
+
+if TYPE_CHECKING:
+    from tomography_session_browser.ui.viewer.atlas_overlay_state import AtlasOverlayState
 
 
 class ViewerTab(QWidget):
@@ -62,10 +68,13 @@ class ViewerTab(QWidget):
         status_segments: tuple[str, ...] = ("failed", "complete"),
         show_exposure_chooser: bool = False,
         protected_roots: Callable[[], tuple[Path, ...]] = lambda: (),
+        parent: QWidget | None = None,
     ) -> None:
 
         self._constructed = False
-        super().__init__()
+        # The window passes the tab page, so the content is styled where it
+        # lives from its first child on (ui/window_parts/shell.py build_tabs).
+        super().__init__(parent)
 
         # Each part is handed the parts built before it; parts built later
         # reach these through ``parts``. The loader first, then the selection.
@@ -88,6 +97,8 @@ class ViewerTab(QWidget):
                                      show_exposure_chooser=show_exposure_chooser)
         self.parts = TabParts(
             canvas_controls=controls,
+            collection_filter=CollectionFilter(self, selection=selection, atlas_lod=atlas_lod),
+            colour_by=ColourBy(self, selection=selection, atlas_lod=atlas_lod),
             export=ViewerExport(self, loader=loader, overlays=overlays, protected_roots=protected_roots),
             frame_scrubber=FrameScrubber(
                 self, loader=loader, selection=selection, on_frame_changed=on_frame_changed,
@@ -95,6 +106,7 @@ class ViewerTab(QWidget):
             ),
             list_pane=pane,
             mrc_loading=loader,
+            outside_close=OutsideClose(self),
             overlay_panel=overlays,
             tab_selection=selection,
             viewer_header=viewer_header,
@@ -129,6 +141,7 @@ class ViewerTab(QWidget):
         self.parts.overlay_panel.create_widgets()
         self.parts.viewer_header.create_linked_strip(header)
         self.parts.canvas_controls.connect_controls()
+        self.parts.outside_close.follow_controls()
         self.parts.list_pane.create_widgets(show_list, status_segments)
         status_policy = self.status.sizePolicy()
         status_policy.setRetainSizeWhenHidden(show_tilt_controls)
@@ -177,7 +190,10 @@ class ViewerTab(QWidget):
         | None,
         on_visibility_changed: Callable[[str, bool], None] | None,
     ) -> None:
-        return self.parts.overlay_panel.set_atlas_collection_overlay_provider(provider, on_visibility_changed)
+        return self.parts.collection_filter.set_provider(provider, on_visibility_changed)
+
+    def set_atlas_overlay_state(self, state: AtlasOverlayState | None) -> None:
+        return self.parts.tab_selection.set_atlas_overlay(state)
 
     def refresh_theme(self) -> None:
         return self.parts.canvas_controls.refresh_theme()
@@ -198,6 +214,15 @@ class ViewerTab(QWidget):
         """Make ``text`` the list's filter; ``set_query("")`` clears all of it."""
 
         self.parts.list_pane.set_query(text, notify=notify, row_keys=row_keys, scope_label=scope_label)
+
+    def reveal_filter(self) -> QLineEdit | None:
+        """For Ctrl+F: open a collapsed list, then give its filter (None when no list shows)."""
+
+        pane = self.parts.list_pane
+        if pane.list_collapsed and pane.compact_row.isVisible():
+            pane.set_list_collapsed(False)
+        box = pane.filter_bar.box
+        return box if box.isVisible() else None
 
     def filter_description(self) -> str:
         """The visible status/text query and any summary scope restriction."""

@@ -1,7 +1,6 @@
 """DashboardInteraction owns its window interaction responsibilities."""
 from __future__ import annotations
 from tomography_session_browser.presentation.project_tree import folded_session_for_sample
-import logging
 from dataclasses import (
     replace,
 )
@@ -48,7 +47,6 @@ from tomography_session_browser.presentation.scopes import (
     LinkedSampleGroup,
 )
 
-LOGGER = logging.getLogger("tomography_session_browser.ui.main_window")
 from tomography_session_browser.ui.window_parts.contracts import (
     WindowParts,
     WindowUi,

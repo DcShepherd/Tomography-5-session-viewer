@@ -16,7 +16,7 @@ from tomography_session_browser.presentation.project_tree import ProjectTreeGrou
 from tomography_session_browser.presentation.workspace import Scope, Workspace
 from tomography_session_browser.presentation.report_scope import ReportScope, ReportScopeRequest, preset_folders
 from tomography_session_browser.presentation.report_tomograms import ReportTomograms
-from tomography_session_browser.reports.report_generator import SLICES, ReportProgress, build_report
+from tomography_session_browser.reports.progress import SLICES, ReportProgress
 from tomography_session_browser.reports.tomogram_slices import CANCELLED
 from tomography_session_browser.services.output_boundary import check_output_path
 from tomography_session_browser.services.settings_service import Settings
@@ -40,6 +40,9 @@ def report_task(scope: ReportScope, output_path: Path, signals: TaskSignals,
                 cancelled: Callable[[], bool] = lambda: False,
                 progress: ReportProgress = lambda stage, done, total: None) -> BackgroundTask:
     """Write ``scope``'s PDF to ``output_path`` on the thread pool."""
+
+    # Imported here, not at module level: reportlab stays out of start-up.
+    from tomography_session_browser.reports.report_generator import build_report
 
     return BackgroundTask(
         lambda: build_report(scope, output_path, protected_roots, cancelled=cancelled, progress=progress),

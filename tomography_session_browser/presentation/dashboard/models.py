@@ -268,6 +268,9 @@ class DefocusPointModel:
     sample_name: str
     data_collection_name: str
     linked_group_label: str | None
+    #: The sample-group key (the timeline lane's ``lane_key``): what the chart
+    #: groups, colours and orders by. ``sample_name`` is display text only.
+    series_key: str
     tilt_series_id: str
     tilt_series_name: str
     frame_index: int
@@ -311,6 +314,9 @@ class DoseInformationPointModel:
     sample_name: str
     data_collection_name: str
     linked_group_label: str | None
+    #: The sample-group key (the timeline lane's ``lane_key``): what the chart
+    #: groups, colours and orders by. ``sample_name`` is display text only.
+    series_key: str
     tilt_series_id: str
     tilt_series_name: str
     frame_index: int

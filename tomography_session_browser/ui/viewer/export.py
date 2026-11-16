@@ -156,7 +156,10 @@ class ViewerExport:
         self.protected_roots = protected_roots
 
     def export_current_view(self) -> None:
-        rendered = self.view.viewer.render_current_view()
+        if self.overlays.atlas_lod:
+            # A colour key highlight is a pointer state, not part of the picture.
+            self.view.parts.colour_by.clear_highlight()
+        rendered =self.view.viewer.render_current_view()
         if rendered is None:
             message_sheet.choose_action(self.view, ActionPrompt(MessageContent("No image to export", "Load an image before exporting."),
                 (MessageAction("close", "Close"),), "close", "close"))
@@ -220,14 +223,16 @@ class ViewerExport:
         overlays: list[tuple[QWidget, int]] = []
         if not self.view.scale_bar.isHidden():
             overlays.append((self.view.scale_bar, 0))
-        if self.overlays.atlas_lod and not self.view.atlas_marker_legend.isHidden():
+        if self.overlays.atlas_lod and not self.view.positions_card.isHidden():
             # A legend part-way open is painted by its reveal; the export
             # takes the legend as it now is.
-            reveal = live_section_reveal(self.view.atlas_marker_legend)
+            reveal = live_section_reveal(self.view.positions_card)
             if reveal is not None:
                 reveal.dismiss()
-            overlays.append((self.view.atlas_marker_legend, 12))
-        if not overlays:
+            overlays.append((self.view.positions_card, 12))
+        key = self.view.parts.colour_by.key if self.overlays.atlas_lod else None
+        centred = key is not None and not key.isHidden()
+        if not overlays and not centred:
             return
 
         left_inset = round(FLOATING_CONTROL_INSET_PX * render_scale)
@@ -252,6 +257,14 @@ class ViewerExport:
                 painter.drawImage(
                     QPoint(left_inset, max(0, bottom)),
                     widget_image,
+                )
+            if centred and key is not None:
+                # The colour key, at the bottom centre as on screen.
+                key_image = self.render_widget_for_export(key, render_scale)
+                key_bottom = image.height() - round(FLOATING_CONTROL_BOTTOM_INSET_PX * render_scale)
+                painter.drawImage(
+                    QPoint(max(0, (image.width() - key_image.width()) // 2), max(0, key_bottom - key_image.height())),
+                    key_image,
                 )
         finally:
             painter.end()

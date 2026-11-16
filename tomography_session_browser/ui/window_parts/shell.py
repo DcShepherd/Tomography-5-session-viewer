@@ -7,6 +7,7 @@ from PySide6.QtCore import (
     QByteArray,
     QObject,
     QPoint,
+    QRect,
     QSize,
     Qt,
 )
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QProgressBar,
+    QPushButton,
     QSizePolicy,
     QTabWidget,
     QToolBar,
@@ -32,6 +34,7 @@ from tomography_session_browser.ui.shell.chrome import (
     CONTEXT_DOCK_MIN_WIDTH_PX,
     TAB_LABELS,
 )
+from tomography_session_browser.ui.filter_key import FILTER_ACTION_TEXT, FILTER_HELP_ID, FILTER_KEY
 from tomography_session_browser.ui.viewer.list_rows import status_chip_tone
 from tomography_session_browser.ui.tab_registry import TAB_SPECS
 from tomography_session_browser.ui.tomograms.tab import TomogramTab
@@ -94,6 +97,7 @@ from tomography_session_browser.ui.window_parts.state import (
 )
 from tomography_session_browser.ui.window_parts.support import first_run_window_rect, panel_header, FIRST_RUN_MAX_SIZE, SIDE_PANEL_INSET_PX
 from tomography_session_browser.presentation.tab_keys import TabKey
+from tomography_session_browser.presentation.navigation_history import IDLE_TEXT
 
 class WindowShell(QObject):
     def __init__(self, window: QMainWindow, state: WindowState, ui: WindowUi, parts: WindowParts) -> None:
@@ -111,6 +115,17 @@ class WindowShell(QObject):
         bottom = central.mapTo(self.window, QPoint(0, central.height())).y()
         top = tab.plane_band.mapTo(self.window, QPoint()).y()
         return max(0, bottom - top)
+
+    def toast_above(self) -> QRect | None:
+        """The Atlas colour key while it shows: the toast sits above it (window coordinates)."""
+        index = self.ui.tabs.currentIndex()
+        if not 0 <= index < len(TAB_LABELS) or TAB_LABELS[index] != TabKey.ATLAS:
+            return None
+        tab = self.ui.viewer_tabs.get(TabKey.ATLAS)
+        key = tab.parts.colour_by.key if tab is not None else None
+        if key is None or not key.isVisible():
+            return None
+        return QRect(key.mapTo(self.window, QPoint()), key.size())
 
     def build_toolbar(self) -> None:
         # Qt's default right-click menu hides toolbars and docks, and nothing here shows them again.
@@ -166,6 +181,7 @@ class WindowShell(QObject):
         self.ui.connections.append(lambda: self.parts.context_panel.sources.refresh_requested.connect(self.parts.project.refresh_processing_source))
         self.ui.connections.append(lambda: self.parts.context_panel.sources.remove_requested.connect(self.parts.project.remove_processing_source))
         self.ui.connections.append(lambda: self.parts.context_panel.tomogram.parent_requested.connect(self.parts.viewers.open_tomogram_parent))
+        self.ui.connections.append(lambda: self.parts.context_panel.tomogram.alignment_requested.connect(self.parts.link_review.alignment_requested))
 
         toolbar.addSeparator()
 
@@ -175,7 +191,7 @@ class WindowShell(QObject):
         self.ui.back_action = self.parts.shell.action(
             "chevron-left",
             "Back",
-            "Return to the previous navigation step.",
+            IDLE_TEXT["Back"],
             "Alt+Left",
             identity="shell.back",
         )
@@ -186,7 +202,7 @@ class WindowShell(QObject):
         self.ui.forward_action = self.parts.shell.action(
             "chevron-right",
             "Forward",
-            "Move forward again after going back.",
+            IDLE_TEXT["Forward"],
             "Alt+Right",
             identity="shell.forward",
         )
@@ -212,16 +228,6 @@ class WindowShell(QObject):
         self.ui.toolbar_spacer = spacer
 
         # View / theme actions ------------------------------------------------
-        self.ui.compact_action = self.parts.shell.action(
-            "layout-compact", "Compact", "Dense layout mode is planned, but not available in this build.",
-            identity="shell.compact",
-        )
-        self.ui.compact_action.setCheckable(True)
-        self.ui.compact_action.setEnabled(False)
-        self.ui.compact_action.setVisible(False)
-        self.ui.compact_action.setStatusTip("Dense layout mode is not available yet.")
-        toolbar.addAction(self.ui.compact_action)
-
         self.ui.project_panel_action = self.parts.shell.action(
             "panel-left", "Project", "Show or hide the project / session tree.", "Ctrl+1",
             identity="shell.project_panel",
@@ -247,6 +253,15 @@ class WindowShell(QObject):
         self.ui.theme_action.setCheckable(True)
         self.ui.connections.append(lambda signal=self.ui.theme_action.toggled: signal.connect(self.parts.theme.on_theme_toggled))
         toolbar.addAction(self.ui.theme_action)
+
+        # Not a toolbar control: every filter's tooltip names the key.
+        self.ui.filter_action = QAction(FILTER_ACTION_TEXT, self.window)
+        self.ui.filter_action.setProperty("helpBindingId", FILTER_HELP_ID)
+        self.ui.filter_action.setShortcut(QKeySequence(FILTER_KEY))
+        self.ui.filter_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        self.ui.connections.append(lambda signal=self.ui.filter_action.triggered: signal.connect(
+            lambda _checked=False: self.parts.context.focus_active_tab_filter()))
+        self.window.addAction(self.ui.filter_action)
 
         self.help_action = self.action("help", "Help", "Show keyboard shortcuts and controls.", "F1",
             identity="shell.help",
@@ -275,17 +290,6 @@ class WindowShell(QObject):
         self.window.statusBar().addPermanentWidget(self.ui.loading_progress)
         self.window.statusBar().addPermanentWidget(self.ui.status_runtime)
 
-        # ---- Backwards-compat aliases used by older tests -------------------
-        # The old toolbar exposed ``QPushButton`` attributes; tests inspect them
-        # through ``isEnabled()`` / ``isChecked()`` / ``click()``. ``QAction``
-        # supports the same surface, so we alias the new actions back to the
-        # historical attribute names.
-        self.ui.open_button = self.ui.open_action
-        self.ui.refresh_button = self.ui.refresh_action
-        self.ui.report_button = self.ui.report_action
-        self.ui.compact_button = self.ui.compact_action
-        self.ui.project_panel_button = self.ui.project_panel_action
-        self.ui.context_panel_button = self.ui.context_panel_action
         # Responsive chrome is fitted after its widgets have been built.
 
 
@@ -363,6 +367,26 @@ class WindowShell(QObject):
         self.parts.theme.schedule_other_theme_icons()
 
 
+    def focus_starting_point(self) -> None:
+        """At launch the project is empty: focus on the page's Load sessions button (D12, Q1).
+
+        Qt would give focus to the first control, the empty project filter,
+        where Return does nothing. If the reviewer has already put focus
+        somewhere, it stays there.
+        """
+
+        if self.state.review.workspace.has_sources:
+            return
+        holder = QApplication.focusWidget()
+        if holder is not None and holder is not self.ui.project_filter:
+            return
+        page = self.ui.tabs.currentWidget()
+        button = next((button for button in page.findChildren(QPushButton, "primaryButton")
+                       if button.isVisible() and button.isEnabled()), None) if page is not None else None
+        if button is not None:
+            button.setFocus(Qt.FocusReason.OtherFocusReason)
+
+
     def restore_from_settings(self) -> None:
         settings = self.state.review.settings
         # Theme: app.py applies the theme before the window is built, so here
@@ -386,10 +410,6 @@ class WindowShell(QObject):
         self.ui.context_panel_action.blockSignals(False)
         if not settings.context_panel_visible:
             self.ui.context_dock.hide()
-        # Compact mode is wired in a later milestone; sync the toggle anyway.
-        self.ui.compact_action.blockSignals(True)
-        self.ui.compact_action.setChecked(settings.compact)
-        self.ui.compact_action.blockSignals(False)
         # Last-active tab.
         if settings.last_tab in TAB_LABELS:
             self.ui.tabs.setCurrentIndex(TAB_LABELS.index(settings.last_tab))
@@ -509,7 +529,24 @@ class WindowShell(QObject):
 
 
     def build_tabs(self) -> None:
-        self.ui.tabs = QTabWidget()
+        # Top-down (review finding A2): the central container, the tab widget
+        # and each page are in the window before a page's content is built,
+        # so every widget is created where it will be styled and polished
+        # once, rather than built parentless and re-polished when it is
+        # reparented into the window.
+        container = QWidget(self.window)
+        container.setObjectName("centralShell")
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        # One header above every page, so scope, section, selection, filters
+        # and borrowed Atlas context are stated on all of them rather than
+        # only on the dashboard.
+        self.ui.context_header = ContextHeader(container)
+        outer.addWidget(self.ui.context_header)
+        self.ui.tabs = QTabWidget(container)
+        outer.addWidget(self.ui.tabs, stretch=1)
+        self.window.setCentralWidget(container)
         self.ui.connections.append(lambda: self.ui.session_dashboard.empty_state_action_requested.connect(
             self.parts.context.on_empty_state_action))
         self.ui.tabs.setObjectName("mainTabs")
@@ -525,7 +562,9 @@ class WindowShell(QObject):
             layout = QVBoxLayout(tab)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(0)
-            content = spec.factory(label, self.ui, self.parts)
+            index = self.ui.tabs.addTab(tab, spec.label)
+            self.ui.tabs.setTabIcon(index, themed_icon(TAB_ICONS[label], size=16))
+            content = spec.factory(label, self.ui, self.parts, tab)
             if isinstance(content, (ViewerTab, TomogramTab)):
                 self.ui.review_tabs[label] = content
             if isinstance(content, ViewerTab):
@@ -540,23 +579,9 @@ class WindowShell(QObject):
             # Focus given to the page belongs to what it shows: Tomograms
             # commands act only within their tab (ShellChrome.hand_focus_to_page).
             tab.setFocusProxy(content)
-            index = self.ui.tabs.addTab(tab, spec.label)
-            self.ui.tabs.setTabIcon(index, themed_icon(TAB_ICONS[label], size=16))
             # Restyled at a theme switch only if on screen, else when next
             # shown: most of the window's widgets are on hidden pages.
             mark_theme_region(tab)
-        container = QWidget(self.window)
-        container.setObjectName("centralShell")
-        outer = QVBoxLayout(container)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-        # One header above every page, so scope, section, selection, filters
-        # and borrowed Atlas context are stated on all of them rather than
-        # only on the dashboard.
-        self.ui.context_header = ContextHeader(container)
-        outer.addWidget(self.ui.context_header)
-        outer.addWidget(self.ui.tabs, stretch=1)
-        self.window.setCentralWidget(container)
         container.installEventFilter(self.window)
         # Context is refreshed once all components are constructed.
 

@@ -99,7 +99,7 @@ class VolumeStage(QWidget):
             if steps:
                 self.tab.step_plane(steps)
 
-    def select(self, axis: str) -> None:
+    def select(self, axis: str, *, render: bool = True) -> None:
         """One selection operation, independent of input policy and playback."""
         tab, volume = self.tab, self.tab.volume()
         if axis == tab.state.axis or volume is None or volume.grid is None:
@@ -119,7 +119,8 @@ class VolumeStage(QWidget):
         with QSignalBlocker(tab.slider):
             tab.slider.setRange(0, plane_geometry(volume, axis)[2] - 1)
             tab.slider.setValue(tab.state.plane or 0)
-        tab.request_render()
+        if render:
+            tab.request_render()
         if focus_in_stage:
             tab.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
 
@@ -151,12 +152,10 @@ class VolumeStage(QWidget):
             tab.layout_choice.setCurrentText(mode)
         tab.layout_choice.sync()
         if mode == "Single":
-            tab.change_axis("XY")
+            self.select("XY", render=False)
         self.set_layout(mode)
         for splitter in (self.vertical, self.horizontal, self.top):
             splitter.refresh()
-        tab.request_render()
-        tab.focus_refit_requested.emit()
 
     def clear(self) -> None:
         for pane in self.panes.values():

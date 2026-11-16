@@ -33,6 +33,42 @@ from tomography_session_browser.services.marker_clustering import (
 #: Batch-position numbers appear from 200 % of the fit zoom.
 ATLAS_LABEL_MIN_ZOOM = 2.0
 
+#: Glyph key of a failed tilt series that no batch position claims. A display
+#: key only: the marker's status stays ``failed``.
+UNLINKED_FAILED_KEY = "failed_unlinked"
+#: Glyph key of a batch position the resolver cannot navigate to.
+UNRESOLVED_LINK_KEY = "unattributed"
+#: The order of the glyph keys in a legend or a card, top to bottom.
+ATLAS_GLYPH_KEYS = ("collected", "partial", "queued", "failed", UNLINKED_FAILED_KEY, UNRESOLVED_LINK_KEY)
+#: Glyph keys drawn with a dashed ring: neither has a confident batch link.
+DASHED_GLYPH_KEYS = frozenset((UNLINKED_FAILED_KEY, UNRESOLVED_LINK_KEY))
+
+
+def is_unlinked_failure(marker: ImageMarker) -> bool:
+    """A failed tilt series drawn on the Atlas without a batch-position link."""
+
+    return marker.metadata.get("atlas_lod_role") == "unattributed"
+
+
+def atlas_glyph_key(marker: ImageMarker) -> str:
+    """The one rule for which glyph an Atlas batch marker draws and counts under.
+
+    The leaf painter, the goo blobs, the cluster inputs, the on-screen card and
+    the PDF legend all use it, so their glyphs and counts agree.
+    """
+
+    if is_unlinked_failure(marker):
+        return UNLINKED_FAILED_KEY
+    if not bool(marker.metadata.get("navigation_enabled", True)):
+        return UNRESOLVED_LINK_KEY
+    return (marker.status or "queued").lower()
+
+
+def glyph_colour_status(key: str) -> str:
+    """The status whose colour ``key`` draws in: an unlinked failure is failed red."""
+
+    return "failed" if key == UNLINKED_FAILED_KEY else key
+
 
 @dataclass(frozen=True, slots=True)
 class AtlasBatchView:
@@ -54,11 +90,7 @@ def atlas_cluster_inputs(batch_markers: Sequence[ImageMarker]) -> list[ClusterIn
             id=marker.id,
             x=float(marker.x),
             y=float(marker.y),
-            status=(
-                marker.status or "queued"
-                if bool(marker.metadata.get("navigation_enabled", True))
-                else "unattributed"
-            ),
+            status=atlas_glyph_key(marker),
         )
         for marker in batch_markers
         if marker.x is not None and marker.y is not None
@@ -108,8 +140,15 @@ def atlas_batch_view(
 
 
 __all__ = [
+    "ATLAS_GLYPH_KEYS",
+    "DASHED_GLYPH_KEYS",
     "ATLAS_LABEL_MIN_ZOOM",
+    "UNLINKED_FAILED_KEY",
+    "UNRESOLVED_LINK_KEY",
     "AtlasBatchView",
     "atlas_batch_view",
     "atlas_cluster_inputs",
+    "atlas_glyph_key",
+    "glyph_colour_status",
+    "is_unlinked_failure",
 ]

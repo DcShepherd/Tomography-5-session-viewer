@@ -27,7 +27,8 @@ class OverlayControl:
     them together. ``hint`` is the one line under the label that says how the
     layer behaves. ``parent`` is the label of the row this one sits under.
     ``swatch`` names the small drawing of the layer beside the label
-    (``ui/viewer/overlay_swatches``).
+    (``ui/viewer/overlay_swatches``). ``tooltip`` says more than the label
+    when pointed at.
     """
 
     label: str
@@ -35,6 +36,7 @@ class OverlayControl:
     hint: str = ""
     parent: str = ""
     swatch: str = ""
+    tooltip: str = ""
 
 
 @dataclass(frozen=True, slots=True)

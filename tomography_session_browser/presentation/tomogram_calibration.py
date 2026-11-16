@@ -28,7 +28,7 @@ from tomography_session_browser.domain.tomograms import CALIBRATION_WARNINGS, Pr
 from tomography_session_browser.parsers.path_utils import natural_key
 from tomography_session_browser.parsers.volume_header import fingerprint
 from tomography_session_browser.presentation.tomogram_versions import review_versions
-from tomography_session_browser.services.volume.render import calibrated_spacing
+from tomography_session_browser.services.volume.render import calibrated_spacing, uniform_spacing
 
 _FILE_SPACING = re.compile(r"(\d+(?:\.\d+)?)\s*Apx", re.IGNORECASE)
 
@@ -93,8 +93,9 @@ def pixel_size_suggestions(item: Tomogram, volume: Volume) -> tuple[tuple[str, f
     found: list[tuple[str, float]] = []
     for other in item.volumes:
         spacing = calibrated_spacing(other, None) if other is not volume else None
-        if spacing and len(set(spacing)) == 1:
-            found.append((f"{other.version} · {spacing[0]:.2f} Å", spacing[0]))
+        value = uniform_spacing(spacing) if spacing else None
+        if value is not None:
+            found.append((f"{other.version} · {value:.2f} Å", value))
     named = file_name_spacing(volume.path)
     if named is not None and abs(named - 1) > 1e-6:
         found.append((f"File name · {named:.2f} Å", named))
@@ -136,7 +137,8 @@ def not_offered_reason(volume: Volume, stated: float | None) -> NotOffered | Non
         return PARTLY_RECORDED
     if all(abs(value - 1) < 1e-6 for value in usable):
         return None
-    return VALID_HEADER if len(set(usable)) == 1 else ANISOTROPIC_HEADER
+    # Float32 noise does not make a header anisotropic; a valid one stays excluded.
+    return VALID_HEADER if uniform_spacing((usable[0], usable[1], usable[2])) is not None else ANISOTROPIC_HEADER
 
 
 @dataclass(frozen=True, slots=True)

@@ -45,7 +45,7 @@ def overview_grid(
                     batch_positions=tuple(sample.batch_positions),
                     tilt_series=tuple(sample.tilt_series),
                     failed_tilt_ids=failed_tilt_ids,
-                    grid_validations=grid_validations if grid_validations is not None else GridValidations(),
+                    grid_validations=grid_validations if grid_validations is not None else GridValidations([sample]),
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - the figure still prints, without overlays

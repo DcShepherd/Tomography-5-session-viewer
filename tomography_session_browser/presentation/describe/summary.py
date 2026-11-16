@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from tomography_session_browser.domain.display_names import count_phrase, session_kind_label
@@ -24,6 +25,7 @@ from tomography_session_browser.presentation.describe.metadata import (
     tilt_pixel_size_text,
 )
 from tomography_session_browser.presentation.describe.sections import emit_section
+from tomography_session_browser.presentation.read_times import READ_INTO_APP, SourceReadTimes, read_time_text
 from tomography_session_browser.presentation.workspace import EntityKind, display_atlases, session_entities
 from tomography_session_browser.services.acquisition_metadata import ACQUISITION_SPOT_LABEL, SEARCH_SPOT_LABEL
 
@@ -38,25 +40,28 @@ class SourceFolder:
     name: str
     detail: str
     path: Path
+    #: When the app read the folder (D16); unknown, no row.
+    read_at: datetime | None = None
 
 
-def session_folder(session: Session) -> SourceFolder:
-    """A session's folder: its kind and how many samples it holds."""
+def session_folder(session: Session, read_times: SourceReadTimes | None = None) -> SourceFolder:
+    """A session's folder: its kind, how many samples it holds, and when it was read."""
 
     kind = session_kind_label(session.kind)
     samples = count_phrase(len(session.samples), "sample") if session.samples else ""
-    return SourceFolder(session.name, " · ".join(part for part in (kind, samples) if part), session.path)
+    read_at = read_times.read_at(session) if read_times is not None else None
+    return SourceFolder(session.name, " · ".join(part for part in (kind, samples) if part), session.path, read_at)
 
 
 def sample_folder(sample: Sample) -> SourceFolder:
     return SourceFolder(sample.name, "", sample.path)
 
 
-def sessions_summary_lines(sessions: Sequence[Session]) -> list[str]:
+def sessions_summary_lines(sessions: Sequence[Session], read_times: SourceReadTimes | None = None) -> list[str]:
     """The summary of one or several sessions: each folder, and their shared settings."""
 
     return summary_lines(
-        [session_folder(session) for session in sessions],
+        [session_folder(session, read_times) for session in sessions],
         tilt_series=[
             tilt
             for session in sessions
@@ -97,6 +102,8 @@ def _folder_rows(folders: Sequence[SourceFolder]) -> list[str]:
         if folder.detail:
             rows.append(folder.detail)
         rows.append(f"Path: {folder.path}")
+        if folder.read_at is not None:
+            rows.append(f"{READ_INTO_APP}: {read_time_text(folder.read_at)}")
     return rows
 
 

@@ -25,6 +25,8 @@ QFrame#captureRow QPushButton {{ background: transparent; border: none; padding:
 QFrame#captureRow QPushButton:hover {{ color: {link_text}; }}
 QFrame#captureRow QPushButton:focus {{ border: 1px solid {accent}; }}
 QFrame#captureRow QLabel {{ color: {text_muted}; font-size: {type_caption}pt; }}
+QFrame#captureRow QLabel#movieRowName {{ color: {text}; font-size: {type_body}pt; }}
+QFrame#captureRow QPushButton:disabled {{ color: {text_muted}; }}
 QFrame#captureRow QToolButton {{ background: transparent; border: none; padding: 2px; }}
 QFrame#captureRow QToolButton:hover {{ background: {surface_hi}; }}
 QFrame#captureRow QToolButton:focus {{ border: 1px solid {accent}; }}
@@ -483,6 +485,12 @@ QFrame#tomogramSectionRule {{
 }}
 QLabel#tomogramSliderValue {{
     color: {text_strong};
+}}
+/* Room for the whole handle: a Fixed slider in this panel was shorter than
+   its handle, which was cut at the top. Not app-wide: QSS min-height would
+   override the plane and frame sliders' heights set in code. */
+QWidget#tomogramImageContent QSlider:horizontal {{
+    min-height: {slider_room}px;
 }}
 /* A slider or field whose switch is off reads as off: with the accent kept,
    the lowpass slider looked live while the filter was off. */

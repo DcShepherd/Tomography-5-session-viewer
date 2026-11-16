@@ -24,6 +24,7 @@ from tomography_session_browser.domain.models import (
 )
 from tomography_session_browser.parsers.xml_parser import find_first
 from tomography_session_browser.services.pixel_size import overlay_mrc_pixel_size
+from tomography_session_browser.services.markers.identity import BatchIdentity
 from tomography_session_browser.services.item_status import (
     ItemStatusContext,
     batch_position_status_counts,
@@ -83,6 +84,16 @@ class MarkerContext:
     _validations: list[dict[str, TiltSeriesValidation]] = field(
         default_factory=list, init=False, repr=False, compare=False,
     )
+    _identity: list[BatchIdentity] = field(
+        default_factory=list, init=False, repr=False, compare=False,
+    )
+
+    def batch_identity(self) -> BatchIdentity:
+        """Marker-id tokens for ``batch_positions``, worked out once."""
+
+        if not self._identity:
+            self._identity.append(BatchIdentity.of(self.batch_positions))
+        return self._identity[0]
 
     def tilt_validations(self) -> dict[str, TiltSeriesValidation]:
         """``tilt_series``' verdicts from ``grid_validations``. Callers must
@@ -130,7 +141,6 @@ def queued_overlay_reference(
         counts = batch_position_status_counts(
             batch,
             status_context,
-            include_inferred=False,
         )
         if counts.complete > 0:
             successful.append(batch)

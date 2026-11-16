@@ -4,6 +4,7 @@ from __future__ import annotations
 from tomography_session_browser.services.tilt_series_validation import batch_has_failed_tilt
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import cast
 import time
 
@@ -26,9 +27,8 @@ from tomography_session_browser.services.batch_label_service import (
     batch_label_markers,
     compact_batch_label_for_batch,
 )
-from tomography_session_browser.services.batch_position_status import (
-    aggregate_batch_position_status,
-)
+from tomography_session_browser.services.batch_position_status import aggregate_batch_position_status, overlay_status_from_outcome
+from tomography_session_browser.services.item_status import BatchOutcome, batch_outcome
 from tomography_session_browser.services.pixel_size import overlay_pixel_size
 from tomography_session_browser.services.image_geometry import (
     ImageFrame,
@@ -45,11 +45,14 @@ from tomography_session_browser.services.item_status import build_item_status_co
 from tomography_session_browser.services.tilt_series_validation import GridValidations, TiltSeriesValidation
 from tomography_session_browser.diagnostics.profiling import record_aggregate_phase
 from tomography_session_browser.services.navigation import resolve_batch_position_overview
+from tomography_session_browser.services.markers.atlas_display import AtlasDisplayFilter, visible_atlas_markers
 from tomography_session_browser.services.markers.context import (
     LOGGER,
     MarkerContext,
     queued_overlay_reference,
 )
+from tomography_session_browser.services.markers.identity import BatchIdentity
+from tomography_session_browser.services.relationship_identity import AMBIGUOUS_BATCH_EXPLANATION
 from tomography_session_browser.services.markers.corrections import apply_grouped_overlay_position_correction
 from tomography_session_browser.services.markers.atlas_affine import (
     atlas_alignment_transform,
@@ -60,6 +63,7 @@ from tomography_session_browser.services.markers.atlas_affine import (
     search_map_tile_markers,
 )
 from tomography_session_browser.services.markers.templates import (
+    batch_marker_id,
     batch_marker_in_frame,
     template_area_markers,
     template_markers_in_frame,
@@ -127,7 +131,7 @@ def _markers_for_object_impl(
             include_unresolved=include_unresolved,
             failed_tilt_ids=failed_tilt_ids,
             tilt_series=tilt_series,
-            validations=context.tilt_validations() if context is not None else GridValidations().for_series(tilt_series),
+            validations=context.tilt_validations() if context is not None else GridValidations(ungridded=tilt_series).for_series(tilt_series),
         )
     if isinstance(source, SearchTile):
         failed_tilt_ids = (
@@ -139,10 +143,13 @@ def _markers_for_object_impl(
             search_maps=context.search_maps if context is not None else (),
             failed_tilt_ids=failed_tilt_ids,
             tilt_series=tilt_series,
-            validations=context.tilt_validations() if context is not None else GridValidations().for_series(tilt_series),
+            validations=context.tilt_validations() if context is not None else GridValidations(ungridded=tilt_series).for_series(tilt_series),
         )
     if isinstance(source, BatchPosition):
-        return batch_position_markers(source, tilt_series)
+        identity = context.batch_identity() if context is not None else BatchIdentity.of(batch_positions)
+        markers = batch_position_markers(source, tilt_series, token=identity.token_for(source))
+        identity.stamp(source, markers)
+        return markers
     return []
 
 
@@ -182,9 +189,11 @@ def atlas_markers(atlas: Atlas, context: MarkerContext) -> list[ImageMarker]:
                 alignment_transform=alignment,
             )
         )
+    identity = context.batch_identity()
     for batch in context.batch_positions:
-        marker = batch_marker_in_frame(atlas.id, frame, batch)
+        marker = batch_marker_in_frame(atlas.id, frame, batch, token=identity.token_for(batch))
         if marker is not None:
+            identity.stamp(batch, [marker])
             markers.append(marker)
     if frame.atlas_pixel_affine is None:
         # Fallback only (atlas without a usable node table): the empirical 180
@@ -201,23 +210,54 @@ def atlas_markers(atlas: Atlas, context: MarkerContext) -> list[ImageMarker]:
     return markers
 
 
+@dataclass(frozen=True, slots=True)
+class AtlasMarkerSet:
+    """The Atlas markers and, for each batch-position marker, the outcome its status came from.
+
+    The outcome's ``members`` are the position's status members, so a colouring
+    by tomogram values uses the same membership as the status (plan batch 4).
+    """
+
+    markers: list[ImageMarker]
+    outcome_by_marker_id: Mapping[str, BatchOutcome]
+
+
 def atlas_lod_markers(
     atlas: Atlas,
     context: MarkerContext,
     *,
     include_detail_markers: bool = True,
+    display_filter: AtlasDisplayFilter | None = None,
 ) -> list[ImageMarker]:
+    """The markers of ``atlas_lod_marker_set``."""
+
+    return atlas_lod_marker_set(
+        atlas, context, include_detail_markers=include_detail_markers, display_filter=display_filter,
+    ).markers
+
+
+def atlas_lod_marker_set(
+    atlas: Atlas,
+    context: MarkerContext,
+    *,
+    include_detail_markers: bool = True,
+    display_filter: AtlasDisplayFilter | None = None,
+) -> AtlasMarkerSet:
     """Build the status-aware Atlas marker source.
 
     Screen-space clustering remains a viewer-only operation.  PDF export uses
     the same status leaf markers with ``include_detail_markers=False`` so it
     retains its established overview/search-map footprint density.
+
+    Statuses are worked out from the whole ``context``. ``display_filter``
+    only leaves hidden batch positions and tilt series out of the result.
     """
 
     base = atlas_markers(atlas, context)
     frame = image_frame(atlas)
+    outcomes: dict[str, BatchOutcome] = {}
     if frame is None:
-        return base
+        return AtlasMarkerSet(base, outcomes)
 
     status_context = build_item_status_context(
         search_maps=context.search_maps,
@@ -225,7 +265,14 @@ def atlas_lod_markers(
         tilt_series=context.tilt_series,
         validations=context.tilt_validations(),
     )
-    batch_by_id = {batch.id: batch for batch in context.batch_positions}
+    identity = context.batch_identity()
+    # Each batch-position marker is paired with the record it was built from:
+    # records that share an ID keep their own status (``services.markers.identity``).
+    batch_by_marker_id = {
+        batch_marker_id(atlas.id, identity.token_for(batch)): batch
+        for batch in context.batch_positions
+    }
+    linked_batch_ids = {batch.id for batch in context.batch_positions}
     for marker in base:
         if marker.marker_type == MarkerType.SEARCH_MAP:
             marker.metadata["atlas_lod_role"] = (
@@ -236,10 +283,12 @@ def atlas_lod_markers(
             continue
         if marker.marker_type != MarkerType.BATCH_POSITION:
             continue
-        batch = batch_by_id.get(marker.linked_object_id or "")
+        batch = batch_by_marker_id.get(marker.id)
         if batch is None:
             continue
-        status = aggregate_batch_position_status(batch, status_context)
+        outcome = batch_outcome(batch, status_context)
+        outcomes[marker.id] = outcome
+        status = overlay_status_from_outcome(batch, outcome)
         navigation = resolve_batch_position_overview(
             batch,
             search_maps=context.search_maps,
@@ -250,6 +299,10 @@ def atlas_lod_markers(
             or as_str(find_first(batch.metadata, "Sample"))
             or "current atlas scope"
         )
+        navigable, explanation = navigation.navigable, navigation.explanation
+        if identity.is_ambiguous(batch):
+            # Assembly refused the name link; "Unresolved link" says so.
+            navigable, explanation = False, AMBIGUOUS_BATCH_EXPLANATION
         marker.label = compact_batch_label_for_batch(batch)
         marker.status = status.status
         marker.tooltip = (
@@ -258,7 +311,7 @@ def atlas_lod_markers(
             f"Sample: {sample_name}\n"
             f"Planned: {status.planned} · Acquired: {status.acquired} · "
             f"Failed: {status.failed}\n"
-            f"{navigation.explanation}"
+            f"{explanation}"
         )
         marker.metadata.update(
             {
@@ -274,11 +327,11 @@ def atlas_lod_markers(
                 "planned_count": status.planned,
                 "acquired_count": status.acquired,
                 "failed_count": status.failed,
-                "navigation_enabled": navigation.navigable,
+                "navigation_enabled": navigable,
                 "navigation_overview_id": (
-                    navigation.overview.id if navigation.overview is not None else None
+                    navigation.overview.id if navigable and navigation.overview is not None else None
                 ),
-                "navigation_explanation": navigation.explanation,
+                "navigation_explanation": explanation,
             }
         )
 
@@ -326,7 +379,8 @@ def atlas_lod_markers(
         position = position_on_tile_set(batch)
         if position is None:
             continue
-        generated = template_markers_in_frame(atlas.id, frame, batch, position)
+        generated = template_markers_in_frame(atlas.id, frame, batch, position, token=identity.token_for(batch))
+        identity.stamp(batch, generated)
         for marker in generated:
             if marker.marker_type not in {MarkerType.EXPOSURE_AREA, MarkerType.CAMERA_FOV}:
                 continue
@@ -341,7 +395,7 @@ def atlas_lod_markers(
     explicitly_linked.update(
         tilt.id
         for tilt in context.tilt_series
-        if tilt.linked_batch_position_id in batch_by_id
+        if tilt.linked_batch_position_id in linked_batch_ids
     )
     orphan_failed_ids = frozenset(context.failed_tilt_ids.difference(explicitly_linked))
     unattributed = inferred_failed_tilt_markers(
@@ -352,12 +406,15 @@ def atlas_lod_markers(
         batch_positions=context.batch_positions,
     )
     for marker in unattributed:
-        marker.status = AtlasMarkerStatus.UNATTRIBUTED
+        # The acquisition verdict is the validator's: Failed, as in every other
+        # view. The ``unattributed`` role (below) carries the separate fact
+        # that no batch position claims it; it is never attached to one.
+        marker.status = AtlasMarkerStatus.FAILED
         marker.label = as_str(marker.metadata.get("batch_label")) or "?"
         marker.tooltip = (
-            f"Unattributed failed tilt series: {marker.label}\n"
-            "Approximate location from MRC stage metadata.\n"
-            "No confident batch-position link; navigation is unavailable."
+            f"Failed tilt series: {marker.label}\n"
+            "No confident batch-position link.\n"
+            "Approximate location from MRC stage metadata."
         )
         marker.metadata.update(
             {
@@ -379,9 +436,14 @@ def atlas_lod_markers(
         image_size=frame.image_size,
         source_id=atlas.id,
     )
+    if display_filter is not None:
+        base = visible_atlas_markers(base, context, display_filter)
+        newly_projected = visible_atlas_markers(newly_projected, context, display_filter)
+        kept = {id(marker) for marker in newly_projected}
+        unattributed = [marker for marker in unattributed if id(marker) in kept]
     if include_detail_markers:
-        return base + footprints + newly_projected
-    return base + unattributed
+        return AtlasMarkerSet(base + footprints + newly_projected, outcomes)
+    return AtlasMarkerSet(base + unattributed, outcomes)
 
 
 def overview_markers(overview: Overview, context: MarkerContext) -> list[ImageMarker]:
@@ -411,10 +473,12 @@ def overview_markers(overview: Overview, context: MarkerContext) -> list[ImageMa
         panel_name="Overview",
     )
     failed_set = context.failed_tilt_ids
+    identity = context.batch_identity()
     for batch in context.batch_positions:
         if batch.linked_overview_id is not None and batch.linked_overview_id != overview.id:
             continue
-        marker = batch_marker_in_frame(overview.id, frame, batch)
+        token = identity.token_for(batch)
+        marker = batch_marker_in_frame(overview.id, frame, batch, token=token)
         if marker is not None:
             overlay_status = aggregate_batch_position_status(batch, status_context)
             batch_failed = batch_has_failed_tilt(batch, context.tilt_series, failed_set)
@@ -431,9 +495,11 @@ def overview_markers(overview: Overview, context: MarkerContext) -> list[ImageMa
                 cast(tuple[float, float], marker.metadata.get("stage_position")),
                 queued=overlay_status.status == AtlasMarkerStatus.QUEUED,
                 queued_reference=queued_reference,
+                token=token,
             )
             if batch_failed:
                 mark_markers_failed(template_markers)
+            identity.stamp(batch, [marker, *template_markers])
             markers.extend(template_markers)
 
     # Same fallback as the SearchMap path: failed tilt series with
@@ -450,6 +516,33 @@ def overview_markers(overview: Overview, context: MarkerContext) -> list[ImageMa
     )
     markers.extend(batch_label_markers(markers, image_size=frame.image_size))
     return markers
+
+
+def search_map_exposure_geometry(
+    search_map: SearchMap,
+    batches: Iterable[BatchPosition],
+    *,
+    frame: ImageFrame,
+) -> Iterable[ImageMarker]:
+    """Project recorded exposure centres for assembly without a status registry."""
+    for batch in batches:
+        position = _search_map_batch_position(search_map, batch, frame)
+        if position is not None:
+            yield from (marker for marker in template_markers_in_frame(search_map.id, frame, batch, position)
+                        if marker.marker_type == MarkerType.EXPOSURE_AREA)
+
+
+def _search_map_batch_position(
+    search_map: SearchMap, batch: BatchPosition, frame: ImageFrame,
+) -> tuple[float, float] | None:
+    if batch.linked_search_map_id != search_map.id:
+        return None
+    position = position_on_tile_set(batch)
+    if position is None:
+        return None
+    width, height = frame.image_size
+    x, y = stage_to_image(frame, position)
+    return position if 0 <= x <= width and 0 <= y <= height else None
 
 
 def search_map_markers(
@@ -476,24 +569,22 @@ def search_map_markers(
         batch_positions,
         status_context,
     )
+    identity = BatchIdentity.of(batch_positions)
     for batch in batch_positions:
         if batch.linked_search_map_id != search_map.id:
             continue
-        position = position_on_tile_set(batch)
+        token = identity.token_for(batch)
+        position = _search_map_batch_position(search_map, batch, frame) if frame is not None else None
         if frame is None or position is None:
-            LOGGER.debug("Skipping batch marker without complete search-map coordinates search_map=%s batch=%s", search_map.id, batch.id)
-            if include_unresolved:
-                markers.append(unresolved_batch_marker(search_map, batch))
+            LOGGER.debug("Skipping batch marker without on-image search-map coordinates search_map=%s batch=%s",
+                         search_map.id, batch.id)
+            if include_unresolved and (frame is None or position_on_tile_set(batch) is None):
+                markers.append(unresolved_batch_marker(search_map, batch, token=token))
+                identity.stamp(batch, markers[-1:])
             continue
-        width, height = frame.image_size
         x, y = stage_to_image(frame, position)
-        if not (0 <= x <= width and 0 <= y <= height):
-            LOGGER.debug("Skipping off-image batch marker search_map=%s batch=%s x=%s y=%s", search_map.id, batch.id, x, y)
-            if include_unresolved:
-                markers.append(unresolved_batch_marker(search_map, batch))
-            continue
         batch_marker = ImageMarker(
-            id=f"{search_map.id}:batch:{batch.id}",
+            id=batch_marker_id(search_map.id, token),
             marker_type=MarkerType.BATCH_POSITION,
             linked_object_id=batch.id,
             source_object_id=search_map.id,
@@ -538,9 +629,11 @@ def search_map_markers(
             position,
             queued=overlay_status.status == AtlasMarkerStatus.QUEUED,
             queued_reference=queued_reference,
+            token=token,
         )
         if batch_failed:
             mark_markers_failed(template_markers)
+        identity.stamp(batch, [batch_marker, *template_markers])
         markers.extend(template_markers)
 
     # Failed tilt series whose batch was never recorded in
@@ -589,12 +682,9 @@ def search_tile_markers(
     if frame is None:
         LOGGER.debug("Skipping Search tile overlays without reliable frame metadata search_tile=%s", search_tile.id)
         return []
-    batch = next(
-        (item for item in batch_positions if item.id == search_tile.batch_position_id),
-        None,
-    )
+    batch = _search_tile_batch(search_tile, batch_positions)
     if batch is None:
-        LOGGER.debug("Skipping Search tile overlays without linked batch search_tile=%s", search_tile.id)
+        LOGGER.debug("Skipping Search tile overlays without one linked batch search_tile=%s", search_tile.id)
         return []
     position = position_on_tile_set(batch) or stage_position_from_metadata(search_tile.metadata.get("BatchSearch.xml"))
     if position is None:
@@ -680,10 +770,7 @@ def _search_map_markers_projected_to_search_tile(
         (item for item in search_maps if item.id == search_tile.search_map_id),
         None,
     )
-    batch = next(
-        (item for item in batch_positions if item.id == search_tile.batch_position_id),
-        None,
-    )
+    batch = _search_tile_batch(search_tile, batch_positions)
     if search_map is None or batch is None:
         return None
     tile_frame = image_frame(search_tile)
@@ -726,6 +813,15 @@ def _search_map_markers_projected_to_search_tile(
             projected.append(projected_marker)
     projected.extend(batch_label_markers(projected, image_size=tile_frame.image_size))
     return projected
+
+
+def _search_tile_batch(search_tile: SearchTile, batch_positions: Iterable[BatchPosition]) -> BatchPosition | None:
+    """The one batch record the tile names, or ``None`` when its ID is ambiguous."""
+
+    batches = tuple(batch_positions)
+    if search_tile.batch_position_id in BatchIdentity.of(batches).ambiguous_ids:
+        return None
+    return next((item for item in batches if item.id == search_tile.batch_position_id), None)
 
 
 def _tile_bounds_in_search_map_frame(
@@ -827,8 +923,10 @@ def _projected_marker_intersects(
     return False
 
 
-def batch_position_markers(batch: BatchPosition, tilt_series: Iterable[TiltSeries]) -> list[ImageMarker]:
-    markers = template_area_markers(batch)
+def batch_position_markers(
+    batch: BatchPosition, tilt_series: Iterable[TiltSeries], *, token: str | None = None,
+) -> list[ImageMarker]:
+    markers = template_area_markers(batch, token=token)
     for tilt in tilt_series:
         if tilt.linked_batch_position_id != batch.id:
             continue

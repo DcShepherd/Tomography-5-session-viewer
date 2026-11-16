@@ -107,7 +107,7 @@ def cursor_readout(volume: Volume, recipe: RenderRecipe, x: float, y: float) -> 
                                  calibrated_spacing(volume, recipe.spacing_override))
         source = matrix @ (np.asarray(coordinates)-1)+offset
         text = "Source  " + "  ".join(f"{axis}\u00a0{value+1:.2f}" for axis, value in zip("XYZ", source))
-        return CursorReadout(text, text, "The voxel at the pointer, counted from 1. The app finds it in the volume from the tilted plane.")
+        return CursorReadout(text, text, "The volume voxel at the pointer, counted from 1")
     return CursorReadout("  ".join(f"{'XYZ'[i]}\u00a0{coordinates[i]}" for i in (h, v)),
                          "Source voxel " + ", ".join(f"{axis} {value}" for axis, value in zip("XYZ", coordinates)),
                          "The voxel at the pointer, counted from 1, as in IMOD")

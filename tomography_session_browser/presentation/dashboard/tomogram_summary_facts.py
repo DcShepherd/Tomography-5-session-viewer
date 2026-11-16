@@ -24,18 +24,20 @@ def outcome_facts(summary: ProcessingSummary) -> tuple[SummaryFact, ...]:
     size = file_size(sum(volume.fingerprint.size for volume in volumes)) if volumes else 'No volumes'
     versions = ' · '.join(f'{name} {count}' for name, count in summary.version_counts if name not in ('Even', 'Odd')) or 'None found'
     halves = ' · '.join(f'{name} {count}' for name, count in summary.version_counts if name in ('Even', 'Odd'))
-    alignments = tuple(dict.fromkeys(row.tomogram.processing.alignment for row in payload.rows
+    # The kind of output only (its first line): paths and qualifications differ per
+    # tomogram and stay in its detail and the PDF Sources list (owner, 15 Nov 2026).
+    alignments = tuple(dict.fromkeys(row.tomogram.processing.alignment.partition('\n')[0] for row in payload.rows
                                     if row.tomogram.processing.alignment != 'Not recorded'))
     alignment = alignments[0] if len(alignments) == 1 else f'{len(alignments)} output types' if alignments else 'Not recorded'
     links = ' · '.join(f'{COUNT_LABELS[step]} {count}' for step, count in summary.link_counts if count) or 'Unresolved'
     coverage = f'{summary.usable_count} usable · {size}' if summary.usable_count else f'No usable volumes · {size}'
     return (
         SummaryFact('Versions', versions, 'Half sets: ' + halves if halves else '',
-                    'Full reconstructions available in this selection. Even and Odd are half sets; they are not review versions.'),
+                    'Full reconstructions in this selection. Even and Odd are half sets, not review versions.'),
         SummaryFact('Volume', shape, coverage,
-                    'Declared physical voxel dimensions and file sizes from the selected version only, or all volumes when no version is selected. Missing versions contribute no volume figures.'),
+                    'From the selected version, or all volumes if none is selected. Other figures cover all versions.'),
         SummaryFact('Alignment', alignment, f'Output for {summary.alignment_count} of {summary.tomogram_count}' if summary.alignment_count else '',
-                    'Recorded alignment output across all tomograms, independent of version. Import into this reconstruction is unverified; this application does not measure alignment quality.'),
+                    'Recorded alignment output. The app does not measure alignment quality.'),
         SummaryFact('Parent link', links, 'Across all tomograms',
-                    'Verified acquisition relationships across all tomograms, independent of version. A name-only proposal is not a confirmed parent link.'),
+                    'Verified acquisition links. A name-only match is not a confirmed link.'),
     )

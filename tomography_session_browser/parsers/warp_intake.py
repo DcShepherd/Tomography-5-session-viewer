@@ -33,6 +33,7 @@ def recorded_movie_paths(path: Path) -> tuple[Path, ...]:
 
     Foreign absolute paths are retained as evidence, never rewritten to local
     basenames. A malformed table simply leaves the relationship unresolved.
+    Kept as a seam: the volume tests pin the movie-path rule through it.
     """
     block = read_metadata(path, parse_tomostar)
     if block.state == 'incomplete':

@@ -13,7 +13,7 @@ from tomography_session_browser.services.volume.review_repository import ReviewR
 from tomography_session_browser.services.volume.pixel_sizes import KIND as PIXEL_SIZE_KIND
 from tomography_session_browser.services.volume.review_writer import ReviewBatch, ReviewBatchResult, ReviewWrite, ReviewWriteFailure, ReviewWriter
 from tomography_session_browser.presentation.tomogram_capture_history import CaptureEntry
-from tomography_session_browser.presentation.tomogram_movie_history import MOVIE_KIND
+from tomography_session_browser.presentation.tomogram_movie_history import MovieWrite
 
 
 class ReviewPersistence:
@@ -55,12 +55,14 @@ class ReviewPersistence:
     def schedule(self) -> None:
         self.timer.start()
 
-    def write(self, kind, identity, state, **extra) -> None:
+    def write(self, kind, identity, state, *, context=None, **extra) -> None:
+        """``context`` is what the result reports back (default: the request); it is not saved."""
         request = ReviewWrite(self.repository, kind, identity, asdict(state), extra)
+        context = request if context is None else context
         try:
-            self.watch(self.writer.submit(request), request)
+            self.watch(self.writer.submit(request), context)
         except (OSError, ValueError) as exc:
-            self.failed(request, str(exc))
+            self.failed(context, str(exc))
 
     def watch(self, future: Future, context) -> None:
         if future in self.watched:
@@ -82,6 +84,8 @@ class ReviewPersistence:
     def finished(self, context, result) -> None:
         if isinstance(context, CaptureEntry):
             self.tab.captures.forgotten(context)
+        elif isinstance(context, MovieWrite):
+            self.tab.history.movies.recorded(context)
         elif isinstance(context, ReviewBatch) and isinstance(result, ReviewBatchResult) and result.failed:
             failed = set(result.failed)
             self.tab.pixel_sizes.not_saved(tuple(write for write in context.writes if write.identity in failed))
@@ -95,10 +99,11 @@ class ReviewPersistence:
         elif isinstance(context, ReviewBatch) or (isinstance(context, ReviewWrite) and context.kind == PIXEL_SIZE_KIND):
             logging.getLogger(__name__).warning("Could not save a pixel size: %s", message)
             self.tab.pixel_sizes.not_saved(context.writes if isinstance(context, ReviewBatch) else (context,))
-        elif isinstance(context, ReviewWrite) and context.kind == MOVIE_KIND:
+        elif isinstance(context, MovieWrite):
             logging.getLogger(__name__).warning("Could not record a movie export: %s", message)
             self.tab.status.message.setText("The movie is saved, but the app could not record it. "
-                                            "Its mark in the list shows only until you close the app.")
+                                            "The list can show it only until you close the app.")
+            self.tab.history.movies.not_recorded(context)
         else:
             logging.getLogger(__name__).warning("Could not save tomogram review state: %s", message)
             self.tab.status.message.setText("Review state could not be saved; the current view remains usable.")
@@ -208,7 +213,7 @@ class ReviewPersistence:
             detail += "\n" + self.resume_ordering_notice
         self.tab.status.resume.setToolTip(detail)
         self.tab.status.resume.setAccessibleDescription(detail)
-        self.tab.status.keep.setToolTip("Keep this view and allow it to replace the saved view. Source files are unchanged.")
+        self.tab.status.keep.setToolTip("Keep this view as the saved view")
         if not visible and (self.tab.status.resume.hasFocus() or self.tab.status.keep.hasFocus()):
             self.tab.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
         self.tab.status.show_action(self.tab.status.resume, visible)

@@ -48,12 +48,16 @@ class IndexChartModel:
     slabs: tuple[SlabReference, ...] = ()
 
 
-def distribution(values: tuple[float | None, ...], row_keys: tuple[str, ...]) -> tuple[ChartBin, ...]:
-    """The same bounded count-bin contract serves numeric metrics and future series."""
+def distribution(values: tuple[float | None, ...], row_keys: tuple[str, ...], *,
+                 min_count: int = 25) -> tuple[ChartBin, ...]:
+    """The same bounded count-bin contract serves numeric metrics and future series.
+
+    Fewer than ``min_count`` values give no bins (the dashboard's default is 25).
+    """
     numeric = [(value, key) for value, key in zip(values, row_keys, strict=True) if value is not None]
     if any(not math.isfinite(value) for value, _ in numeric):
         raise ValueError("Distribution values must be finite or explicitly missing.")
-    if len(numeric) <= 24:
+    if len(numeric) < max(min_count, 1):
         return ()
     low, high = min(value for value, _ in numeric), max(value for value, _ in numeric)
     if low == high:

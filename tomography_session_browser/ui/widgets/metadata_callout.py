@@ -41,6 +41,11 @@ class MetadataCallout(QFrame):
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
             column.addWidget(label)
         self._detail.setVisible(bool(detail.strip()))
+        self._column = column
         layout.addLayout(column, stretch=1)
+
+    def add_action(self, button: QWidget) -> None:
+        """A link under the detail that acts on this warning, e.g. "Confirm by name…"."""
+        self._column.addWidget(button, alignment=Qt.AlignmentFlag.AlignLeft)
 
 

@@ -20,8 +20,8 @@ from tomography_session_browser.services.image_geometry import (
     stage_position_from_metadata,
     stage_to_image,
 )
-from tomography_session_browser.services.markers.builders import search_map_markers
-from tomography_session_browser.services.tilt_series_validation import GridValidations
+from tomography_session_browser.services.markers.builders import search_map_exposure_geometry
+from tomography_session_browser.services.markers.identity import BatchIdentity
 from tomography_session_browser.services.timeline_service import datetime_sort_key
 
 #: How a tile is linked when the search map's own overlay projection finds it:
@@ -65,25 +65,40 @@ def build_search_tiles(
     back to a stage-position containment/nearest match.
 
     Performance: the search-map overlay projection used to compute
-    :func:`search_map_markers` once per ``(batch, exposure target)`` pair. On
+    :func:`search_map_exposure_geometry` once per ``(batch, exposure target)`` pair. On
     large multigrid samples that scanned to ~6 s. Markers per batch are
     independent (each batch's grouped overlay correction is scoped to its own
     template markers), so we precompute the markers once per search map with
     *all* batches on that map, then index by ``(batch_id, area_name)`` for
     O(1) lookup inside the per-target loop. Output is identical to the
     per-batch invocation.
+
+    Tile candidates are read only for search maps that a batch position
+    links to: no row can come from another map. They are still read up
+    front, in map order, so a malformed tile file in a *linked* map fails
+    before any batch position is given a ``linked_search_tile_id``. A
+    malformed tile file in a map that no batch position links to is no
+    longer read, so it can no longer cost the sample its search rows.
     """
 
     maps_by_id = {search_map.id: search_map for search_map in search_maps}
-    tile_cache = {search_map.id: _tile_candidates(search_map) for search_map in search_maps}
+    linked_map_ids = {batch.linked_search_map_id for batch in batch_positions if batch.linked_search_map_id}
+    tile_cache = {
+        search_map.id: _tile_candidates(search_map)
+        for search_map in search_maps
+        if search_map.id in linked_map_ids
+    }
     tilts_by_batch = _tilts_by_batch(batch_positions, tilt_series)
     marker_index_by_map, search_frame_by_map = _precompute_search_map_marker_index(
         search_maps=search_maps,
         batch_positions=batch_positions,
-        tilt_series=tilt_series,
     )
     rows: list[SearchTile] = []
     seen: set[str] = set()
+    # Contradictory records that share a batch ID share the index key below, so
+    # the last would lend the others its exposure geometry. Each such record
+    # projects its own geometry instead, and its rows carry its token.
+    identity = BatchIdentity.of(batch_positions)
 
     for batch in batch_positions:
         if not batch.linked_search_map_id:
@@ -94,7 +109,7 @@ def build_search_tiles(
         linked_tilts = tilts_by_batch.get(batch.id, [])
         batch_metadata = _batch_search_metadata(batch)
         candidates = tile_cache.get(search_map.id, [])
-        marker_index = marker_index_by_map.get(search_map.id, {})
+        marker_index = None if identity.is_ambiguous(batch) else marker_index_by_map.get(search_map.id, {})
         search_frame = search_frame_by_map.get(search_map.id)
         for target in _exposure_targets(batch):
             target_tilts = _tilts_for_target(target, batch, linked_tilts)
@@ -104,7 +119,6 @@ def build_search_tiles(
                 batch,
                 batch_metadata,
                 target,
-                linked_tilts,
                 marker_index=marker_index,
                 search_frame=search_frame,
             )
@@ -116,6 +130,7 @@ def build_search_tiles(
                 method=method,
                 batch_metadata=batch_metadata,
                 linked_tilts=target_tilts,
+                token=identity.token_for(batch),
             )
             if row.id in seen:
                 continue
@@ -172,7 +187,6 @@ def _match_tile_for_target(
     batch: BatchPosition,
     batch_metadata: dict[str, Any],
     target: _ExposureTarget,
-    linked_tilts: list[TiltSeries],
     *,
     marker_index: dict[tuple[str, str], ImageMarker] | None = None,
     search_frame: ImageFrame | None = None,
@@ -186,7 +200,6 @@ def _match_tile_for_target(
         search_map,
         batch,
         target,
-        linked_tilts,
         marker_index=marker_index,
         search_frame=search_frame,
     )
@@ -244,7 +257,6 @@ def _match_tile_from_search_map_projection(
     search_map: SearchMap,
     batch: BatchPosition,
     target: _ExposureTarget,
-    linked_tilts: list[TiltSeries],
     *,
     marker_index: dict[tuple[str, str], ImageMarker] | None = None,
     search_frame: ImageFrame | None = None,
@@ -262,7 +274,7 @@ def _match_tile_from_search_map_projection(
     if marker_index is not None:
         marker = marker_index.get((batch.id, _normalise_name(target.marker_area_name)))
     else:
-        for item in search_map_markers(search_map, [batch], tilt_series=linked_tilts, validations=GridValidations().for_series(linked_tilts)):
+        for item in search_map_exposure_geometry(search_map, [batch], frame=search_frame):
             if (
                 item.marker_type == MarkerType.EXPOSURE_AREA
                 and item.linked_object_id == batch.id
@@ -290,12 +302,11 @@ def _precompute_search_map_marker_index(
     *,
     search_maps: list[SearchMap],
     batch_positions: list[BatchPosition],
-    tilt_series: list[TiltSeries],
 ) -> tuple[dict[str, dict[tuple[str, str], ImageMarker]], dict[str, ImageFrame | None]]:
     """Build a per-search-map ``{(batch_id, normalised_area_name): marker}``
     index for ``MarkerType.EXPOSURE_AREA`` markers.
 
-    Calling :func:`search_map_markers` once per ``(batch, exposure target)``
+    Calling :func:`search_map_exposure_geometry` once per ``(batch, exposure target)``
     repeated the same per-batch marker construction work many times on
     multigrid samples; calling it once per search map with all batches is
     equivalent because the grouped overlay correction is scoped per-batch
@@ -322,16 +333,7 @@ def _precompute_search_map_marker_index(
         if frame is None:
             marker_index[search_map.id] = {}
             continue
-        # `failed_tilt_ids` is not set when building search tiles, so the
-        # inferred-failed-tilt fallback inside `search_map_markers` is a
-        # no-op. Pass the full tilt list so the call site is symmetric
-        # with how the GUI builds markers later.
-        all_markers = search_map_markers(
-            search_map,
-            batches_by_map[search_map.id],
-            tilt_series=tilt_series,
-            validations=GridValidations().for_series(tilt_series),
-        )
+        all_markers = search_map_exposure_geometry(search_map, batches_by_map[search_map.id], frame=frame)
         idx: dict[tuple[str, str], ImageMarker] = {}
         for marker in all_markers:
             if (
@@ -355,6 +357,7 @@ def _search_tile_from_match(
     method: str | None,
     batch_metadata: dict[str, Any],
     linked_tilts: list[TiltSeries],
+    token: str | None = None,
 ) -> SearchTile:
     tile_stem = candidate.xml_path.stem if candidate is not None else "unresolved"
     tile_index = candidate.tile_index if candidate is not None else None
@@ -384,7 +387,7 @@ def _search_tile_from_match(
     if method and "nearest" in method.casefold():
         warnings.append(f"Search-map tile association used fallback matching: {method}.")
     return SearchTile(
-        id=f"{search_map.id}:search-tile:{tile_stem}:batch:{batch.id}:exposure:{safe_token(target.display_name)}",
+        id=f"{search_map.id}:search-tile:{tile_stem}:batch:{token or batch.id}:exposure:{safe_token(target.display_name)}",
         name=name,
         image_path=candidate.image_path if candidate is not None else None,
         xml_path=candidate.xml_path if candidate is not None else None,

@@ -32,20 +32,19 @@ import time
 
 
 def _resolve_lnk(path: Path) -> Path:
-    """Best-effort .lnk resolution on Windows. Falls back to the original."""
+    """The folder a Windows .lnk points to. Stops with a message when it cannot be read."""
 
     if path.suffix.lower() != ".lnk" or not path.exists():
         return path
     try:  # pragma: no cover - platform-specific path
         import win32com.client  # type: ignore
-
-        shell = win32com.client.Dispatch("WScript.Shell")
-        target = shell.CreateShortCut(str(path)).TargetPath
-        if target:
-            return Path(target)
-    except Exception:
-        pass
-    return path
+    except ImportError:
+        raise SystemExit(f"{path.name} is a Windows shortcut. pywin32 is not installed, so the bench "
+                         "cannot read it. Give the folder that the shortcut points to.") from None
+    target = win32com.client.Dispatch("WScript.Shell").CreateShortCut(str(path)).TargetPath
+    if not target:
+        raise SystemExit(f"The shortcut {path.name} has no target. Give the folder that it points to.")
+    return Path(target)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:

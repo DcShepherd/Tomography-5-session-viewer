@@ -26,7 +26,6 @@ from tomography_session_browser.presentation.dashboard.models import (
     WarningGroupModel,
 )
 from tomography_session_browser.presentation.dashboard.sections.atlas import AtlasFilter, AtlasSheetModel
-from tomography_session_browser.presentation.dashboard.sections.batches import group_matches_any_batch
 from tomography_session_browser.presentation.dashboard.sections.samples import BySampleRowModel
 from tomography_session_browser.presentation.dashboard.sections.status import search_map_is_incomplete
 from tomography_session_browser.presentation.tab_keys import TabKey
@@ -137,11 +136,7 @@ def needs_attention(
     *,
     session_atlas_keys: frozenset[tuple[str, str]],
 ) -> NeedsAttentionModel:
-    orphan_groups = [
-        group
-        for group in analysis.inferred_batch_groups
-        if not group_matches_any_batch(group, scope.batch_positions)
-    ]
+    orphan_groups = analysis.inferred_batch_groups
     return NeedsAttentionModel(
         outcomes=tuple(_outcome_rows(scope, analysis, by_sample, status_context)),
         inferred_group_labels=tuple(group.label for group in orphan_groups),
@@ -204,7 +199,7 @@ def _outcome_rows(
                 status=TILE_STATUS_FAILED,
                 count=len(failed),
                 label=f"{len(failed)} tilt series failed",
-                fact=_frames_fact([(v.actual_count, v.expected_count) for v in failed]),
+                fact=_frames_fact([(v.observation.reported_count, v.plan.expected_count) for v in failed]),
                 by_sample=_by_sample(by_sample, "tilt_failed"),
                 route=DashboardFilterModel(
                     "Failed",
@@ -254,15 +249,16 @@ def _by_sample(rows: Sequence[BySampleRowModel], attribute: str) -> tuple[Sample
     )
 
 
-def _frames_fact(counts: Sequence[tuple[int, int | None]]) -> str:
+def _frames_fact(counts: Sequence[tuple[int | None, int | None]]) -> str:
     """"1 of 35 frames each" when the failed series agree; a span of frames
-    when only the recorded count varies; nothing when the expected count does."""
+    when only the recorded count varies; nothing when the expected count does
+    or a count is unknown."""
 
     expected = {expected for _actual, expected in counts}
-    if len(expected) != 1 or None in expected:
+    if len(expected) != 1 or None in expected or any(actual is None for actual, _expected in counts):
         return ""
     total = expected.pop()
-    actual = sorted({actual for actual, _expected in counts})
+    actual = sorted({actual for actual, _expected in counts if actual is not None})
     if len(actual) == 1:
         return f"{actual[0]} of {total} frames each"
     return f"{actual[0]} to {actual[-1]} of {total} frames"

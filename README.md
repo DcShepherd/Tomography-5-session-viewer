@@ -8,7 +8,7 @@ The application is read-only. It does not edit, repair, rename, move or change f
 
 Save PDF reports, images, snapshots and movies in a folder that is not in a loaded source folder. This rule applies to all loaded folders, also when they are not in the selected scope.
 
-This is version 1.1.0. The [change log](CHANGELOG.md) lists the changes in each release.
+This is version 1.2.0. The [change log](CHANGELOG.md) lists the changes in each release.
 
 ## Supported platforms
 
@@ -256,9 +256,11 @@ In an Atlas view of the full grid, batch positions that are near each other show
 
 Select a batch marker to examine it. Double-click a marker to open its verified linked Overview. If more than one target is available, the application does not open a target. It tells the cause.
 
-Use the **Overlays** panel to set clusters, labels, tile grids, the marker legend and the detail layer for each exposure. The detail layer is off by default. At a linked project node, use **Data collections** to set the markers for each collection. If you select one data-collection node, Atlas batch markers show only for that collection.
+Use the **Overlays** panel to set clusters, labels, tile grids, the Positions card and the detail layer for each exposure. The detail layer is off by default. The **Positions card** above the scale bar shows each type of batch-position marker and its count. At a linked project node, click **From** on the Positions card to select the collections whose markers show. When you hide a collection and the card is closed, the **From: n of m** button shows at the bottom left. If you select one data-collection node, Atlas batch markers show only for that collection.
 
-Select **Remove all overlays** to hide all overlays in the current tab. This includes the scale bar and the marker legend. The application keeps your **Data collections** selections. Select individual checkboxes to show overlays again.
+Under **Show**, select **Standard**, **Positions only** or **Clean image**. **Clean image** hides all overlays in the current tab, including the scale bar and the Positions card. The application keeps your **From** selections. Open **Customise** to set each layer. When your selection is not a preset, **Custom** shows how many rows differ from **Standard**, and the **Overlays** button shows the name of the selection.
+
+On the Atlas tab, click **Colour by** on the Positions card to set what the colour of each batch-position marker shows: **Status**, **Tomogram**, **Tags**, **Specimen thickness**, **CTF fit** or **IMOD positioning thickness**. A mode with no data is grey, and its tooltip tells you why. In a value mode, the **colour key** at the bottom of the canvas shows the range and the number of markers with **No value**. Put the pointer on an entry of the key to highlight its markers. The PDF report always uses the status colours.
 
 Double-click an exposure area in an Overview or Search-map image to open its search tile. You can also select the area and press Enter. This does the same as the **Search** jump.
 
@@ -266,7 +268,7 @@ If more than one search tile agrees with the exposure, or if there is no recorde
 
 In an Overview or Search-map image, middle-click or Shift-click an exposure area to highlight all exposure areas of the same batch position. To remove the highlight, left-click an empty area, right-click the image or press Escape.
 
-Use the export button above the zoom control, or press **Ctrl+S**, to save the current crop as a high-resolution PNG. The PNG includes the markers and highlights that you can see, the scale bar and the optional Atlas marker legend. It does not include viewer controls or the pixel-size badge.
+Use the export button above the zoom control, or press **Ctrl+S**, to save the current crop as a high-resolution PNG. The PNG includes the markers and highlights that you can see, the scale bar and the optional Atlas Positions card. It does not include viewer controls or the pixel-size badge.
 
 ### 4. Make a PDF report
 
@@ -313,6 +315,10 @@ Select **Load sessions** (Ctrl+O), or drag the folder onto the project panel. Se
 A reconstruction folder can hold the files directly, or one folder for each tomogram. The application does not search other folders near the selected folder. It shows a warning for each file that it cannot identify.
 
 For Scipion, select one job at a time. The application does not load the project folder or its `Runs` folder, because it does not search the jobs in them. The job folder and its `extra` folder are the same source. The application keeps the full job folder unchanged, also its `logs` folder. Tomograms in `extra/<tilt series>/` get the name of their tilt series. In a cryoCARE job, the application reads `<tilt series>_denoised/<tilt series>_.mrc` as the denoised volume. Files that end in `_even` or `_odd` are the half sets of the tomogram of the same name.
+
+Load a Scipion Etomo job (`ProtImodEtomo`) or fiducial alignment job (`ProtImodFiducialAlignment`) with its reconstruction job to see the alignment values on the tomograms. An alignment job adds no tomograms. The application compares the tilt angles and transforms that the two jobs recorded. When exactly one alignment job agrees, its residuals, and the positioning thickness of an Etomo job in nm, show on the tomogram with the job name. When no job agrees, or two jobs agree, the tomogram shows the reason. When the reconstruction job has no readable `.tlt` or `.xf`, you can select **Confirm by name…** on the warning. When all the series of an alignment job link, the job has no row of its own in the project tree. The reconstruction row names it, and reloads and removes it with the reconstruction.
+
+A cryoCARE job records in `extra/predict_config/predict_config_<tilt series>.json` which half sets it denoised. When the reconstruction with these half sets is loaded, the denoised tomogram shows the recorded values of that reconstruction, and the Context panel names it.
 
 ### 2. Select a tomogram and read its planes
 
@@ -378,7 +384,7 @@ Use **Link captures…** in the same menu to attach existing snapshots. When a t
 
 ![Export movie dialog with a synthetic volume](docs/images/readme/07-export-movie-dialog.png)
 
-When the export is complete, select **Show in folder** or **Open movie**.
+When the export is complete, select **Show in folder** or **Open movie**. The film mark in the tomogram list shows the number of saved movies. Click the number, or right-click the row and select **Movies…**, to see the movies and open them.
 
 ![Movie saved message](docs/images/readme/08-movie-saved.png)
 

@@ -445,12 +445,11 @@ def build_toolbar(tab) -> CanvasToolbar:
     tab.oblique = ObliqueControls(tab, toolbar)
     row.addWidget(ToolGroup(toolbar, tab.oblique.lock, None, tab.oblique.angles, tab.oblique.strip))
     tab.link_button = icon_button(toolbar, "link", "Link Ortho panes",
-        "Keep the three planes at the same point and scale. Set to off to move and zoom each plane "
-        "independently.", checkable=True)
+        "Keep the three planes at the same point and scale", checkable=True)
     tab.link_button.setChecked(True)
     tab.link_button.toggled.connect(tab.toggle_linked)
     tab.lines_button = icon_button(toolbar, "crosshair", "Ortho intersection lines",
-        "Show the intersection lines of the planes (L). Snapshots do not include these lines.", checkable=True)
+        "Show the intersection lines (L). Snapshots do not include them.", checkable=True)
     tab.lines_button.setChecked(True)
     tab.lines_button.toggled.connect(tab.toggle_lines)
     # The toolbar fitter owns visibility after construction.
@@ -471,8 +470,7 @@ def build_toolbar(tab) -> CanvasToolbar:
     tab.slices_control.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
     tab.slices_control.setAlignment(Qt.AlignmentFlag.AlignCenter)
     tab.slices_control.setAccessibleName("Slices averaged")
-    tab.slices_control.setToolTip("Show the average of this number of planes, to decrease noise. Type a value, scroll, "
-                                  "or click − or +.")
+    tab.slices_control.setToolTip("Show the average of this number of planes, to decrease noise")
     tab.slices_control.valueChanged.connect(tab.change_slices)
     fewer = glyph_button(toolbar, "−", "Fewer slices")
     fewer.clicked.connect(tab.slices_control.stepDown)
@@ -490,7 +488,7 @@ def build_toolbar(tab) -> CanvasToolbar:
     tab.zoom_choice = ZoomValue("Zoom", toolbar)
     tab.zoom_choice.setObjectName("tomogramZoomValue")
     tab.zoom_choice.setAccessibleName("Zoom presets")
-    tab.zoom_choice.setToolTip("The zoom. Click to select a different zoom.")
+    tab.zoom_choice.setToolTip("Select the zoom")
     zoom_menu = QMenu(tab)  # A popup follows the application theme, outside the canvas chrome.
     zoom_menu.addAction("Fit to window\tF", tab.fit)
     for zoom in (.25, .5, 1., 2., 4.):
@@ -519,7 +517,7 @@ def build_toolbar(tab) -> CanvasToolbar:
     tab.focus_button.setIconSize(ICON_SIZE)
     tab.focus_button.setCheckable(True)
     tab.focus_button.setAccessibleName("Focus")
-    tab.focus_button.setToolTip("Hide the other panels to make the image larger (Ctrl+M). Click again to show them.")
+    tab.focus_button.setToolTip("Focus the tomogram work area (Ctrl+M)")
     tab.focus_button.toggled.connect(tab.change_focus)
     tab.image_button.setParent(toolbar)
     tab.image_button.setIcon(canvas_icon("panel-right"))

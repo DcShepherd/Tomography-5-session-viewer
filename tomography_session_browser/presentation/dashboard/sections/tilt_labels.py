@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
-from tomography_session_browser.services.tilt_series_validation import validation_for
+from tomography_session_browser.services.tilt_series_validation import TiltSeriesValidation, validation_for
 from tomography_session_browser.domain.models import TiltSeries
 from tomography_session_browser.presentation.dashboard.models import (
     TILE_STATUS_COMPLETE,
@@ -13,22 +13,18 @@ from tomography_session_browser.presentation.dashboard.models import (
 from tomography_session_browser.presentation.dashboard.sections.status import tile_status_from_validation_status
 
 
-def timeline_status_for(batch_status: str, validation: Any | None) -> str:
+def timeline_status_for(validation: Any | None) -> str:
+    """A series' colour comes from its own verdict, never its batch's recorded flag.
+
+    A batch interruption is acquisition history, shown on the batch; it does
+    not make an unverified series look failed.
+    """
     if validation is None:
-        return batch_status if batch_status != TILE_STATUS_NEUTRAL else TILE_STATUS_NEUTRAL
+        return TILE_STATUS_NEUTRAL
     status = tile_status_from_validation_status(validation.status)
-    if status == TILE_STATUS_FAILED:
-        return TILE_STATUS_FAILED
-    if status == TILE_STATUS_WARNING:
-        return TILE_STATUS_WARNING
-    if status == TILE_STATUS_COMPLETE:
-        return TILE_STATUS_COMPLETE
-    # A failed batch with no usable per-tilt verdict should still be visible,
-    # but a failed child must not recolour every sibling in the same parent
-    # lane. Validation is the most specific unit when it exists.
-    if batch_status == TILE_STATUS_FAILED:
-        return TILE_STATUS_FAILED
-    return batch_status if batch_status != TILE_STATUS_NEUTRAL else TILE_STATUS_NEUTRAL
+    if status in (TILE_STATUS_FAILED, TILE_STATUS_WARNING, TILE_STATUS_COMPLETE):
+        return status
+    return TILE_STATUS_NEUTRAL
 
 
 def group_tilt_series_frame_text(
@@ -58,7 +54,7 @@ def tilt_names_with_status(
     names: list[str] = []
     for tilt in tilt_series:
         validation = validation_for(validation_by_id, tilt)
-        if timeline_status_for(TILE_STATUS_NEUTRAL, validation) == status:
+        if timeline_status_for(validation) == status:
             names.append(tilt.name or tilt.id)
     return names
 
@@ -72,11 +68,17 @@ def format_names_for_tooltip(label: str, names: list[str], *, limit: int = 8) ->
     return f"{label}: {shown}, +{len(names) - limit} more"
 
 
-def _tilt_series_expected_frame_text(tilt: TiltSeries, validation: Any | None) -> str:
-    expected = getattr(validation, "expected_count", None) if validation is not None else None
+def _counts(validation: TiltSeriesValidation | None) -> tuple[int | None, int | None]:
+    """``(actual, expected)`` from the verdict's observation and plan."""
+    if validation is None:
+        return None, None
+    return validation.observation.reported_count, validation.plan.expected_count
+
+
+def _tilt_series_expected_frame_text(tilt: TiltSeries, validation: TiltSeriesValidation | None) -> str:
+    actual, expected = _counts(validation)
     if expected:
         return str(expected)
-    actual = getattr(validation, "actual_count", None) if validation is not None else None
     if actual:
         return str(actual)
     if tilt.tilt_count:
@@ -88,9 +90,8 @@ def _tilt_series_expected_frame_text(tilt: TiltSeries, validation: Any | None) -
     return "unknown"
 
 
-def tilt_series_frame_text(tilt: TiltSeries, validation: Any | None) -> str:
-    actual = getattr(validation, "actual_count", None) if validation is not None else None
-    expected = getattr(validation, "expected_count", None) if validation is not None else None
+def tilt_series_frame_text(tilt: TiltSeries, validation: TiltSeriesValidation | None) -> str:
+    actual, expected = _counts(validation)
     if expected:
         if actual is not None and actual != expected:
             return f"{actual} / {expected} expected"

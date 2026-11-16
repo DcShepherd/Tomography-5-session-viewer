@@ -284,6 +284,8 @@ class RecentSessionRow(QWidget):
     path_chosen = Signal(str, object)
     #: Focus was on a chip that narrowing hid, and no chip before it can take it.
     focus_released = Signal()
+    #: A style or font change has been fitted; a parent that measures the row can measure again.
+    refitted = Signal()
 
     def __init__(self, paths: Iterable[str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -405,6 +407,7 @@ class RecentSessionRow(QWidget):
     def _metrics_changed(self) -> None:
         self.updateGeometry()
         self._fit()
+        self.refitted.emit()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)

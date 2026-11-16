@@ -35,15 +35,14 @@ class ObliqueControls:
         self.lock.setAccessibleName("Lock the pivot")
         self.lock.setIcon(themed_icon("unlock", color=CANVAS_CHROME.text, size=16))
         self.lock.setCheckable(True)
-        self.lock.setToolTip("Lock the point that the view turns around (Ctrl+L). When it is not locked, a click moves this point.")
+        self.lock.setToolTip("Lock the pivot (Ctrl+L). When unlocked, a click moves it.")
         self.lock.toggled.connect(self.set_lock)
         # The icon and the three angles, also at zero; the toolbar reserves the widest text.
         self.angles = QPushButton(angles_text((0, 0, 0)), parent)
         self.angles.setIcon(themed_icon("rotate-3d", color=CANVAS_CHROME.text, size=16))
         self.angles.setIconSize(QSize(16, 16))
         self.angles.setAccessibleName("Angles")
-        self.angles.setToolTip("The tilt of the view, in degrees. The app turns the view about Z, then Y, then X. "
-                               "Areas that are not in the volume show no data.")
+        self.angles.setToolTip("The view tilt, in degrees. The app turns about Z, then Y, then X.")
         # A popup follows the application theme, outside the dark canvas chrome.
         menu = QMenu(tab)
         panel = QWidget(menu)

@@ -5,6 +5,7 @@ injected; this component neither derives scientific links nor rebuilds viewers.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from PySide6.QtCore import QRect, QSize, Qt, QSignalBlocker
@@ -55,6 +56,10 @@ WORKSPACE_MIN_PX = 1
 # QSS padding, overflow room and workspace margins beyond the measured items.
 TOOLBAR_CHROME_PX = 40
 TAB_BAR_CHROME_PX = 24
+#: The steps whose texts are measured; the active step is made from two of them.
+TAB_WIDTH_VARIANTS = (TAB_STEP_FULL, TAB_STEP_SHORT, TAB_STEP_NAMES, TAB_STEP_COUNT, TAB_STEP_ICON)
+#: Distinct texts kept: counts make them unbounded across scopes; one scope uses about 40.
+TAB_WIDTH_MEMO_LIMIT = 256
 # Internal keys stay fixed; ENTITY_DISPLAY_LABELS supplies readable names.
 TAB_LABELS: list[TabKey] = [spec.key for spec in TAB_SPECS]
 
@@ -108,10 +113,11 @@ class ShellChrome:
         self.brand_compact = False
         self.tab_step = TAB_STEP_FULL
         self.tab_count_values: dict[str, int] = {}
-        #: The texts and fonts the widths were measured for, and each text variant's tab widths.
-        self.tab_widths_cache: tuple[tuple, dict[int, list[int]]] | None = None
-        #: What the tabs show now: (step, the current tab when that matters).
-        self.tab_applied: tuple[int, int | None] | None = None
+        #: Each tab text's width, oldest use first, for the look in ``tab_width_look``.
+        self.tab_width_memo: OrderedDict[str, int] = OrderedDict()
+        self.tab_width_look: tuple | None = None
+        #: What the tabs show now: ``tab_state`` of the step applied last.
+        self.tab_applied: tuple[int, int | None, tuple[str, ...]] | None = None
         self.panel_slides: dict[QDockWidget, PanelSlide] = {}
         self.drawer_mode = False
         self.project_drawer_mode = False
@@ -365,9 +371,8 @@ class ShellChrome:
     def update_responsive_chrome(self) -> None:
         """Fit each piece of chrome to the room it has (plan F3, D1).
 
-        Transient, recomputed on every resize and dock change, and never a
-        saved preference: ``Settings.compact`` is a separate, persisted toggle.
-        The brand refresh fits the toolbar.
+        Transient, recomputed on every resize and dock change, and never
+        written to the settings. The brand refresh fits the toolbar.
         """
 
         self.refresh_branding()
@@ -486,29 +491,62 @@ class ShellChrome:
         reachable, its full text is in the tooltip and its accessible name.
         """
 
-        bar = self.tabs.tabBar()
-        bar.setExpanding(False)
-        # Measuring means setting every variant's texts, and each ``setTabText``
-        # re-lays out the bar: 28 of them per call, on every resize event,
-        # were most of a window drag's cost. The widths depend only on the
-        # texts, font and icon size, so they are measured once per change; the
-        # current tab's step is worked out from them, so choosing another tab
-        # measures nothing.
-        variants = (TAB_STEP_FULL, TAB_STEP_SHORT, TAB_STEP_NAMES, TAB_STEP_COUNT, TAB_STEP_ICON)
-        key = (tuple(self.tab_texts(step) for step in variants), bar.font().toString(), bar.iconSize().toTuple())
-        if self.tab_widths_cache is None or self.tab_widths_cache[0] != key:
-            widths = {}
-            for step in variants:
-                self.apply_tab_texts(step)
-                widths[step] = [bar.tabSizeHint(index).width() for index in range(bar.count())]
-            self.tab_widths_cache = (key, widths)
-            self.tab_applied = None  # the bar now shows the last variant measured
-        widths = self.tab_widths_cache[1]
+        self.tabs.tabBar().setExpanding(False)
+        widths = self.measured_tab_widths()
         current = self.tabs.currentIndex()
         required = [self.tab_required_width(step, widths, current) for step in TAB_STEPS]
         step = first_fitting_step(required, self.workspace_width() - TAB_BAR_CHROME_PX)
+        # The state holds the texts too: new counts at the same step must
+        # still reach the tabs, although nothing new was measured.
         if self.tab_state(step) != self.tab_applied:
             self.apply_tab_texts(step)
+
+    def measured_tab_widths(self) -> dict[int, list[int]]:
+        """Each text variant's tab widths, from one width per text.
+
+        Measuring writes a text onto the live bar, because the style sheet
+        sets the tab's weight and padding, and each ``setTabText`` re-lays out
+        the bar. Only a text never measured before is written; one round
+        measures one text on every tab, and the shown texts are put back.
+        A width does not depend on which tab holds the text or whether it is
+        selected (probed natively, both themes). The look the widths were
+        measured in is the font, the icon size, the theme (which builds the
+        style sheet) and the pixel density; a change of any clears them all.
+        """
+
+        bar = self.tabs.tabBar()
+        look = (bar.font().toString(), bar.iconSize().toTuple(), current_palette().name,
+                self.window.devicePixelRatioF())
+        memo = self.tab_width_memo
+        if look != self.tab_width_look:
+            memo.clear()
+            self.tab_width_look = look
+        texts = {step: self.tab_texts(step) for step in TAB_WIDTH_VARIANTS}
+        queues: list[list[str]] = [[] for _ in range(bar.count())]
+        queued: set[str] = set()
+        for step_texts in texts.values():
+            for index, text in enumerate(step_texts):
+                if text not in memo and text not in queued:
+                    queued.add(text)
+                    queues[index].append(text)
+        if queued:
+            shown = [self.tabs.tabText(index) for index in range(bar.count())]
+            while any(queues):
+                batch = [(index, queue.pop(0)) for index, queue in enumerate(queues) if queue]
+                for index, text in batch:
+                    self.tabs.setTabText(index, text)
+                for index, text in batch:
+                    memo[text] = bar.tabSizeHint(index).width()
+            for index, text in enumerate(shown):
+                if self.tabs.tabText(index) != text:
+                    self.tabs.setTabText(index, text)
+        widths = {step: [memo[text] for text in step_texts] for step, step_texts in texts.items()}
+        for step_texts in texts.values():
+            for text in step_texts:
+                memo.move_to_end(text)
+        while len(memo) > TAB_WIDTH_MEMO_LIMIT:
+            memo.popitem(last=False)
+        return widths
 
     def refit_tabs_for_current(self) -> None:
         """Another tab was chosen: the one being looked at keeps its name.
@@ -522,10 +560,10 @@ class ShellChrome:
         else:
             self.apply_tab_texts(self.tab_step)
 
-    def tab_state(self, step: int) -> tuple[int, int | None]:
-        """What fixes the tabs' texts: the step, and which tab is current when the step names only it."""
+    def tab_state(self, step: int) -> tuple[int, int | None, tuple[str, ...]]:
+        """What the tabs show: the step, the current tab when the step names only it, and the texts."""
 
-        return step, self.tabs.currentIndex() if step == TAB_STEP_ACTIVE else None
+        return step, self.tabs.currentIndex() if step == TAB_STEP_ACTIVE else None, self.tab_texts(step)
 
     @staticmethod
     def tab_required_width(step: int, widths: dict[int, list[int]], current: int) -> int:

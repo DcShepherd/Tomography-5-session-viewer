@@ -88,6 +88,58 @@ QMenu::item:disabled:selected {{
     color: {text_muted};
 }}
 
+/* A Colour by mode with no data: greyed, but it takes the focus so that its
+   reason (the tooltip and accessible description) can be read. It takes no
+   fill, under the pointer or the focus, so it does not look selectable; the
+   keyboard focus shows as an outline only. The transparent border keeps the
+   row from moving when the focus arrives. */
+QWidget#positionsColourUnavailable {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: {radius_control}px;
+}}
+
+QWidget#positionsColourUnavailable:focus {{
+    border-color: {accent};
+}}
+
+QWidget#positionsColourUnavailable QRadioButton:disabled {{
+    color: {text_muted};
+}}
+
+/* A Colour by mode that can be selected takes the selection fill under the
+   pointer, as other menu items do. Each row spans the menu's width. */
+QMenu#positionsColourMenu QRadioButton#positionsColourChoice {{
+    border-radius: {radius_control}px;
+}}
+
+QMenu#positionsColourMenu QRadioButton#positionsColourChoice:enabled:hover {{
+    background: {selection};
+    color: {selection_text};
+}}
+
+/* The Colour by radios. Without these rules Fusion draws the ring from the
+   window colour, which nearly disappears on the dark menu. ``control_border``
+   clears 3:1 on ``surface`` in both themes; the selected mode is an accent
+   ring and dot; a greyed mode is quieter. */
+QMenu#positionsColourMenu QRadioButton::indicator {{
+    width: 10px;
+    height: 10px;
+    border: 1px solid {control_border};
+    border-radius: 6px; /* pill */
+    background: {surface};
+}}
+
+QMenu#positionsColourMenu QRadioButton::indicator:checked {{
+    border-color: {accent};
+    image: url("{radio_dot_icon}");
+}}
+
+QMenu#positionsColourMenu QRadioButton::indicator:disabled {{
+    border-color: {border_strong};
+    background: {surface_alt};
+}}
+
 QMenu::separator {{
     background: {border};
     height: 1px;
@@ -245,16 +297,20 @@ QPushButton:disabled {{
     color: {text_muted};
 }}
 
+/* The 2 px border shows the card at rest (the fill stops inside it), so the
+   focus ring can go round the fill and change colour, never size. A ring on
+   the fill itself could not reach 3:1 in both themes (Batch 4c, Q2). */
 QPushButton#primaryButton {{
     background: {primary_fill};
-    border-color: {primary_fill};
+    background-clip: padding;
+    border: 2px solid transparent;
     color: {primary_text};
     font-weight: 600;
 }}
 
 QPushButton#primaryButton:hover {{
     background: {primary_fill_hover};
-    border-color: {primary_fill_hover};
+    border-color: transparent;
     color: {primary_text};
 }}
 

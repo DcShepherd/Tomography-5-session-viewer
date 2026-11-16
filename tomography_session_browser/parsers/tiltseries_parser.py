@@ -12,6 +12,7 @@ from tomography_session_browser.domain.models import TiltSeries
 from tomography_session_browser.parsers.mdoc_parser import numeric_values, parse_mdoc
 from tomography_session_browser.parsers.acquisition_evidence import evidence_file, read_mdoc_evidence
 from tomography_session_browser.domain.acquisition import AcquisitionEvidence
+from tomography_session_browser.parsers.mrc_metadata_parser import fei_spot_index
 from tomography_session_browser.parsers.mrc_parser import read_mrc_metadata
 from tomography_session_browser.parsers.path_utils import natural_key, safe_id, sorted_paths
 from tomography_session_browser.parsers.volume_header import file_records_volume
@@ -158,26 +159,12 @@ def parse_tilt_series(mrc_path: Path, mdoc_path: Path | None = None) -> TiltSeri
     return tilt_series
 
 
-def find_unpaired_mrcs(path: Path) -> list[Path]:
-    return sorted_paths(
-        [
-            item
-            for item in path.glob("*.mrc")
-            if not any(candidate.exists() for candidate in _mdoc_candidates(item))
-        ]
-    )
-
-
 def _mdoc_stack_stem(path: Path) -> str:
     name = path.name
     suffix = ".mrc.mdoc"
     if name.casefold().endswith(suffix):
         return name[: -len(suffix)]
     return path.stem
-
-
-def _mdoc_candidates(mrc_path: Path) -> tuple[Path, Path]:
-    return mrc_path.with_suffix(".mdoc"), Path(f"{mrc_path}.mdoc")
 
 
 def _resolved_tilt_pixel_size(
@@ -261,7 +248,7 @@ def _apply_mrc_acquisition_spot(
     mrc_path: Path,
     warnings: list[str],
 ) -> None:
-    value = _mrc_spot_index(mrc_metadata, warnings)
+    value = fei_spot_index(mrc_metadata, warnings, "Tilt-series")
     if value is None:
         return
     setting = AcquisitionSetting(
@@ -293,21 +280,3 @@ def _apply_header_setting(
             f"overrides {previous_source or 'existing metadata'}={previous_value}."
         )
     apply_acquisition_settings(header, {setting.label: setting}, overwrite=overwrite)
-
-
-def _mrc_spot_index(mrc_metadata: Any, warnings: list[str]) -> str | None:
-    values: set[int] = set()
-    for frame in getattr(mrc_metadata, "frame_metadata", None) or []:
-        raw_fields = frame.get("raw_fields") if isinstance(frame, dict) else None
-        if not isinstance(raw_fields, dict):
-            continue
-        parsed = _positive_int(raw_fields.get("spot_index"))
-        if parsed is not None:
-            values.add(parsed)
-    if not values:
-        return None
-    if len(values) > 1:
-        text = ", ".join(str(value) for value in sorted(values))
-        warnings.append(f"Tilt-series FEI extended header has inconsistent spot_index values: {text}.")
-        return None
-    return str(next(iter(values)))

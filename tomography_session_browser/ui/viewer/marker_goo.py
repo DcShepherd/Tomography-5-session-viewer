@@ -19,7 +19,7 @@ only maps scene points to the viewport and paints.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass
 import math
 
@@ -28,9 +28,11 @@ from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen,
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsView, QWidget
 
 from tomography_session_browser.domain.markers import ImageMarker, MarkerType
+from tomography_session_browser.services.atlas_lod import atlas_glyph_key, glyph_colour_status
 from tomography_session_browser.services.atlas_marker_style import LEAF_DIAMETER_DP, LEAF_HALO_WIDTH_DP, LEAF_RING_RADIUS_DP, MARKER_INK
 from tomography_session_browser.ui.motion import DURATION_GOO_MS, STAGGER_MAX_ITEMS, STAGGER_MS, Tween, motion_enabled
-from tomography_session_browser.ui.viewer.marker_paint import atlas_status_color
+from tomography_session_browser.presentation.atlas_colouring import AtlasColouring
+from tomography_session_browser.ui.viewer.marker_paint import CLUSTER_NEUTRAL, key_colour
 
 #: Above this many droplets in view a regroup is shown at once: the canvas
 #: stays responsive on a whole-grid atlas with thousands of positions.
@@ -68,7 +70,8 @@ class GooBlob:
     x: float
     y: float
     radius: float
-    status: str
+    #: What colour it is: a status word, or a colouring key (batch 4).
+    status: Hashable
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +82,7 @@ class GooDroplet:
     end: Point
     start_radius: float
     end_radius: float
-    status: str
+    status: Hashable
     delay: float = 0.0
 
 
@@ -88,7 +91,7 @@ class GooGroup:
     """A cluster splitting into droplets (``splits``), or droplets merging into one."""
 
     anchor: Point
-    anchor_status: str
+    anchor_status: Hashable
     anchor_radius: float
     droplets: tuple[GooDroplet, ...]
     splits: bool
@@ -96,8 +99,11 @@ class GooGroup:
     reveals: tuple[str, ...]
 
 
-def blobs_from_markers(markers: Sequence[ImageMarker]) -> list[GooBlob]:
-    """The Atlas batch glyphs among ``markers``, as ``atlas_lod_display_markers`` built them."""
+def blobs_from_markers(markers: Sequence[ImageMarker], colouring: AtlasColouring | None = None) -> list[GooBlob]:
+    """The Atlas batch glyphs among ``markers``, as ``atlas_lod_display_markers`` built them.
+
+    With a ``colouring`` a leaf takes its key and a cluster the neutral fill, as drawn.
+    """
 
     blobs: list[GooBlob] = []
     for marker in markers:
@@ -111,9 +117,19 @@ def blobs_from_markers(markers: Sequence[ImageMarker]) -> list[GooBlob]:
             continue
         diameter = float(marker.metadata.get("diameter_px") or LEAF_DIAMETER_DP)
         radius = diameter / 2.0 if marker.marker_type == MarkerType.BATCH_CLUSTER else LEAF_RING_RADIUS_DP
-        status = (marker.status or "queued").lower()
-        if not bool(marker.metadata.get("navigation_enabled", True)):
-            status = "unattributed"
+        # A leaf takes the glyph rule's colour: a failed tilt series with no
+        # batch link keeps its failed colour; an unresolved link is grey.
+        status: Hashable
+        if marker.marker_type == MarkerType.BATCH_CLUSTER:
+            status = (marker.status or "queued").lower()
+            if not bool(marker.metadata.get("navigation_enabled", True)):
+                status = "unattributed"
+            if colouring is not None:
+                status = CLUSTER_NEUTRAL
+        elif colouring is not None:
+            status = colouring.key_for(marker)
+        else:
+            status = glyph_colour_status(atlas_glyph_key(marker))
         blobs.append(GooBlob(marker.id, members, float(marker.x), float(marker.y), radius, status))
     return blobs
 
@@ -311,7 +327,7 @@ class MarkerGoo(QWidget):
         self.groups = tuple(groups)
         self._scene_to_view = scene_to_view
         self._revealed = list(revealed)
-        self._colours: dict[str, QColor] = {}
+        self._colours: dict[Hashable, QColor] = {}
         self.progress = 0.0
         self._shapes: tuple[float, QTransform, list[GooShapes]] | None = None
         self._painted: QRectF | None = None
@@ -328,10 +344,10 @@ class MarkerGoo(QWidget):
     def is_animating(self) -> bool:
         return self._tween.is_animating
 
-    def _colour(self, status: str) -> QColor:
+    def _colour(self, status: Hashable) -> QColor:
         colour = self._colours.get(status)
         if colour is None:
-            colour = self._colours[status] = atlas_status_color(status)
+            colour = self._colours[status] = key_colour(status)
         return colour
 
     def shapes(self) -> list[GooShapes]:

@@ -1,6 +1,5 @@
 """Support components for the timeline."""
 from __future__ import annotations
-import re
 from math import ceil
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
@@ -10,24 +9,6 @@ from tomography_session_browser.ui.theme import current_palette
 def timeline_count_phrase(count: int, singular: str, plural: str | None = None) -> str:
     noun = singular if count == 1 else (plural or f"{singular}s")
     return f"{count} {noun}"
-
-
-def group_key(label: str) -> tuple[str, str]:
-    text = label.strip()
-    stem = re.sub(r"\.[^.]+$", "", text)
-    match = re.match(r"([A-Za-z][A-Za-z .-]*?)(?:[_ -]?\d.*)?$", stem)
-    if match:
-        base = match.group(1).strip(" _-.")
-    else:
-        base = re.split(r"[_ -]\d", stem, maxsplit=1)[0].strip(" _-.")
-    if not base:
-        base = stem or text
-    pretty = base.replace("_", " ").strip()
-    if pretty.isupper():
-        label_text = pretty
-    else:
-        label_text = " ".join(part.capitalize() if part.islower() else part for part in pretty.split())
-    return pretty.lower(), label_text
 
 
 def status_icon(status: str, device_pixel_ratio: float = 1.0) -> QIcon:

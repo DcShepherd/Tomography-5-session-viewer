@@ -1,10 +1,10 @@
 """Selected-row tags and note. All edits are delegated to the shared owner."""
 from tomography_session_browser.presentation.help_content import LocalBinding, InteractionKind
-from PySide6.QtCore import QEvent, Qt, Signal, QSignalBlocker, QTimer, QVariantAnimation
+from PySide6.QtCore import QEvent, QSize, Qt, Signal, QSignalBlocker, QTimer, QVariantAnimation
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMenu, QPlainTextEdit,
-                               QPushButton, QToolButton, QScrollArea, QVBoxLayout, QWidget, QSizePolicy)
+                               QPushButton, QToolButton, QScrollArea, QSplitter, QVBoxLayout, QWidget, QSizePolicy)
 
 from tomography_session_browser.presentation.design_tokens import SPACE_S
 from tomography_session_browser.presentation.tomogram_tag_entry import DraftValidity
@@ -121,6 +121,7 @@ class TagsPanel(QFrame):
         self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         outer.addWidget(self.content_scroll)
         body = QWidget(self.content_scroll)
+        self.body = body
         self.layout_ = QVBoxLayout(body)
         self.layout_.setContentsMargins(0, 0, 0, 0)
         self.layout_.setSpacing(SPACE_S)
@@ -211,6 +212,9 @@ class TagsPanel(QFrame):
         self.note_resume_focus = False
         self.rows_content = None
         self.pending_flash = None
+        # The scroll area hides the body's needs from the splitter; refresh the
+        # panel's minimum whenever the body's layout changes.
+        body.installEventFilter(self)
 
     def render(self, target, project, row, reason: str, editable: bool, save_state: SaveState | None, can_create: bool = False,
                *, save_notice: MessageContent | None = None, project_key: ProjectKey | None = None,
@@ -394,7 +398,38 @@ class TagsPanel(QFrame):
         if not self.note.isHidden() and not self.note.hasFocus():
             self.close_note()
 
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        """Keep room for the body at this width, so a splitter cannot cut off tag entry.
+
+        Wrapped text makes the body taller than its own minimum. In the list
+        column the reserve stops at half the column; taller content scrolls.
+        """
+        hint = super().minimumSizeHint()
+        column = self.parentWidget().parentWidget() if self.parentWidget() is not None else None
+        if not isinstance(column, QSplitter) or self.layout() is None:
+            return hint
+        margins, frame = self.layout().contentsMargins(), self.contentsMargins()
+        # Measure beside the scroll bar: once shown, it narrows the body, wraps
+        # more text and would otherwise keep itself shown.
+        bar = self.content_scroll.verticalScrollBar().sizeHint().width()
+        width = max(1, self.contentsRect().width() - margins.left() - margins.right() - bar)
+        body = self.body.heightForWidth(width)
+        if body < 0:
+            body = self.body.minimumSizeHint().height()
+        header = self.layout().itemAt(0)
+        needed = (frame.top() + frame.bottom() + margins.top() + margins.bottom() + self.layout().spacing() + body
+                  + (header.sizeHint().height() if header is not None else 0))
+        return QSize(hint.width(), max(hint.height(), min(needed, column.height() // 2)))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if event.oldSize().width() != event.size().width():
+            self.updateGeometry()  # Wrapped text needs a different height.
+
     def eventFilter(self, watched, event):
+        if watched is self.body and event.type() == QEvent.Type.LayoutRequest:
+            self.updateGeometry()
+            return False
         if event.type() == QEvent.Type.FocusIn:
             self.reveal_editor(self.entry if watched is self.entry.field else self.note)
         elif watched is self.note and event.type() == QEvent.Type.KeyPress:

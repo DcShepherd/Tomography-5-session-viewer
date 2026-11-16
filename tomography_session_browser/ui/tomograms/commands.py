@@ -26,7 +26,7 @@ VERSION_COMMANDS = (("Previous version", "1", -1), ("Next version", "2", 1))
 
 
 def version_tooltip() -> str:
-    return "; ".join(f"{label} ({key})" for label, key, _ in VERSION_COMMANDS) + ". Main-row keys; NumPad rotates."
+    return "; ".join(f"{label} ({key})" for label, key, _ in VERSION_COMMANDS) + ". Main keys only."
 
 
 def step_version(tab: TomogramTab, delta: int) -> None:

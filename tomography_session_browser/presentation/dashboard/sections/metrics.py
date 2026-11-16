@@ -15,8 +15,8 @@ from tomography_session_browser.presentation.dashboard.models import (
     DoseInformationPointModel,
     ExposureThumbnailModel,
 )
-from tomography_session_browser.presentation.dashboard.scopes import clean_sample_label
-from tomography_session_browser.presentation.formatting import format_timestamp
+from tomography_session_browser.presentation.dashboard.scopes import sample_group_key, sample_row_labels
+from tomography_session_browser.presentation.formatting import format_tilt_angle, format_timestamp
 from tomography_session_browser.services.tilt_angle_service import stack_order_mdoc_section_indices
 from tomography_session_browser.services.tilt_series_validation import actual_tilt_count
 from tomography_session_browser.services.tilt_thumbnails import exposure_frame, starting_tilt_angle
@@ -40,7 +40,7 @@ def defocus_plot_model(scope: DashboardScope) -> DefocusPlotModel:
     frame_order = 0
 
     for tilt in scope.tilt_series:
-        sample_name, linked_group = contexts.get(id(tilt), (scope.title or "Selection", None))
+        sample_name, linked_group, series_key = contexts.get(id(tilt), (scope.title or "Selection", None, SCOPE_SERIES_KEY))
         frame_count = _frame_count_for_per_image_metadata(tilt)
         frame_metadata = tilt.mrc_metadata.frame_metadata if tilt.mrc_metadata is not None else []
         section_indices = stack_order_mdoc_section_indices(tilt, frame_count)
@@ -89,6 +89,7 @@ def defocus_plot_model(scope: DashboardScope) -> DefocusPlotModel:
                     sample_name=sample_name,
                     data_collection_name=sample_name,
                     linked_group_label=linked_group,
+                    series_key=series_key,
                     tilt_series_id=tilt.id,
                     tilt_series_name=tilt.name or tilt.id,
                     frame_index=frame_index,
@@ -165,7 +166,7 @@ def dose_information_plot_model(scope: DashboardScope) -> DoseInformationPlotMod
         frame_metadata = tilt.mrc_metadata.frame_metadata if tilt.mrc_metadata is not None else []
         if not frame_metadata:
             continue
-        sample_name, linked_group = contexts.get(id(tilt), (scope.title or "Selection", None))
+        sample_name, linked_group, series_key = contexts.get(id(tilt), (scope.title or "Selection", None, SCOPE_SERIES_KEY))
         frame_count = _frame_count_for_per_image_metadata(tilt)
         for frame_index, metadata in enumerate(frame_metadata, start=1):
             dose, source = _camera_dose_from_frame_metadata(metadata)
@@ -183,6 +184,7 @@ def dose_information_plot_model(scope: DashboardScope) -> DoseInformationPlotMod
                 sample_name=sample_name,
                 data_collection_name=sample_name,
                 linked_group_label=linked_group,
+                series_key=series_key,
                 tilt_series_id=tilt.id,
                 tilt_series_name=tilt.name or tilt.id,
                 frame_index=frame_index,
@@ -253,17 +255,28 @@ def dose_information_plot_model(scope: DashboardScope) -> DoseInformationPlotMod
     )
 
 
-def _tilt_series_label_contexts(scope: DashboardScope) -> dict[int, tuple[str, str | None]]:
-    contexts: dict[int, tuple[str, str | None]] = {}
+#: The series of the points whose tilt series sits in no sample group of the scope.
+SCOPE_SERIES_KEY = "scope"
+
+
+def _tilt_series_label_contexts(scope: DashboardScope) -> dict[int, tuple[str, str | None, str]]:
+    """Per tilt series: its legend text, its linked-group label and its series key.
+
+    The key is the sample group's key, the one its timeline lane carries, so a
+    chart groups, colours and orders its series by sample identity and the text
+    is for display only. The text is the Samples table's name for the group."""
+
+    contexts: dict[int, tuple[str, str | None, str]] = {}
     linked_scope = scope.kind in {"linked sample group", "linked sessions"}
-    for group_label, samples in scope.sample_groups:
+    labels = sample_row_labels(scope.sample_groups)
+    for (group_label, samples), sample_label in zip(scope.sample_groups, labels):
         linked_label = scope.title if scope.kind == "linked sample group" else group_label if linked_scope else None
+        key = sample_group_key(group_label, samples)
         for sample in samples:
-            sample_label = clean_sample_label(sample.name)
             for tilt in sample.tilt_series:
-                contexts[id(tilt)] = (sample_label, linked_label)
+                contexts[id(tilt)] = (sample_label, linked_label, key)
     for tilt in scope.tilt_series:
-        contexts.setdefault(id(tilt), (scope.title or tilt.name or tilt.id, None))
+        contexts.setdefault(id(tilt), (scope.title or tilt.name or tilt.id, None, SCOPE_SERIES_KEY))
     return contexts
 
 
@@ -337,7 +350,7 @@ def _per_frame_metric_tooltip_lines(
     counter notation changes.
     """
 
-    angle_text = f"{tilt_angle:g}\N{DEGREE SIGN}" if tilt_angle is not None else "n/a"
+    angle_text = format_tilt_angle(tilt_angle) if tilt_angle is not None else "n/a"
     if acquisition_time is not None:
         time_text = acquisition_time.isoformat(sep=" ", timespec="seconds")
     else:

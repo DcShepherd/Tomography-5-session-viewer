@@ -166,6 +166,7 @@ _DRAWINGS: dict[str, Drawing] = {
     "collection": _collection,
 }
 
+#: Every drawing's name; the swatch tests check that each one is asked for.
 SWATCH_NAMES = tuple(_DRAWINGS)
 
 

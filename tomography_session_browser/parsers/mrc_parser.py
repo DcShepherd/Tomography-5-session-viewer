@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 
 from tomography_session_browser.domain.models import MrcMetadata
-from tomography_session_browser.parsers.mrc_metadata_parser import MrcFrameMetadata, ParsedMrcMetadata, parse_mrc_metadata
+from tomography_session_browser.parsers.mrc_metadata_parser import MrcFrameMetadata, ParsedMrcMetadata, mrc_numpy_dtype, parse_mrc_metadata
 from tomography_session_browser.diagnostics.profiling import record_aggregate_phase
 
 
@@ -250,7 +250,7 @@ def inspect_mrc(path: Path) -> MrcInspection:
     warnings = list(parsed.warnings)
     nx, ny, nz, mode = main.nx, main.ny, main.nz, main.mode
     endian = main.endian
-    dtype = _numpy_dtype(mode, endian)
+    dtype = mrc_numpy_dtype(mode, endian)
     if dtype is None:
         raise ValueError(f"MRC mode {mode} is not supported for preview.")
     tilt_angles = [frame.tilt_angle for frame in parsed.frame_metadata if frame.tilt_angle is not None]
@@ -539,16 +539,6 @@ def read_mrc_display_region(
     except (OSError, ValueError, IndexError) as exc:
         LOGGER.debug("Could not render MRC region from %s: %s", path, exc)
         return None
-
-
-def _numpy_dtype(mode: int, endian: str) -> np.dtype | None:
-    code_by_mode = {0: "i1", 1: "i2", 2: "f4", 6: "u2"}
-    code = code_by_mode.get(mode)
-    if code is None:
-        return None
-    if code == "i1":
-        return np.dtype(code)
-    return np.dtype(f"{endian}{code}")
 
 
 def _data_kind(nz: int) -> str:

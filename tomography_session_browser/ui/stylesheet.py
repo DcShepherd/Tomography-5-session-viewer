@@ -34,6 +34,7 @@ from tomography_session_browser.presentation.design_tokens import (
     readable_tone,
 )
 from tomography_session_browser.ui.stylesheets import QSS_TEMPLATE
+from tomography_session_browser.ui.stylesheets.cards_and_chips import SLIDER_HANDLE, SLIDER_HANDLE_BORDER, SLIDER_ROOM
 
 
 def _status_tone_rules(palette: ThemePalette) -> str:
@@ -122,6 +123,7 @@ def build_stylesheet(palette: ThemePalette) -> str:
         dash_icon=_indicator_path(palette, "dash"),
         canvas_check_icon=_indicator_path(CANVAS_CHROME, "check"),
         canvas_dash_icon=_indicator_path(CANVAS_CHROME, "dash"),
+        radio_dot_icon=_indicator_path(palette, "shape-dot", palette.accent),
         radius_control=RADIUS_CONTROL,
         radius_card=RADIUS_CARD,
         radius_popover=RADIUS_POPOVER,
@@ -131,6 +133,9 @@ def build_stylesheet(palette: ThemePalette) -> str:
         type_title=TYPE_TITLE,
         type_heading=TYPE_HEADING,
         type_display=TYPE_DISPLAY,
+        slider_handle=SLIDER_HANDLE,
+        slider_handle_border=SLIDER_HANDLE_BORDER,
+        slider_room=SLIDER_ROOM,
     )
     # After the base ``viewerChipStatus`` rule they refine.
     return (
@@ -146,11 +151,14 @@ def build_stylesheet(palette: ThemePalette) -> str:
     )
 
 
-def _indicator_path(palette: ThemePalette, icon: str) -> str:
-    """Absolute POSIX path to a check box mark (``check`` or ``dash``) recoloured for ``palette``.
+def _indicator_path(palette: ThemePalette, icon: str, colour: str | None = None) -> str:
+    """Absolute POSIX path to an indicator mark recoloured for ``palette``.
 
-    Written once per palette into the user's cache directory: Qt style sheets
-    can only reference an image by URL, so this one icon has to exist on disk
+    ``check`` and ``dash`` are check box marks, drawn in ``primary_text`` on an
+    accent fill; ``colour`` overrides that, as the radio dot does with ``accent``.
+
+    Written once per colour into the user's cache directory: Qt style sheets
+    can only reference an image by URL, so these icons have to exist on disk
     rather than being recoloured in memory like every other icon.
 
     Deliberately self-contained: ``ui.icons`` loads the theme, so reaching
@@ -158,7 +166,7 @@ def _indicator_path(palette: ThemePalette, icon: str) -> str:
     """
 
     source = Path(__file__).resolve().parent.parent / "assets" / "icons" / f"{icon}.svg"
-    colour = palette.primary_text
+    colour = colour or palette.primary_text
     try:
         cache_root = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.CacheLocation

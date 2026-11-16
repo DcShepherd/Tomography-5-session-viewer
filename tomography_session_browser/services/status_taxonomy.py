@@ -40,9 +40,9 @@ _STATUS_TO_ACQUISITION: dict[str, str] = {
     RowStatus.UNKNOWN: ACQUISITION_UNKNOWN,
     "unavailable": ACQUISITION_UNKNOWN,
     "n/a": ACQUISITION_UNKNOWN,
-    # An orphaned failed tilt series that no batch claims. What it means as
-    # *acquisition* data for a batch is unknown; its link confidence is what
-    # makes it special, and that is a different dimension.
+    # A batch position the resolver cannot open. Its link, not its
+    # acquisition, is what is known to be wrong. (An orphaned failed tilt
+    # series is marked ``failed``; its missing batch link is shown apart.)
     AtlasMarkerStatus.UNATTRIBUTED: ACQUISITION_UNKNOWN,
 }
 

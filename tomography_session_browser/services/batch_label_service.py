@@ -97,23 +97,6 @@ def compact_batch_label(value: str) -> str:
     return text
 
 
-def visible_batch_position_label_ids(
-    markers: Sequence[ImageMarker],
-    *,
-    view_scale: float,
-    marker_radius_px: float = LEAF_DIAMETER_DP / 2.0,
-) -> set[str]:
-    """Return the IDs accepted by :func:`atlas_batch_label_placements`."""
-
-    return set(
-        atlas_batch_label_placements(
-            markers,
-            view_scale=view_scale,
-            marker_radius_px=marker_radius_px,
-        )
-    )
-
-
 def atlas_batch_label_placements(
     markers: Sequence[ImageMarker],
     *,

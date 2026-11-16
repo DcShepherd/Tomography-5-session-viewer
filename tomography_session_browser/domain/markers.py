@@ -72,6 +72,9 @@ class MarkerMetadata(TypedDict, total=False):
     batch_label: str | None
     batch_position_id: str
     batch_position_label: str | None
+    #: Built from one of several contradictory records sharing ``batch_id``
+    #: (``services.markers.identity``): display lookups refuse it.
+    batch_id_ambiguous: bool
     #: The template XML the marker was read from.
     raw: Any
     area_name: str

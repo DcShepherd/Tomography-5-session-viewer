@@ -10,14 +10,14 @@ def processing_charts(rows: tuple[TomogramRow, ...]) -> tuple[IndexChartModel, .
     keys = tuple(row.tomogram.id for row in rows)
     names = tuple(row.tomogram.name for row in rows)
     definitions = (
-        ("thickness", "Specimen thickness", "nm", "Recorded estimates from each program. The slab is reconstructed physical Z extent.", (
+        ("thickness", "Specimen thickness", "nm", "Recorded estimates from each program. Slab is the reconstructed Z extent.", (
             ("warp.ctf_specimen_thickness", "Warp CTF estimate", "Å", .1, "dot"),
             ("imod.tomopitch.specimen_thickness", "IMOD positioning", "nm", 1., "diamond"))),
-        ("residual", "Alignment residual", "nm", "IMOD mean fiducial residual; import into this reconstruction is unverified. Runs can use different settings.", (
+        ("residual", "Alignment residual", "nm", "IMOD mean fiducial residual. Not verified for this reconstruction; runs can use different settings.", (
             ("imod.tiltalign.mean", "IMOD mean", "nm", 1., "dot"),)),
         ("ctf", "CTF fit", "Å", "Recorded Warp CTF resolution estimate; smaller is finer.", (
             ("warp.ctf_resolution", "Warp", "Å", 1., "dot"),)),
-        ("defocus", "Defocus", "µm", "Recorded Warp defocus; positive means underfocus. The recorded sign is retained.", (
+        ("defocus", "Defocus", "µm", "Recorded Warp defocus; positive means underfocus.", (
             ("warp.ctf.defocus", "Warp", "µm", 1., "dot"),)),
     )
     charts = []

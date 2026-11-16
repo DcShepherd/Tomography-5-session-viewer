@@ -8,7 +8,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from tomography_session_browser.services.timeline_service import InferredPause, SessionTimeline, TimelineSegment
 from tomography_session_browser.ui.theme import current_palette
-from tomography_session_browser.ui.widgets.time_chart import TIME_CHART_LEFT_GUTTER, TIME_CHART_RIGHT_GUTTER, format_absolute_time, format_density_bin_duration, format_elapsed, format_elapsed_offset, format_time_axis_tick, time_axis_tick_count
+from tomography_session_browser.ui.widgets.time_chart import TIME_CHART_LEFT_GUTTER, TIME_CHART_RIGHT_GUTTER, elapsed_axis_ticks, format_absolute_time, format_density_bin_duration, format_elapsed, format_elapsed_offset, time_axis_tick_count
 from dataclasses import field
 from tomography_session_browser.ui.timeline.constants import AXIS_HEIGHT_PX, DENSITY_BIN_TARGET, HIGHLIGHT_FADE_ALPHA_FACTOR, HIGHLIGHT_RING_ALPHA, HIGHLIGHT_RING_WIDTH, LANES_TOP_PX, MAX_LANE_LABEL_WIDTH_PX
 from tomography_session_browser.ui.timeline.models import TimelineLane
@@ -682,23 +682,20 @@ class TimelinePainter:
         painter.setPen(QPen(colors["grid"], 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        tick_count = time_axis_tick_count(chart_width)
         metrics = painter.fontMetrics()
-        for index in range(tick_count):
-            fraction = index / (tick_count - 1)
-            x = chart_left + chart_width * fraction
+        span = (end - start).total_seconds()
+        right = chart_left + chart_width
+        for index, offset in enumerate(elapsed_axis_ticks(span, time_axis_tick_count(chart_width))):
+            x = chart_left + chart_width * (offset / span if span > 0 else 0.0)
             painter.drawLine(QPointF(x, lane_top - 3), QPointF(x, axis_top - 5))
-            tick = start + (end - start) * fraction
-            label = format_time_axis_tick(tick, start, end)
+            label = format_elapsed_offset(timedelta(seconds=offset))
             label_width = metrics.horizontalAdvance(label)
-            text_x = x - label_width / 2
-            if index == 0:
-                text_x = chart_left
-            elif index == tick_count - 1:
-                text_x = chart_left + chart_width - label_width
+            text_x = chart_left if index == 0 else min(x - label_width / 2, right - label_width)
             painter.setPen(colors["label"])
             painter.drawText(QPointF(text_x, axis_top + metrics.ascent()), label)
             painter.setPen(QPen(colors["grid"], 1))
+        # The true end of the axis: a grid line, no label.
+        painter.drawLine(QPointF(right, lane_top - 3), QPointF(right, axis_top - 5))
 
 
     @staticmethod

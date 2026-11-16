@@ -7,7 +7,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 from functools import partial
-from typing import Literal
 from pathlib import Path
 from typing import Sequence
 from reportlab.platypus import NextPageTemplate, PageBreak
@@ -31,11 +30,8 @@ from tomography_session_browser.reports.tomogram_slices import (
 from tomography_session_browser.services.volume.memory import VOLUME_MEMORY
 from tomography_session_browser.presentation.report_scope import ReportScope
 from tomography_session_browser.services.output_boundary import check_output_path
-
-
-SLICES, WRITING = "slices", "writing"
-#: progress(stage, done, total): counted slices, then the PDF is being written.
-ReportProgress = Callable[[Literal["slices", "writing"], int, int], None]
+# Defined in reports.progress (no reportlab); still importable from here.
+from tomography_session_browser.reports.progress import SLICES, WRITING, ReportProgress  # noqa: F401
 
 
 def build_session_report(

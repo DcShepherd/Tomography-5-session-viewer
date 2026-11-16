@@ -29,6 +29,7 @@ FILES_SECTIONS = (
         ("Choose an existing output folder. Snapshots reserve a unique filename. A contact sheet requires a new filename and does not replace an existing PDF. Both use the captured view and its recorded rendering recipe.",)),
     HelpSection("files.movies", HelpPage.FILES, "Tomogram movies",
         ("Export movie (Ctrl+E) saves the planes of the view as it was when the dialog opened. Save an H.264 MP4 file, PNG frames, or both. A movie never replaces a file; with PNG frames, its folder also holds a manifest of the rendering recipe.",
+         "In the list, the film shows the number of saved movies of a tomogram. Click it, or right-click the row and select Movies…, to see the movies, newest first, 12 on each page. Each row shows the date and the size of the movie, \"Frames folder\" for PNG frames, or \"Not found: moved or deleted\" when the app cannot find it. Open plays the movie, and the folder button opens its folder. The list does not change or delete a movie file.",
          "The dialog keeps your settings for each tomogram until you close the app, also if you click Cancel. All versions of a tomogram share them, so you can export again at another quality, or make a matched movie of another version. Plane numbers and holds apply only if the two versions have the same grid; if not, the dialog says so.",
          "MP4 export needs FFmpeg with the H.264 encoder (libx264), for example the conda-forge GPL build. On Linux, install it in the app's environment. On Windows and macOS, install it in its own environment and add its program folder to PATH. The README has the commands. Without FFmpeg, you can save PNG frames. The app never downloads FFmpeg.")),
     HelpSection("files.reports", HelpPage.FILES, "Reports and PNG images",
@@ -67,6 +68,8 @@ def help_sections() -> tuple[HelpSection, ...]:
     reading.append(HelpSection("reading.context", HelpPage.READING, "Read a status in its context",
         ("Tilt-series validation, image-list row status and atlas-marker status keep their existing vocabulary and definitions. An unknown planned frame count and a missing image are different findings.",
          "Unresolved relationships keep their explanation. Help does not choose an atlas, batch or other destination on your behalf.")))
+    reading.append(HelpSection("reading.alignment", HelpPage.READING, "Alignment from a Scipion alignment job",
+        ("Load a Scipion reconstruction job and its Etomo or fiducial alignment job. The app compares the tilt angles and transforms that each job recorded. When exactly one alignment job agrees with a reconstruction, its residual and positioning thickness show on that tomogram, with the job name. When two jobs agree, or the values differ, the app shows the reason and uses no job. When the reconstruction has no readable .tlt or .xf and one alignment job has the series, you can select ‘Confirm by name…’ on the warning. Values from that job then have a ‘By name’ tag. An Etomo job adds no tomograms. When all its series link, the job has no row of its own in Project: the reconstruction row names it, and reloads and removes it.",)))
     for prefix, heading, meanings, label in (
         ("validation", "Tilt-series validation", VALIDATION_MEANINGS, display_status_label),
         ("row", "Image-list rows", ROW_MEANINGS, display_status_label),
