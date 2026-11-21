@@ -13,7 +13,7 @@ from tomography_session_browser.services.timeline_service import parse_datetime
 from tomography_session_browser.services.acquisition_metadata import ACQUISITION_SPOT_LABEL, LEGACY_SPOT_LABEL, summarise_acquisition_setting
 from tomography_session_browser.services.tilt_series_validation import TiltSeriesValidation
 from tomography_session_browser.presentation.dashboard.models import DashboardModel
-from tomography_session_browser.presentation.formatting import format_duration_compact
+from tomography_session_browser.presentation.formatting import format_duration_compact, two_decimals
 
 
 def arrow() -> str:
@@ -122,11 +122,14 @@ def format_count_set(values: Sequence[int]) -> str:
 
 
 def format_pixel_size(values: Sequence[float], unit: str) -> str:
+    """A pixel size, or the range of sorted ``values``, to at most two decimals, as in the tilt table.
+
+    A range whose ends round to the same text is that one value.
+    """
     if not values:
         return "n/a"
-    if len(values) == 1:
-        return f"{values[0]:g} {unit}"
-    return f"{values[0]:g} – {values[-1]:g} {unit}"
+    low, high = two_decimals(values[0]), two_decimals(values[-1])
+    return f"{low} {unit}" if low == high else f"{low} – {high} {unit}"
 
 
 def section_floats(tilt: TiltSeries, key: str) -> list[float]:

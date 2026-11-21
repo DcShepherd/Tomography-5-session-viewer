@@ -9,6 +9,7 @@ from __future__ import annotations
 from tomography_session_browser.presentation.help_content import LocalBinding, InteractionKind
 
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta
 from hashlib import sha1
 from math import ceil, floor
@@ -83,6 +84,13 @@ class DefocusScatterPlot(QWidget):
     # ------------------------------------------------------------------ API
 
     def set_model(self, model: DefocusPlotModel | None) -> None:
+        if model is not None and model.x_mode == "absolute_time":
+            # A frame order is not a time, so the two never share one axis:
+            # a time axis shows only timed points (the builders leave untimed
+            # points out and say so in the note).
+            timed = [point for point in model.points if point.acquisition_time is not None]
+            if len(timed) < len(model.points):
+                model = replace(model, points=timed)
         self._model = model
         self._keyboard_point_index = -1
         self._dense_geometry_cache = None
@@ -797,7 +805,7 @@ class DefocusScatterPlot(QWidget):
         return floor(lo * 10) / 10, ceil(hi * 10) / 10
 
     def _point_x(self, point: Any, model: DefocusPlotModel) -> float:
-        if model.x_mode == "absolute_time" and point.acquisition_time is not None:
+        if model.x_mode == "absolute_time":
             return point.acquisition_time.timestamp()
         return float(point.frame_order)
 

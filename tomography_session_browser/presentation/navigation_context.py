@@ -179,7 +179,10 @@ class NavigationContext:
             search_maps=context.search_maps,
             overviews=context.overviews,
         ).resolution
-        if not resolution.unresolved:
+        if not resolution.unresolved or batch_position.linked_overview_id:
+            # A recorded Overview link decides on its own: when it matches no
+            # single Overview, the jump refuses rather than landing on the
+            # Search map's Overview or another image with a batch marker.
             return resolution
         if search_map is not None:
             via_map = resolve_search_map_overview(search_map, overviews=context.overviews)

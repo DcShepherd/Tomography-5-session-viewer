@@ -88,6 +88,8 @@ def sample_native(volume: Volume, matrix: np.ndarray, offset: np.ndarray,
     """
     if not available():
         return False
+    if volume.dtype is not None and np.dtype(volume.dtype) == np.uint8 and not getattr(_reslice, "UNSIGNED_BYTES", 0):
+        return False  # A build from before IMOD unsigned bytes: the NumPy path reads them.
     with compute_lease(cancelled):
         try:
             return sample_with_reuse(volume, matrix, offset, axes, planes, output, budget,

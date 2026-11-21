@@ -2,8 +2,10 @@
 
 ``ReportScopeDialog`` (``ui/report_scope_dialog.py``) collects a
 ``ReportScopeRequest``; ``normalise_report_scope`` turns it into the
-``ReportScope`` the report generator draws, adding the supporting Atlas
-sessions a linked collection needs. Qt-free, so it is tested without a window.
+``ReportScope`` the report generator draws; ``presentation/report_preview.py``
+describes that scope in the dialog. A full atlas overview is in the report
+only when its AT row is ticked; each dataset shows its linked atlas image
+either way. Qt-free, so it is tested without a window.
 """
 
 from __future__ import annotations
@@ -13,12 +15,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
-from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.models import Sample, Session
 from tomography_session_browser.presentation.report_datasets import has_collection_content
 from tomography_session_browser.presentation.report_tomograms import (
-    ReportTomograms, ScopedTomograms, member_slice_plans, select_report_tomograms, tomogram_preview_lines,
+    ReportTomograms, ScopedTomograms, member_slice_plans, select_report_tomograms,
 )
 from tomography_session_browser.presentation.tomogram_selection import FolderTomograms
 from tomography_session_browser.presentation.tomogram_slices import SliceRequest
@@ -43,7 +44,6 @@ class ReportScopeRequest:
     group_keys: frozenset[str]
     session_keys: frozenset[str]
     sample_keys: frozenset[str] = frozenset()
-    include_atlas_overview: bool = False
     include_exposure_thumbnails: bool = False
     #: The remembered preferences (T and S in D4 §5.1), not effective inclusion.
     include_tomograms: bool = False
@@ -66,9 +66,7 @@ class ReportScope:
     project_title: str
     project_groups: tuple[ProjectReportGroup, ...]
     default_filename: str
-    supporting_session_keys: frozenset[str] = frozenset()
     atlas_context_sessions: tuple[Session, ...] = ()
-    include_atlas_overview: bool = False
     #: Add an image of each tilt series' exposure area from its Thumbnails stack.
     include_exposure_thumbnails: bool = False
     #: Where the Save dialog starts, before the output-boundary check.
@@ -105,62 +103,9 @@ class ReportScope:
         return self.prints_tomograms and self.include_slices and self.slices_available
 
 
-def describe_report_scope(scope: "ReportScope") -> str:
-    """Describe what the report will actually contain.
-
-    Built from the *normalised* scope rather than from the checkboxes, because
-    normalisation adds supporting Atlas sessions the user never ticked. A
-    preview derived from the selection would quietly under-report what the PDF
-    is about to include.
-    """
-
-    if scope.folder_report:
-        assert scope.tomograms is not None
-        return "\n".join(tomogram_preview_lines(scope.tomograms, scope.prints_slices))
-    if not scope.sessions:
-        return "Nothing selected"
-
-    atlas_sessions = [
-        session for session in scope.sessions if session.kind == SessionKind.ATLAS_SCREENING
-    ]
-    supporting_atlas_sessions = [
-        session
-        for session in atlas_sessions
-        if session_key(session) in scope.supporting_session_keys
-    ]
-    selected_atlas_sessions = [
-        session
-        for session in atlas_sessions
-        if session_key(session) not in scope.supporting_session_keys
-    ]
-    collection_sessions = [
-        session for session in scope.sessions if session.kind != SessionKind.ATLAS_SCREENING
-    ]
-    samples = sum(len(reportable_samples(session)) for session in collection_sessions)
-    session_level = sum(not reportable_samples(session) for session in collection_sessions)
-
-    parts: list[str] = []
-    if samples:
-        parts.append(count_phrase(samples, "collection sample"))
-    if session_level:
-        parts.append(count_phrase(session_level, "collection session"))
-    if selected_atlas_sessions:
-        parts.append(count_phrase(len(selected_atlas_sessions), "Atlas session"))
-    if supporting_atlas_sessions:
-        # Named explicitly: these are pulled in by normalisation, so a reader
-        # who did not tick them should still see them coming.
-        parts.append(count_phrase(len(supporting_atlas_sessions), "supporting Atlas session"))
-    if not parts:
-        parts.append(count_phrase(len(scope.sessions), "session"))
-    text = "Report will include " + " and ".join(parts)
-    if collection_sessions:
-        text += ". Available linked atlases appear beside each dataset."
-        if scope.include_exposure_thumbnails:
-            text += " Each tilt-series table is followed by its exposure thumbnails."
-    if scope.prints_tomograms:
-        assert scope.tomograms is not None
-        text = "\n".join([text, *tomogram_preview_lines(scope.tomograms, scope.prints_slices)])
-    return text
+#: The first preview line of a folder report (plan Q8 A): one tick can change the
+#: report type, so the change is said, not made silently.
+FOLDER_REPORT_LINE = "Only processing folders are ticked. This makes a folder report."
 
 
 def preset_folders(review_scope: object, report_scope: object, snapshot: ReportTomograms | None) -> frozenset[str]:
@@ -193,7 +138,6 @@ def normalise_report_scope(
     groups_by_key = {group.key: group for group in groups}
     sessions_by_key = {session_key(session): session for session in loaded_sessions}
     selected_session_ids: set[int] = set()
-    supporting_session_ids: set[int] = set()
     selected_samples_by_session: dict[int, list[Sample]] = {}
     explicit_labels: list[str] = []
     report_groups: list[ProjectReportGroup] = []
@@ -202,35 +146,22 @@ def normalise_report_scope(
         if group.key not in request.group_keys:
             continue
         group_sessions = [session for session in group.sessions if session_key(session) in sessions_by_key]
-        primary_sessions = group_sessions
         if group.kind == "linked":
-            primary_sessions = [
+            # A linked group's tick means its collections; its atlas only when the AT row is ticked.
+            group_sessions = [
                 session for session in group_sessions
                 if _is_collection_session(session) or session_key(session) in request.session_keys
             ]
-            if request.include_atlas_overview:
-                primary_ids = {id(session) for session in primary_sessions}
-                supporting_session_ids.update(
-                    id(session) for session in group_sessions if id(session) not in primary_ids
-                )
-            else:
-                group_sessions = primary_sessions
         if not group_sessions:
             continue
-        selected_session_ids.update(id(session) for session in primary_sessions)
+        selected_session_ids.update(id(session) for session in group_sessions)
         explicit_labels.append(group.display_name)
         report_groups.append(_project_report_group(group.display_name, group, group_sessions, use_group_kind=True))
 
     covered_by_group = set(selected_session_ids)
-    explicit_sessions: list[Session] = []
-    for session in loaded_sessions:
-        key = session_key(session)
-        if key not in request.session_keys or id(session) in covered_by_group:
-            continue
-        explicit_sessions.append(session)
-        selected_session_ids.add(id(session))
-        explicit_labels.append(session.name or session.path.name)
-
+    explicit_sessions = [session for session in loaded_sessions
+                         if session_key(session) in request.session_keys and id(session) not in covered_by_group]
+    selected_session_ids.update(id(session) for session in explicit_sessions)
     for session in loaded_sessions:
         if id(session) in selected_session_ids:
             continue
@@ -239,22 +170,35 @@ def normalise_report_scope(
             for sample in session.samples
             if sample_key(session, sample) in request.sample_keys
         ]
-        if not selected_samples:
-            continue
-        selected_samples_by_session[id(session)] = selected_samples
-        explicit_labels.extend(sample.name or sample.path.name for sample in selected_samples)
+        if selected_samples:
+            selected_samples_by_session[id(session)] = selected_samples
+
+    # A ticked atlas joins the group of each ticked collection or sample of its own
+    # linked group (plan B5, Q6): the report keeps the dataset's name and the cover
+    # lists one group, as the removed supporting-overview option gave them. An atlas
+    # ticked with no dataset of its group is an atlas-only report, as before.
+    def linked_atlas(session: Session) -> Session | None:
+        group = _group_for_session(groups_by_key.values(), session)
+        atlas = group.atlas_session if group is not None and _is_collection_session(session) else None
+        return atlas if atlas is not None and any(atlas is chosen for chosen in explicit_sessions) else None
+
+    datasets = [session for session in explicit_sessions if _is_collection_session(session)]
+    datasets += [session for session in loaded_sessions if id(session) in selected_samples_by_session]
+    joined = {id(atlas) for atlas in map(linked_atlas, datasets) if atlas is not None}
+
+    explicit_labels.extend(session.name or session.path.name for session in explicit_sessions if id(session) not in joined)
+    for session in loaded_sessions:
+        explicit_labels.extend(sample.name or sample.path.name for sample in selected_samples_by_session.get(id(session), ()))
 
     for session in explicit_sessions:
-        group = _group_for_session(groups_by_key.values(), session)
-        group_sessions = [session]
-        if request.include_atlas_overview and _is_collection_session(session) and group is not None and group.atlas_session is not None:
-            supporting_session_ids.add(id(group.atlas_session))
-            group_sessions = [group.atlas_session, session]
+        if id(session) in joined:
+            continue
+        atlas = linked_atlas(session)
         report_groups.append(
             _project_report_group(
                 session.name or session.path.name,
-                group,
-                group_sessions,
+                _group_for_session(groups_by_key.values(), session),
+                [atlas, session] if atlas is not None else [session],
                 fallback_kind="AT" if session.kind == SessionKind.ATLAS_SCREENING else "DC",
             )
         )
@@ -263,29 +207,20 @@ def normalise_report_scope(
         selected_samples = selected_samples_by_session.get(id(session))
         if not selected_samples:
             continue
-        group = _group_for_session(groups_by_key.values(), session)
-        if request.include_atlas_overview and _is_collection_session(session) and group is not None and group.atlas_session is not None:
-            supporting_session_ids.add(id(group.atlas_session))
+        atlas = linked_atlas(session)
         filtered_session = _filtered_session_for_samples(session, selected_samples)
         report_groups.append(
             _project_report_group(
                 session.name or session.path.name,
-                group,
-                [group.atlas_session, filtered_session]
-                if request.include_atlas_overview and group is not None and group.atlas_session is not None and _is_collection_session(session)
-                else [filtered_session],
+                _group_for_session(groups_by_key.values(), session),
+                [atlas, filtered_session] if atlas is not None else [filtered_session],
                 fallback_kind="DC",
             )
         )
 
-    # An Atlas the reviewer selected explicitly is selected content even when
-    # a chosen collection also needs it. Supporting provenance applies only to
-    # sessions introduced by normalisation.
-    supporting_session_ids.difference_update(selected_session_ids)
-    selected_or_supporting = selected_session_ids | supporting_session_ids
     selected_sessions_list: list[Session] = []
     for session in loaded_sessions:
-        if id(session) in selected_or_supporting:
+        if id(session) in selected_session_ids:
             selected_sessions_list.append(session)
             continue
         selected_samples = selected_samples_by_session.get(id(session))
@@ -308,13 +243,7 @@ def normalise_report_scope(
         project_groups=tuple(_dedupe_project_report_groups(report_groups)),
         default_filename=f"{_safe_filename(filename_label)}_report.pdf",
         atlas_context_sessions=tuple(loaded_sessions),
-        include_atlas_overview=request.include_atlas_overview,
         include_exposure_thumbnails=request.include_exposure_thumbnails,
-        supporting_session_keys=frozenset(
-            session_key(session)
-            for session in loaded_sessions
-            if id(session) in supporting_session_ids
-        ),
         default_directory=selected_sessions[0].path.parent,
         tomograms=(select_report_tomograms(snapshot, selected_sessions, request.processing_source_ids)
                    if snapshot is not None else None),

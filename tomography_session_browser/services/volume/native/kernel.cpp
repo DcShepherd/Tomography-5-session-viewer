@@ -108,6 +108,7 @@ int reslice(const Grid &grid, const double *m, const double *offset,
     try {
         switch(g->mode) {
         case 0: run<int8_t>(*g,m,offset,h,v,n,first,last,top,end,threads,output,planes,fresh); break;
+        case 100: run<uint8_t>(*g,m,offset,h,v,n,first,last,top,end,threads,output,planes,fresh); break;
         case 1: run<int16_t>(*g,m,offset,h,v,n,first,last,top,end,threads,output,planes,fresh); break;
         case 2: run<float>(*g,m,offset,h,v,n,first,last,top,end,threads,output,planes,fresh); break;
         case 6: run<uint16_t>(*g,m,offset,h,v,n,first,last,top,end,threads,output,planes,fresh); break;

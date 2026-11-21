@@ -20,7 +20,7 @@ widget, no opacity effect.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 import math
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
@@ -46,7 +46,9 @@ from PySide6.QtWidgets import (
 )
 import shiboken6
 
-from tomography_session_browser.services.session_intake import DroppedFolder, FolderCheck, SessionIntake
+from tomography_session_browser.services.session_intake import (
+    SELECT_AFTER_RELEASE, DroppedFolder, FolderCheck, SessionIntake,
+)
 from tomography_session_browser.ui.icons import themed_icon
 from tomography_session_browser.ui.motion import TICKER, ease_out_cubic, motion_enabled
 from tomography_session_browser.presentation.design_tokens import (
@@ -114,7 +116,7 @@ def paint_glyph(painter: QPainter, name: str, rect: QRectF, colour: QColor, *, s
     """Paint a stroke glyph (24-unit design) into ``rect``.
 
     Names: ``folder``, ``folder-down``, ``folder-plus``, ``folder-alert``,
-    ``folder-x``, ``check-circle``, ``x-circle``, ``info``, ``alert``, ``x``.
+    ``folder-x``, ``check-circle``, ``x-circle``, ``help-circle``, ``info``, ``alert``, ``x``.
     """
 
     painter.save()
@@ -149,9 +151,16 @@ def paint_glyph(painter: QPainter, name: str, rect: QRectF, colour: QColor, *, s
         elif name == "folder-x":
             line(9.5, 11.0, 14.5, 16.0)
             line(14.5, 11.0, 9.5, 16.0)
-    elif name in ("check-circle", "x-circle", "info"):
+    elif name in ("check-circle", "x-circle", "help-circle", "info"):
         painter.drawEllipse(QPointF(12.0, 12.0), 9.0, 9.0)
-        if name == "check-circle":
+        if name == "help-circle":
+            hook = QPainterPath()
+            hook.arcMoveTo(QRectF(9.5, 6.5, 5.0, 5.0), 180.0)
+            hook.arcTo(QRectF(9.5, 6.5, 5.0, 5.0), 180.0, -180.0)
+            hook.cubicTo(14.5, 11.0, 12.0, 11.0, 12.0, 13.0)
+            painter.drawPath(hook)
+            dot(12.0, 16.2)
+        elif name == "check-circle":
             tick = QPainterPath()
             tick.moveTo(8.5, 12.5)
             tick.lineTo(11.0, 15.0)
@@ -341,7 +350,9 @@ _ROW_PX = 34.0
 _ROW_PAD_PX = 7.0
 #: Badge and glyph columns of a row: 10 + 26 + 10 before the text, 10 + 16 + 10 after.
 _ROW_CHROME_PX = 82.0
-_REASON_LINES = 3
+#: A row with up to this many lines under its name centres its badge; a taller
+#: row puts the badge on the name line (owner D5 a board). The text is never cut.
+_CENTRED_BADGE_LINES = 3
 _ROW_GAP_PX = 6.0
 
 
@@ -492,17 +503,9 @@ class SessionDropOverlay(QWidget):
         note_h = text_height(note_font, intake.footnote)
         fixed = _EMBLEM_PX + 18.0 + title_h + 4.0 + detail_h + (12.0 + note_h if note_h else 0.0)
         available = bounds.height() - 2.0 * (BRACKET_INSET_PX + SPACE_XL) - fixed - 18.0
-        rows: list[DroppedFolder] = []
-        used = 0.0
         more_h = QFontMetrics(note_font).height() + 4.0
-        for index, folder in enumerate(intake.folders):
-            height = self._row_height(folder, width, name_font, note_font)
-            remaining = len(intake.folders) - index - 1
-            reserve = more_h if remaining else 0.0
-            if used + height + reserve > available and rows:
-                break
-            rows.append(folder)
-            used += height + _ROW_GAP_PX
+        rows = self._shown_rows(intake.folders, width, available, name_font, note_font)
+        used = sum(self._row_height(folder, width, name_font, note_font) + _ROW_GAP_PX for folder in rows)
         hidden = len(intake.folders) - len(rows)
         rows_h = max(0.0, used - _ROW_GAP_PX) + (more_h if hidden else 0.0)
         total = fixed + (18.0 + rows_h if rows else 0.0)
@@ -550,19 +553,55 @@ class SessionDropOverlay(QWidget):
             painter.drawText(QRectF(left, y, width, note_h), wrap, intake.footnote)
 
     @staticmethod
+    def _row_note(folder: DroppedFolder) -> str:
+        """The row's second line: why it will not load, or that the load will ask (D14 a)."""
+
+        return folder.reason if folder.problem else SELECT_AFTER_RELEASE if folder.asks else ""
+
+    def _shown_rows(
+        self, folders: Sequence[DroppedFolder], width: float, available: float, name_font: QFont, note_font: QFont
+    ) -> list[DroppedFolder]:
+        """The rows that fit in ``available``, in order; "and N more" stands for the rest.
+
+        The first row always shows. A row that does not fit, with the space for
+        "and N more" when rows follow it, ends the list.
+        """
+
+        rows: list[DroppedFolder] = []
+        used = 0.0
+        more_h = QFontMetrics(note_font).height() + 4.0
+        for index, folder in enumerate(folders):
+            height = self._row_height(folder, width, name_font, note_font)
+            reserve = more_h if index < len(folders) - 1 else 0.0
+            if used + height + reserve > available and rows:
+                break
+            rows.append(folder)
+            used += height + _ROW_GAP_PX
+        return rows
+
+    @staticmethod
     def _reason_height(folder: DroppedFolder, width: float, note_font: QFont) -> float:
-        """The reason wraps, up to three lines: a narrow panel still says why."""
+        """The whole reason, wrapped (owner D5 a): a narrow panel still says why and what to do."""
 
         metrics = QFontMetrics(note_font)
         text_width = int(max(0.0, width - _ROW_CHROME_PX))
-        wrapped = metrics.boundingRect(0, 0, text_width, 10_000, int(Qt.TextFlag.TextWordWrap), folder.reason).height()
-        return float(min(wrapped, metrics.lineSpacing() * _REASON_LINES))
+        note = SessionDropOverlay._row_note(folder)
+        return float(metrics.boundingRect(0, 0, text_width, 10_000, int(Qt.TextFlag.TextWordWrap), note).height())
 
     def _row_height(self, folder: DroppedFolder, width: float, name_font: QFont, note_font: QFont) -> float:
-        if not folder.problem:
+        if not self._row_note(folder):
             return _ROW_PX
         name_h = QFontMetrics(name_font).height()
         return _ROW_PAD_PX * 2.0 + name_h + self._reason_height(folder, width, note_font)
+
+    @staticmethod
+    def _badge_rect(rect: QRectF, name_font: QFont, note_font: QFont) -> QRectF:
+        """Centred on a row of up to three lines under the name; on the name line of a taller row."""
+
+        name_h = QFontMetrics(name_font).height()
+        centred = _ROW_PAD_PX * 2.0 + name_h + QFontMetrics(note_font).lineSpacing() * _CENTRED_BADGE_LINES
+        centre_y = rect.center().y() if rect.height() <= centred + 0.5 else rect.top() + _ROW_PAD_PX + name_h / 2.0
+        return QRectF(rect.left() + 10.0, centre_y - 9.0, 26.0, 18.0)
 
     def _paint_emblem(
         self, painter: QPainter, palette: ThemePalette, tone: QColor, intake: SessionIntake, centre: QPointF
@@ -617,18 +656,27 @@ class SessionDropOverlay(QWidget):
         note_font: QFont,
     ) -> None:
         bad = tone_colour(palette, "invalid")
+        warn = tone_colour(palette, "warn")
         card = rect.adjusted(0.5, 0.5, -0.5, -0.5)
         if folder.problem:
             painter.setPen(QPen(_with_alpha(bad, 0.24), 1.0))
             painter.setBrush(_with_alpha(bad, 0.06))
-        else:
+        else:  # A folder that will ask keeps the ready card; its badge, line and mark carry the tone (R1 board).
             painter.setPen(QPen(QColor(palette.border), 1.0))
             painter.setBrush(_with_alpha(palette.surface, 0.92))
         painter.drawRoundedRect(card, RADIUS_CONTROL, RADIUS_CONTROL)
 
         centre_y = rect.center().y()
-        badge = QRectF(rect.left() + 10.0, centre_y - 9.0, 26.0, 18.0)
-        if folder.badge:
+        badge = self._badge_rect(rect, name_font, note_font)
+        if folder.asks:
+            dashed = QPen(warn, 1.0)
+            dashed.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(dashed)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(badge.adjusted(0.5, 0.5, -0.5, -0.5), RADIUS_CONTROL, RADIUS_CONTROL)
+            painter.setPen(warn)
+            badge_text = folder.badge
+        elif folder.badge:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(palette.surface_hi))
             painter.drawRoundedRect(badge, RADIUS_CONTROL, RADIUS_CONTROL)
@@ -646,7 +694,9 @@ class SessionDropOverlay(QWidget):
         painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, badge_text)
 
         mark = QRectF(rect.right() - 10.0 - 16.0, centre_y - 8.0, 16.0, 16.0)
-        if folder.ready:
+        if folder.asks:
+            paint_glyph(painter, "help-circle", mark, warn, stroke=1.8)
+        elif folder.ready:
             paint_glyph(painter, "check-circle", mark, tone_colour(palette, "valid"), stroke=1.8)
         elif folder.status == FolderCheck.UNCHECKED:
             paint_glyph(painter, "info", mark, QColor(palette.text_muted), stroke=1.8)
@@ -658,16 +708,16 @@ class SessionDropOverlay(QWidget):
         name_metrics = QFontMetrics(name_font)
         name = name_metrics.elidedText(folder.name, Qt.TextElideMode.ElideMiddle, int(text_width))
         painter.setFont(name_font)
-        if folder.problem:
+        if note := self._row_note(folder):
             painter.setPen(QColor(palette.text))
             name_rect = QRectF(text_left, rect.top() + _ROW_PAD_PX, text_width, name_metrics.height())
             painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
             painter.setFont(note_font)
-            painter.setPen(bad)
+            painter.setPen(bad if folder.problem else warn)
             painter.drawText(
                 QRectF(text_left, name_rect.bottom(), text_width, self._reason_height(folder, rect.width(), note_font)),
                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop) | int(Qt.TextFlag.TextWordWrap),
-                folder.reason,
+                note,
             )
         else:
             painter.setPen(QColor(palette.text_strong))

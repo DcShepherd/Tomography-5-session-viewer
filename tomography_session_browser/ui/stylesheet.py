@@ -96,6 +96,9 @@ def _session_intake_rules(palette: ThemePalette) -> str:
     bad_on_surface = readable_tone(palette.chart_red, palette.surface, palette.text_strong)
     bad_on_panel = readable_tone(palette.chart_red, palette.panel, palette.text_strong)
     warn = readable_tone(palette.chart_amber, palette.surface_alt, palette.text_strong)
+    warn_on_surface = readable_tone(palette.chart_amber, palette.surface, palette.text_strong)
+    warn_on_panel = readable_tone(palette.chart_amber, palette.panel, palette.text_strong)
+    amber_r, amber_g, amber_b = hex_rgb(palette.chart_amber)
     recent_chip = readable_tone(palette.link_text, palette.panel, palette.text_strong)
     return (
         # Link text reads below the floor on the well's panel. At rest only: hover,
@@ -107,6 +110,12 @@ def _session_intake_rules(palette: ThemePalette) -> str:
         f'QLabel#queueCount[tone="good"] {{ color: {good}; }}\n'
         f'QLabel#queueCount[tone="bad"] {{ color: {bad_on_surface}; }}\n'
         f"QLabel#dropReceiptSkipped {{ color: {warn}; }}\n"
+        # A folder the load will ask about (rule 5): the warning tone, not the refusal red (owner D14 a).
+        f'QFrame#queuedFolderRow[tone="warn"] {{ background: rgba({amber_r}, {amber_g}, {amber_b}, 14); }}\n'
+        f'QLabel#queueCount[tone="warn"] {{ color: {warn_on_surface}; }}\n'
+        f'QLabel#queuedFolderNote, QLabel#queuedFolderKind[tone="warn"] {{ color: {warn_on_panel}; }}\n'
+        f'QLabel#queuedFolderBadge[tone="warn"] {{ background: transparent; border: 1px dashed {warn_on_panel}; '
+        f"color: {warn_on_panel}; }}\n"
     )
 
 

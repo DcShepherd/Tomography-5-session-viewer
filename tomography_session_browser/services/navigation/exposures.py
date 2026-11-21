@@ -437,10 +437,12 @@ def resolve_search_tile_for_exposure_marker(
     primary = [tile for tile in candidates if tile.metadata.get("ExposureIsPrimary") is True]
     if exposure_index in (None, 0) and len(primary) == 1:
         return navigable_resolution(primary[0], provenance=EXPOSURE_SEARCH_PROVENANCE, explanation=EXPOSURE_SEARCH_FOUND)
-    if area_keys and len(candidates) > 1:
+    named_for_others = all(normalise_exposure_key(tile.metadata.get("ExposureAreaName")) for tile in candidates)
+    if area_keys and (len(candidates) > 1 or named_for_others):
         # The exposure is named and none of its batch's tiles carries that
         # name: they belong to its other exposures. Nothing was recorded for
-        # this one, which is unresolved, not a choice between them.
+        # this one, which is unresolved, not a choice between them. This
+        # holds for one tile too, when it records another exposure's name.
         others = ", ".join(sorted(str(tile.metadata.get("ExposureAreaName") or tile.name) for tile in candidates))
         return unresolved_resolution(
             provenance=EXPOSURE_SEARCH_PROVENANCE,

@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from tomography_session_browser.domain.display_names import count_phrase, session_kind_label
+from tomography_session_browser.domain.folder_type import ReadAs, TypeFoundBy
 from tomography_session_browser.domain.models import Atlas, BatchPosition, Sample, Session, TiltSeries
 from tomography_session_browser.domain.units import ANGSTROM_PER_PIXEL
 from tomography_session_browser.presentation.describe.metadata import (
@@ -25,6 +26,7 @@ from tomography_session_browser.presentation.describe.metadata import (
     tilt_pixel_size_text,
 )
 from tomography_session_browser.presentation.describe.sections import emit_section
+from tomography_session_browser.presentation.folder_type import selection_text
 from tomography_session_browser.presentation.read_times import READ_INTO_APP, SourceReadTimes, read_time_text
 from tomography_session_browser.presentation.workspace import EntityKind, display_atlases, session_entities
 from tomography_session_browser.services.acquisition_metadata import ACQUISITION_SPOT_LABEL, SEARCH_SPOT_LABEL
@@ -42,6 +44,12 @@ class SourceFolder:
     path: Path
     #: When the app read the folder (D16); unknown, no row.
     read_at: datetime | None = None
+    #: How the type was found, when no record says it (owner D15 a): "Tilt series · your selection".
+    read_as: str = ""
+
+
+#: The selection a session's folder was read by: a session read by selection holds tilt series.
+SESSION_READ_AS = selection_text(ReadAs.TILT_SERIES, capital=True)
 
 
 def session_folder(session: Session, read_times: SourceReadTimes | None = None) -> SourceFolder:
@@ -50,11 +58,14 @@ def session_folder(session: Session, read_times: SourceReadTimes | None = None) 
     kind = session_kind_label(session.kind)
     samples = count_phrase(len(session.samples), "sample") if session.samples else ""
     read_at = read_times.read_at(session) if read_times is not None else None
-    return SourceFolder(session.name, " · ".join(part for part in (kind, samples) if part), session.path, read_at)
+    return SourceFolder(session.name, " · ".join(part for part in (kind, samples) if part), session.path, read_at,
+                        SESSION_READ_AS if session.found_by == TypeFoundBy.SELECTION else "")
 
 
-def sample_folder(sample: Sample) -> SourceFolder:
-    return SourceFolder(sample.name, "", sample.path)
+def sample_folder(sample: Sample, selected: frozenset[str] = frozenset()) -> SourceFolder:
+    """A sample's folder; ``selected`` holds the ids of samples whose session was read by selection."""
+
+    return SourceFolder(sample.name, "", sample.path, read_as=SESSION_READ_AS if sample.id in selected else "")
 
 
 def sessions_summary_lines(sessions: Sequence[Session], read_times: SourceReadTimes | None = None) -> list[str]:
@@ -102,6 +113,8 @@ def _folder_rows(folders: Sequence[SourceFolder]) -> list[str]:
         if folder.detail:
             rows.append(folder.detail)
         rows.append(f"Path: {folder.path}")
+        if folder.read_as:
+            rows.append(f"Read as: {folder.read_as}")
         if folder.read_at is not None:
             rows.append(f"{READ_INTO_APP}: {read_time_text(folder.read_at)}")
     return rows

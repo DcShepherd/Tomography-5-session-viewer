@@ -1,10 +1,12 @@
 """One attempt travels unchanged through parsing, preparation and publication."""
 from __future__ import annotations
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from threading import Event
 from typing import TYPE_CHECKING
 
 from tomography_session_browser.diagnostics.profiling import LoadingProfiler
+from tomography_session_browser.domain.folder_type import ReadAs
 from tomography_session_browser.domain.models import Session
 from tomography_session_browser.domain.tomograms import ProcessingSource
 from tomography_session_browser.presentation.workspace import Scope, Workspace
@@ -19,6 +21,8 @@ class LoadJob:
     profile: LoadingProfiler
     replace: bool
     previous: Session | ProcessingSource | None = None
+    #: The kept selections when the attempt started (``read_as_selections``): the worker reads no settings.
+    selections: Mapping[str, ReadAs] = field(default_factory=dict, compare=False)
 
 
 @dataclass(frozen=True, slots=True)

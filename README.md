@@ -8,7 +8,7 @@ The application is read-only. It does not edit, repair, rename, move or change f
 
 Save PDF reports, images, snapshots and movies in a folder that is not in a loaded source folder. This rule applies to all loaded folders, also when they are not in the selected scope.
 
-This is version 1.2.0. The [change log](CHANGELOG.md) lists the changes in each release.
+This is version 1.2.1. The [change log](CHANGELOG.md) lists the changes in each release.
 
 ## Supported platforms
 
@@ -274,19 +274,19 @@ Use the export button above the zoom control, or press **Ctrl+S**, to save the c
 
 Select **Report**. Select a linked group, a session or data-collection samples. Each dataset includes its linked atlas when the atlas session is loaded and the link is not ambiguous. The default report does not include the full supporting screening session.
 
-Select **Also include supporting atlas-session overviews** to add the full screening overview. This can add atlases that are not related. Select an Atlas session alone to make an atlas-only report. Examine the scope preview. Then select **Generate report**.
+Tick the atlas row (AT) to add the full screening overview. This can add atlases that are not related. Tick an Atlas session alone to make an atlas-only report. Examine **In this report** on the right. It shows the parts of the report in their sequence, with their counts. Then select **Generate report**.
 
-Select **Include exposure thumbnails for each tilt series** to add an image of each exposure area. Tomography 5 keeps a smaller copy of each tilt-series stack in a `Thumbnails` folder adjacent to the stacks. An **Exposures** section follows the tilt-series table of the dataset. It shows one frame from each copy, with four frames on a page.
+Select **Exposure thumbnails** to add an image of each exposure area. Tomography 5 keeps a smaller copy of each tilt-series stack in a `Thumbnails` folder adjacent to the stacks. An **Exposures** section follows the tilt-series table of the dataset. It shows one frame from each copy, with four frames on a page.
 
 - The frame is the one nearest 0°. For a lamella session, the frame is the one nearest the pretilt. The pretilt is the angle at which the tilt series started.
 - The section gives the stage tilt and the pretilt one time.
-- Each image shows the tilt-series status, acquisition time, camera dose of that image (**Cam. dose**) and stage position.
+- Each image shows the tilt-series status, acquisition time and camera dose of that image (**Cam. dose**).
 - An image that has no frame at the correct angle shows a warning.
 - The report gives the name of each tilt series that has no thumbnail or no recorded tilt angles.
 
 The application keeps this selection.
 
-When processing folders are loaded, the dialog also shows them. Tick a folder and select **Include linked tomograms** to add a Tomograms section to each dataset. Select **Include central slices** to add one image of each linked tomogram. Tick only folders to make a folder report. A folder report shows all tomograms in the ticked folders. For each tomogram that has no link, it gives the cause.
+When processing folders are loaded, the dialog also shows them. Tick a folder and select **Linked tomograms** to add a Tomograms section to each dataset. Select **Central slices** to add one image of each linked tomogram. Tick only folders to make a folder report. A folder report shows all tomograms in the ticked folders. For each tomogram that has no link, it gives the cause.
 
 The report starts with a summary page. This page has count cards, a contents list and grouped warnings. The contents list has page numbers and the tilt-series outcomes of each dataset.
 
@@ -314,11 +314,19 @@ Select **Load sessions** (Ctrl+O), or drag the folder onto the project panel. Se
 
 A reconstruction folder can hold the files directly, or one folder for each tomogram. The application does not search other folders near the selected folder. It shows a warning for each file that it cannot identify.
 
+For Warp, you can also select one of the output folders in the Warp processing folder, for example `warp_tiltseries/reconstruction/deconv`. The application then loads the full Warp processing folder.
+
+The Warp processing folder can be unavailable, for example in a copy of the `deconv` folder only. Then the application reads the volumes that have a Warp file name (`<name>_<pixel size>Apx`) as tomograms. The Context panel shows **Read as: tomograms, by Warp file names**. Links to tilt series, CTF data and frame data are not available. The application does not load a copy of a Warp CTF, power-spectrum or frame folder without its Warp processing folder.
+
 For Scipion, select one job at a time. The application does not load the project folder or its `Runs` folder, because it does not search the jobs in them. The job folder and its `extra` folder are the same source. The application keeps the full job folder unchanged, also its `logs` folder. Tomograms in `extra/<tilt series>/` get the name of their tilt series. In a cryoCARE job, the application reads `<tilt series>_denoised/<tilt series>_.mrc` as the denoised volume. Files that end in `_even` or `_odd` are the half sets of the tomogram of the same name.
 
 Load a Scipion Etomo job (`ProtImodEtomo`) or fiducial alignment job (`ProtImodFiducialAlignment`) with its reconstruction job to see the alignment values on the tomograms. An alignment job adds no tomograms. The application compares the tilt angles and transforms that the two jobs recorded. When exactly one alignment job agrees, its residuals, and the positioning thickness of an Etomo job in nm, show on the tomogram with the job name. When no job agrees, or two jobs agree, the tomogram shows the reason. When the reconstruction job has no readable `.tlt` or `.xf`, you can select **Confirm by name…** on the warning. When all the series of an alignment job link, the job has no row of its own in the project tree. The reconstruction row names it, and reloads and removes it with the reconstruction.
 
 A cryoCARE job records in `extra/predict_config/predict_config_<tilt series>.json` which half sets it denoised. When the reconstruction with these half sets is loaded, the denoised tomogram shows the recorded values of that reconstruction, and the Context panel names it.
+
+Some MRC files have no MDOC file, no extended header and no Warp file name. The application cannot find the type of these files. In the list, their folder shows **Select at load**.
+
+When you load the folders, the application shows one window for each folder of these files. Select **Tomograms**, **Tilt series** or **Do not load**. The application keeps your selection for that folder in its settings, not in the folder. It does not show the window again for that folder. To change the selection, select **Change…** in the Context panel.
 
 ### 2. Select a tomogram and read its planes
 
@@ -446,13 +454,21 @@ python -m tomography_session_browser.main
 - For multi-grid collection, make sure that the selected folder contains Session.dm and sample folders.
 - Read each application warning. An acquisition that is not complete can have missing previews or unresolved links.
 
+### The application does not accept a Warp folder
+
+The application shows "This folder has Warp output, but its Warp project folder was not found." The selected folder is a Warp CTF, power-spectrum or frame folder, or a Warp folder that has no volumes. Select the Warp processing folder. It contains `warp_tiltseries.settings`, or the `warp_tiltseries` and `tomostar` folders.
+
+### Tomograms show as tilt series, or tilt series show as tomograms
+
+If you selected the incorrect type for MRC files that have no type, select **Change…** in the Context panel. Then select the other type. The application loads the folder again.
+
 ### Linux shows a Qt platform-plugin error
 
 Run the application in a graphical desktop session. Do not use an SSH session that has no display. If the error gives the name of a missing library, use the Qt or PySide instructions for your Linux distribution.
 
 ### The application cannot save settings
 
-The application writes a warning to its log when the user configuration folder is read-only. You can continue to review sessions and make reports. The application does not keep settings in source folders.
+The application writes a warning to its log when the user configuration folder is read-only. You can continue to review sessions and make reports. A type that you select for MRC files stays only until you close the application. The application does not keep settings in source folders.
 
 ## Developer use
 

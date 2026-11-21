@@ -1,7 +1,6 @@
 """The marker entry points: one builder per image kind, and
 ``markers_for_object`` choosing among them."""
 from __future__ import annotations
-from tomography_session_browser.services.tilt_series_validation import batch_has_failed_tilt
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -73,8 +72,8 @@ from tomography_session_browser.services.markers.shapes import (
     batch_tooltip,
     bbox_intersects,
     filter_off_image_markers,
-    mark_markers_failed,
 )
+from tomography_session_browser.services.markers.outcome_tones import apply_outcome_tones
 from tomography_session_browser.services.markers.inferred_failed import inferred_failed_tilt_markers
 
 
@@ -481,11 +480,6 @@ def overview_markers(overview: Overview, context: MarkerContext) -> list[ImageMa
         marker = batch_marker_in_frame(overview.id, frame, batch, token=token)
         if marker is not None:
             overlay_status = aggregate_batch_position_status(batch, status_context)
-            batch_failed = batch_has_failed_tilt(batch, context.tilt_series, failed_set)
-            if batch_failed:
-                marker.status = "failed"
-            elif overlay_status.status == AtlasMarkerStatus.QUEUED:
-                marker.status = AtlasMarkerStatus.QUEUED
             markers.append(marker)
             template_markers = template_markers_in_frame(
                 overview.id,
@@ -497,8 +491,8 @@ def overview_markers(overview: Overview, context: MarkerContext) -> list[ImageMa
                 queued_reference=queued_reference,
                 token=token,
             )
-            if batch_failed:
-                mark_markers_failed(template_markers)
+            apply_outcome_tones(marker, template_markers, batch, overlay_status,
+                                tilt_series=context.tilt_series, validations=context.tilt_validations())
             identity.stamp(batch, [marker, *template_markers])
             markers.extend(template_markers)
 
@@ -616,11 +610,6 @@ def search_map_markers(
             panel_name=frame.source,
         )
         overlay_status = aggregate_batch_position_status(batch, status_context)
-        batch_failed = batch_has_failed_tilt(batch, tilt_series, failed_set)
-        if batch_failed:
-            batch_marker.status = "failed"
-        elif overlay_status.status == AtlasMarkerStatus.QUEUED:
-            batch_marker.status = AtlasMarkerStatus.QUEUED
         markers.append(batch_marker)
         template_markers = template_markers_in_frame(
             search_map.id,
@@ -631,8 +620,8 @@ def search_map_markers(
             queued_reference=queued_reference,
             token=token,
         )
-        if batch_failed:
-            mark_markers_failed(template_markers)
+        apply_outcome_tones(batch_marker, template_markers, batch, overlay_status,
+                            tilt_series=tilt_series, validations=validations)
         identity.stamp(batch, [batch_marker, *template_markers])
         markers.extend(template_markers)
 
@@ -691,7 +680,6 @@ def search_tile_markers(
         LOGGER.debug("Skipping Search tile overlays without batch stage position search_tile=%s batch=%s", search_tile.id, batch.id)
         return []
 
-    failed_set = frozenset(failed_tilt_ids)
     status_context = build_item_status_context(
         search_maps=search_maps,
         search_tiles=(search_tile,),
@@ -701,10 +689,10 @@ def search_tile_markers(
     )
     overlay_status = aggregate_batch_position_status(batch, status_context)
     queued_reference = queued_overlay_reference(batch_positions, status_context)
-    batch_failed = batch_has_failed_tilt(batch, tilt_series, failed_set)
     x, y = stage_to_image(frame, position)
     width, height = frame.image_size
     markers: list[ImageMarker] = []
+    batch_marker: ImageMarker | None = None
     if 0 <= x <= width and 0 <= y <= height:
         batch_marker = ImageMarker(
             id=f"{search_tile.id}:batch:{batch.id}",
@@ -716,13 +704,7 @@ def search_tile_markers(
             radius=10,
             label=batch.name or batch.id,
             tooltip=batch_tooltip(batch),
-            status=(
-                "failed"
-                if batch_failed
-                else AtlasMarkerStatus.QUEUED
-                if overlay_status.status == AtlasMarkerStatus.QUEUED
-                else batch.status
-            ),
+            status=batch.status,
             unresolved=False,
             metadata={
                 "search_tile_name": search_tile.name,
@@ -750,8 +732,8 @@ def search_tile_markers(
         queued=overlay_status.status == AtlasMarkerStatus.QUEUED,
         queued_reference=queued_reference,
     )
-    if batch_failed:
-        mark_markers_failed(template_markers)
+    apply_outcome_tones(batch_marker, template_markers, batch, overlay_status,
+                        tilt_series=tilt_series, validations=validations)
     markers.extend(template_markers)
     markers.extend(batch_label_markers(markers, image_size=frame.image_size))
     return markers

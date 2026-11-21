@@ -229,10 +229,13 @@ def run_preview(request: MovieRequest, encoder: EncoderCheck, start: int, path: 
     settings = encode_settings(request, stop - start)
     path.parent.mkdir(parents=True, exist_ok=True)
     source = FrameSource(request, cancelled)
+    width, height = request.geometry.frame
     try:
         with VOLUME_MEMORY.borrow(resident_key(request.volume)):
-            encode(encode_arguments(encoder.ffmpeg, settings, path), (frame for _, frame in source.frames(start, stop)),
-                   cancelled=cancelled)
+            # The same allowance as an export; refused as "memory" when the budget is short.
+            with VOLUME_MEMORY.reserve(source.working_bytes() + encoder_allowance(width, height), "movie-preview"):
+                encode(encode_arguments(encoder.ffmpeg, settings, path),
+                       (frame for _, frame in source.frames(start, stop)), cancelled=cancelled)
     except BaseException as exc:
         path.unlink(missing_ok=True)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):

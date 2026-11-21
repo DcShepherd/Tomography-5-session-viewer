@@ -212,10 +212,17 @@ class MarkerLayer:
         self.cluster_cache.clear()
 
     def schedule_marker_redraw(self) -> None:
-        if self.atlas_lod_enabled:
-            self.marker_redraw_debounce.start()
-        else:
-            self.redraw_markers()
+        """Redraw once the view stops moving, not on every frame of a motion.
+
+        Marker shapes are in scene units, so they follow the view transform
+        without a redraw. Only label visibility depends on the zoom, and that
+        is cheap to update on each frame. The full redraw comes once the
+        motion settles; a flight's landing redraws at once.
+        """
+
+        if not self.atlas_lod_enabled:
+            self.update_marker_detail()
+        self.marker_redraw_debounce.start()
 
     def redraw_markers(self, changed_ids: set[str] | None = None) -> None:
         if changed_ids is None:

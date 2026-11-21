@@ -21,6 +21,7 @@ switch to the landscape template without re-implementing the chrome.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from os import PathLike
 from functools import partial
@@ -145,7 +146,7 @@ class _ReportDoc(BaseDocTemplate):
             author="Tomography Session Browser",
             creator="Tomography Session Browser",
             subject="Tomography session report",
-            # Only reports with central slices carry keywords (D4 §5.5).
+            # Only reports with central slices or recorded detail carry keywords (D4 §5.5).
             **({"keywords": keywords} if keywords is not None else {}),
         )
 
@@ -252,6 +253,17 @@ class ReportResult:
     warnings: list[str]
 
 
+#: The PDF keywords: one JSON object with the central-slice tiles and the
+#: recorded detail behind Sources, each when the report has it.
+KEYWORD_SCHEMA = "tomography-session-browser.report/1"
+
+
+def report_keywords(*, tiles: dict | None = None, recorded: list | None = None) -> str | None:
+    """The keywords of a report, or None when it has neither part."""
+    parts = {**({"tiles": tiles} if tiles is not None else {}), **({"recorded": recorded} if recorded else {})}
+    return json.dumps({"schema": KEYWORD_SCHEMA, **parts}, allow_nan=False) if parts else None
+
+
 def write_pdf(
     output_path: Path,
     flowables: Sequence[Flowable],
@@ -281,6 +293,8 @@ __all__ = [
     "PAGE_SIZE",
     "PORTRAIT_USABLE_H",
     "PORTRAIT_USABLE_W",
+    "KEYWORD_SCHEMA",
     "ReportResult",
+    "report_keywords",
     "write_pdf",
 ]

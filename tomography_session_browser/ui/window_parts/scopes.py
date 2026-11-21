@@ -9,6 +9,7 @@ from pathlib import (
 )
 from PySide6.QtCore import (
     QObject,
+    QSignalBlocker,
 )
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -222,6 +223,15 @@ class ScopeQueries(QObject):
             user_groups=self.state.review.user_groups,
             open_user_group=open_user_group,
         )
+        # The panel makes the scope's group row current; when a sample or a
+        # session is installed, its own row is the current one, so the
+        # report default, tab counts and context follow it, not the group.
+        scope = self.state.review.scope
+        if scope is not None and not isinstance(scope, ProjectTreeGroup):
+            item = self.parts.viewers.tree_item_for_scope(scope)
+            if item is not None:
+                with QSignalBlocker(self.ui.tree):
+                    self.ui.tree.setCurrentItem(item)
 
 
     def selected_project_group_key(self) -> str | None:

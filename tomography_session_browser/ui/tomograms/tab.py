@@ -523,9 +523,8 @@ class TomogramTab(QWidget):
             return
         cross = list(self.state.cross_xyz or tuple(n // 2 for n in volume.grid.shape_xyz))
         horizontal, vertical = geometry.AXES[axis][:2]
-        y = volume.grid.shape_xyz[vertical] - y
-        for dimension, value in ((horizontal, x), (vertical, y)):
-            cross[dimension] = max(0, min(volume.grid.shape_xyz[dimension] - 1, int(value)))
+        # The voxel the readout names and the crosshair covers (C5-02).
+        cross[horizontal], cross[vertical] = geometry.pointer_voxel(volume.grid.shape_xyz, axis, x, y)
         self.apply_intersection(tuple(cross))
 
     def apply_intersection(self, cross: tuple[int, int, int]) -> None:
@@ -911,6 +910,7 @@ class TomogramTab(QWidget):
         self.slider.cancel_marks()
         self.history.shutdown()
         self.movie.shutdown()  # Cancel movie work before its lanes are joined.
+        self.contact_sheet.cancel()  # So does a contact sheet.
         self.workers.close()
         self.tags.shutdown()
 
@@ -934,7 +934,14 @@ class TomogramTab(QWidget):
             self.activate()
 
     def hideEvent(self, event) -> None:  # noqa: N802
-        if self.constructed and not self.retired:
+        if self.constructed and not self.retired and event.spontaneous():
+            # The window was minimised (or covered by the window manager):
+            # the user has not left the tab. Keep Focus, a waiting snapshot or
+            # movie dialog and the accepted frame; only stop what animates.
+            self.stage_transition.detach()
+            self.keyboard_tooltips.dispose()
+            self.playback.stop()
+        elif self.constructed and not self.retired:
             self.stage_transition.detach()
             self.keyboard_tooltips.dispose()
             self.slider.cancel_marks()

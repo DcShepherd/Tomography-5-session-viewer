@@ -149,8 +149,7 @@ class ProjectTreePanel:
         self.tree = tree = ProjectTreeWidget()
         tree.setObjectName("projectTree")
         # The delegate paints the selection as one row-wide fill (plan C9);
-        # this turns off the sheet's per-column one. The report dialog's tree
-        # shares the object name but not the delegate, so it keeps the sheet's.
+        # this turns off the sheet's per-column one.
         tree.setProperty("paintsRowSelection", True)
         tree.setColumnCount(2)
         tree.setHeaderHidden(True)

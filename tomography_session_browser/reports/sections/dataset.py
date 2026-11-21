@@ -128,15 +128,15 @@ def data_collection_section(
         ))
         flowables.extend(tilt_series_table(sample.tilt_series, ctx))
 
-    # ------- F. linked tomograms (D4), after the tilt-series table
-    if tomograms:
-        flowables.extend(tomograms)
-
-    # ------- G. exposure thumbnails (optional)
+    # ------- F. exposure thumbnails (optional), straight after the tilt-series table
     if include_thumbnails and include_exposure_thumbnails and sample.tilt_series:
         flowables.extend(exposure_thumbnail_section(
             sample, ctx, generation_warnings, anchor=f"{anchor}-exposures",
         ))
+
+    # ------- G. linked tomograms (D4), after the acquisition blocks
+    if tomograms:
+        flowables.extend(tomograms)
     return flowables
 
 

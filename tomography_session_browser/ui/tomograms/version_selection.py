@@ -5,7 +5,9 @@ from typing import TYPE_CHECKING
 from collections.abc import Callable
 from PySide6.QtCore import Qt, QSignalBlocker
 from tomography_session_browser.presentation.tomogram_state import TomogramViewState
-from tomography_session_browser.presentation.tomogram_versions import review_versions, share_geometry, SharedGeometry
+from tomography_session_browser.presentation.tomogram_versions import (
+    SharedGeometry, review_versions, share_geometry, unique_version, version_label,
+)
 from tomography_session_browser.ui.tomograms.commands import version_tooltip
 
 if TYPE_CHECKING:
@@ -29,7 +31,7 @@ class VersionSelection:
         preferred = restore.volume_id if restore else tab.last_versions.get(key)
         requested = tab.payload.selection.version if tab.payload.selection else None
         choices = review_versions(row.tomogram)
-        volume = next((value for value in choices if value.version == requested), None) if requested else None
+        volume = unique_version(row.tomogram, requested) if requested else None
         volume = volume or next((value for value in choices if value.id == preferred), next(iter(choices), None))
         state = restore or tab.view_memory.get((key, volume.id if volume else None), TomogramViewState())
         if restore is not None and (volume is None or restore.volume_id != volume.id):
@@ -50,7 +52,7 @@ class VersionSelection:
         with QSignalBlocker(tab.versions):
             tab.versions.clear()
             for value in choices:
-                tab.versions.addItem(value.version, value.id)
+                tab.versions.addItem(version_label(row.tomogram, value), value.id)
                 tab.versions.setItemData(tab.versions.count() - 1, f"{value.path}\n{version_tooltip()}", Qt.ItemDataRole.ToolTipRole)
                 if volume is not None and value.id == volume.id:
                     tab.versions.setCurrentIndex(tab.versions.count() - 1)

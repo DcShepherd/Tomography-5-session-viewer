@@ -179,13 +179,9 @@ def exposure_metadata(model: ExposureThumbnailModel) -> list[tuple[str, str]]:
         if model.camera_dose_e_per_angstrom2 is not None
         else "n/a"
     )
-    stage = (
-        f"{model.stage_um[0]:.1f}, {model.stage_um[1]:.1f} µm" if model.stage_um is not None else "n/a"
-    )
     return [
         ("Acquired", model.acquisition_time or "n/a"),
         ("Cam. dose", dose),
-        ("Stage X, Y", stage),
     ]
 
 

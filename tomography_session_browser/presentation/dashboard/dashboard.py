@@ -11,12 +11,10 @@ from tomography_session_browser.presentation.dashboard.analysis import ScopeAnal
 from tomography_session_browser.presentation.dashboard.filters import sample_card_routes, scoped_filter
 from tomography_session_browser.presentation.dashboard.finding_routes import finding_viewer_rows, session_atlas_record_keys
 from tomography_session_browser.presentation.dashboard.atlas_counts import compute_atlas_counts
-from tomography_session_browser.domain.identity import canonical_entity_key
 from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.domain.models import Session
 from tomography_session_browser.domain.status import ValidationStatus
 from tomography_session_browser.presentation.dashboard.models import (
-    AttributedWarning,
     LinkedAtlasDashboardScope,
     BatchPositionProgressModel,
     DashboardFilterModel,
@@ -41,7 +39,7 @@ from tomography_session_browser.presentation.dashboard.sections.atlas import (
 )
 from tomography_session_browser.presentation.dashboard.sections.batches import batch_position_progress_rows
 from tomography_session_browser.presentation.dashboard.sections.metrics import defocus_plot_model, dose_information_plot_model
-from tomography_session_browser.presentation.dashboard.sections.search_maps import unresolved_inferred_failed_batch_groups
+from tomography_session_browser.presentation.dashboard.derived_warnings import derived_scope_warnings
 from tomography_session_browser.presentation.dashboard.sections.status import (
     atlas_tile_status,
     outcomes_for,
@@ -111,10 +109,20 @@ def analysed_dashboard_model(value: Any, *, workspace: Workspace | None = None) 
         analysis.validation_by_key,
         inferred_batch_groups=analysis.inferred_batch_groups,
     )
+    # The list rows' own verdicts (a search map's Incomplete), over exactly
+    # this scope's entities, so what the page counts is what its routes open.
+    status_context = build_item_status_context(
+        search_maps=scope.search_maps,
+        batch_positions=scope.batch_positions,
+        tilt_series=scope.tilt_series,
+        samples=scope_samples(scope),
+        validations=analysis.validation_by_key,
+    )
     cards = [
         _entity_card(scope, EntityKind.ATLAS, "Atlases", TabKey.ATLAS, [atlas for _label, atlas in scope.atlases], atlas_tile_status),
         _entity_card(scope, EntityKind.OVERVIEW, "Overviews", TabKey.OVERVIEW, scope.overviews, overview_status),
-        _entity_card(scope, EntityKind.SEARCH_MAP, "Search maps", TabKey.SEARCH_MAP, scope.search_maps, search_map_status,
+        _entity_card(scope, EntityKind.SEARCH_MAP, "Search maps", TabKey.SEARCH_MAP, scope.search_maps,
+                     lambda search_map: search_map_status(search_map, status_context),
                      detail=count_phrase(len(viewer_rows[TabKey.SEARCH]), 'search tile') if TabKey.SEARCH in viewer_rows else ''),
         _batch_position_card(scope, batch_position_rows),
         _tilt_series_card(scope, analysis),
@@ -141,15 +149,6 @@ def analysed_dashboard_model(value: Any, *, workspace: Workspace | None = None) 
     start, end, duration = scope_acquisition_window(scope)
     has_atlases = bool(scope.atlases)
     has_collection_data = any(card.value > 0 for card in cards if card.kind is not EntityKind.ATLAS)
-    # The list rows' own verdicts (a search map's Incomplete), over exactly
-    # this scope's entities, so what the page counts is what its routes open.
-    status_context = build_item_status_context(
-        search_maps=scope.search_maps,
-        batch_positions=scope.batch_positions,
-        tilt_series=scope.tilt_series,
-        samples=scope_samples(scope),
-        validations=analysis.validation_by_key,
-    )
     by_sample = tuple(by_sample_rows(scope, analysis, status_context))
     # The original ``value`` carries information the flattened scope
     # has thrown away (which sessions are atlas-screening, what the
@@ -358,26 +357,10 @@ def _batch_of_each_tilt_series(scope: DashboardScope, analysis: ScopeAnalysis) -
 
 
 def _warning_groups(scope: DashboardScope, analysis: ScopeAnalysis) -> list[WarningGroupModel]:
-    """The scope's warnings in their groups, with one more for each inferred
-    failed batch no search map could take."""
+    """The scope's warnings in their groups, with the derived ones the PDF
+    also counts (``derived_warnings.derived_scope_warnings``)."""
 
-    derived: list[AttributedWarning] = []
-    for group in unresolved_inferred_failed_batch_groups(
-        scope.search_maps,
-        scope.batch_positions,
-        scope.tilt_series,
-        analysis.validation_by_key,
-        analysis.owners,
-        inferred_groups=analysis.inferred_batch_groups,
-    ):
-        names = ", ".join(tilt.name or tilt.id for tilt in group.tilt_series)
-        message = (
-            f"Failed batch {group.label} could not be associated with a search map from "
-            f"explicit links or image-stage metadata ({names})."
-        )
-        # Attributed to every series the warning covers.
-        derived.append(AttributedWarning(message, frozenset(canonical_entity_key(tilt) for tilt in group.tilt_series)))
-    return dashboard_warning_groups([*scope.warnings, *derived])
+    return dashboard_warning_groups([*scope.warnings, *derived_scope_warnings(scope, analysis)])
 
 
 # ---------------------------------------------------------------- filters

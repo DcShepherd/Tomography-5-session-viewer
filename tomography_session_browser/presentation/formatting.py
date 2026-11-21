@@ -40,15 +40,25 @@ def number_text(value: float | None, unit: str | None = None) -> str:
     return f"{value:g}{suffix}"
 
 
+def two_decimals(value: float) -> str:
+    """``value`` to at most two decimals, trailing zeros removed: "-40.01", "12", "6.77".
+
+    No "+" on positive values; a value that rounds to zero is "0", never "-0".
+    """
+
+    text = f"{round(value, 2):.2f}".rstrip("0").rstrip(".")
+    return "0" if text in {"-0", ""} else text
+
+
 def format_tilt_angle(angle: float) -> str:
     """A tilt angle as recorded, to at most two decimals, with its degree sign.
 
-    Every tilt angle on the screen uses it: "-40.01°", "12°", "-0.02°". No
-    "+" on positive angles; a value that rounds to zero is "0°", never "-0°".
-    The PDF keeps its own formats."""
+    Every tilt angle on the screen uses it, and so do the PDF's tilt ranges:
+    "-40.01°", "12°", "-0.02°"; a value that rounds to zero is "0°", never
+    "-0°". The PDF tilt table has the degree sign in its heading and uses
+    ``two_decimals``."""
 
-    text = f"{round(angle, 2):.2f}".rstrip("0").rstrip(".")
-    return f"{'0' if text in {'-0', ''} else text}{DEGREE}"
+    return f"{two_decimals(angle)}{DEGREE}"
 
 
 def angle_range_text(value: tuple[float, float] | None) -> str:

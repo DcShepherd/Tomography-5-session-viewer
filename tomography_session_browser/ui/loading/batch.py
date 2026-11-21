@@ -75,6 +75,34 @@ class LoadBatch:
         self._queue.extend(self._pass)
         return bool(self._queue)
 
+    def unanswered(self) -> tuple[str, ...]:
+        """The folders whose MRC files need the user's selection (rule 5), in request order."""
+
+        return tuple(key for key in self.requests
+                     if key in self._outcomes and self._outcomes[key].kind == OutcomeKind.UNANSWERED)
+
+    def skip(self, key: str, note: str) -> None:
+        """An unanswered folder that the user does not load: skipped, with ``note`` as the reason."""
+
+        outcome = self._outcomes[key]
+        if outcome.kind != OutcomeKind.UNANSWERED:
+            raise ValueError("Only an unanswered folder is skipped by a selection.")
+        self._outcomes[key] = LoadOutcome(outcome.attempt, OutcomeKind.SKIPPED, outcome.name, note=note)
+
+    def again(self, keys: Iterable[str]) -> bool:
+        """Queue answered folders once more in this batch, as a pass of their own."""
+
+        if self.closed or self.running:
+            return False
+        selected = tuple(key for key in keys if key in self.requests
+                         and self._outcomes.get(key, None) is not None
+                         and self._outcomes[key].kind == OutcomeKind.UNANSWERED)
+        if not selected:
+            return False
+        self._pass = selected
+        self._queue.extend(selected)
+        return True
+
     def pass_position(self, attempt: LoadAttempt) -> tuple[int, int]:
         """Where an attempt sits in its pass: (number from 1, folders in the pass).
 

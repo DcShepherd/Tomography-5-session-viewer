@@ -54,7 +54,8 @@ QCheckBox:hover {{
 
 QCheckBox::indicator,
 QTableView#bulkPixelTable::indicator,
-QListWidget#contactSheetCaptures::indicator {{
+QListWidget#contactSheetCaptures::indicator,
+QTreeWidget#reportScopeTree::indicator {{
     width: 14px;
     height: 14px;
     border: 1px solid {border_strong};
@@ -67,19 +68,23 @@ QListWidget#contactSheetCaptures::indicator {{
    grayscale and unreliable for colour-vision deficiency. */
 QCheckBox::indicator:checked,
 QTableView#bulkPixelTable::indicator:checked,
-QListWidget#contactSheetCaptures::indicator:checked {{
+QListWidget#contactSheetCaptures::indicator:checked,
+QTreeWidget#reportScopeTree::indicator:checked {{
     background: {accent};
     border-color: {accent};
     image: url("{check_icon}");
 }}
 
 QCheckBox::indicator:disabled,
-QTableView#bulkPixelTable::indicator:disabled {{
+QTableView#bulkPixelTable::indicator:disabled,
+QTreeWidget#reportScopeTree::indicator:disabled {{
     background: {surface_alt};
     border-color: {border};
 }}
 
-QCheckBox::indicator:indeterminate {{
+/* The report tree's group rows are partly ticked when only some members are. */
+QCheckBox::indicator:indeterminate,
+QTreeWidget#reportScopeTree::indicator:indeterminate {{
     background: {accent};
     border-color: {accent};
     image: url("{dash_icon}");

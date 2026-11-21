@@ -25,6 +25,37 @@ def review_versions(row: Tomogram) -> tuple[Volume, ...]:
     return tuple(volume for volume in row.volumes if volume.version not in ("Even", "Odd"))
 
 
+def ambiguous_versions(row: Tomogram) -> frozenset[str]:
+    """Version names held by more than one review volume: no rule may pick one of them by name."""
+    names = [volume.version for volume in review_versions(row)]
+    return frozenset(name for name in names if names.count(name) > 1)
+
+
+def unique_version(row: Tomogram, name: str | None) -> Volume | None:
+    """The one review volume called ``name``; ``None`` when there is none or more than one."""
+    matches = [volume for volume in review_versions(row) if volume.version == name]
+    return matches[0] if len(matches) == 1 else None
+
+
+def version_label(row: Tomogram, volume: Volume) -> str:
+    """The version name; when another review volume has the same name, also its pixel size or file name.
+
+    The pixel size is used only when it differs between every volume of that
+    name, so two labels are never the same.
+    """
+    if volume.version not in ambiguous_versions(row):
+        return volume.version
+    spacings = [_spacing_text(other) for other in review_versions(row) if other.version == volume.version]
+    if None not in spacings and len(set(spacings)) == len(spacings):
+        return f"{volume.version} · {_spacing_text(volume)} Å/px"
+    return f"{volume.version} · {volume.path.name}"
+
+
+def _spacing_text(volume: Volume) -> str | None:
+    spacing = volume.grid.spacing_xyz[0] if volume.grid is not None else None
+    return f"{spacing:.2f}" if spacing else None
+
+
 def share_geometry(row: Tomogram, source: Volume | None, target: Volume,
                    current: TomogramViewState, destination: TomogramViewState) -> SharedGeometry | GeometryRefusal:
     if source is None or source not in row.volumes or target not in row.volumes or current.row_key != row.id:

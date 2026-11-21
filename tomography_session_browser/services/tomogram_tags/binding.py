@@ -287,3 +287,56 @@ class BindingIndex:
 def suggested_path(folder: Path, snapshot_folder: Path | None) -> Path:
     """Named from the folder, never from the source label, which is display text (B6)."""
     return (snapshot_folder or Path.home()) / (folder.name + ".tags.json")
+
+
+#: Added to a new project name that has no ``.json`` ending (owner D1).
+PROJECT_SUFFIX = ".json"
+_ENDINGS = (".tags.json", ".json")
+#: Real formats one letter from ``json``: never a typo.
+_REAL_FORMATS = frozenset({"son", "bson", "cson"})
+
+
+@dataclass(frozen=True, slots=True)
+class NameCorrection:
+    """A chosen name with a likely typo in its extension, and the corrected name."""
+    typed: Path
+    corrected: Path
+
+
+def _near_json(word: str) -> bool:
+    """One letter left out or changed, or the letters of ``json`` in another order (jons, josn).
+
+    An added letter is not checked: jsonl, jsonc and json5 are real formats.
+    """
+    if word in _REAL_FORMATS or word == "json":
+        return False
+    if len(word) == 3:
+        return any("json"[:i] + "json"[i + 1:] == word for i in range(4))
+    return len(word) == 4 and (sorted(word) == sorted("json") or sum(a != b for a, b in zip(word, "json")) == 1)
+
+
+def project_file_name(chosen: Path) -> Path | NameCorrection | None:
+    """The file a new tag project is written to, from the name a Save dialog returned.
+
+    ``None`` means there is no name before the extension. Only the last part of
+    the path is read. Trailing spaces and dots are ignored when comparing, but
+    never removed from the written name. A Windows dialog can return a typo
+    inside a valid ending (``test.jsn.json``), so the part before the ending is
+    checked too.
+    """
+    name = chosen.name
+    stripped = name.rstrip(" .")
+    ending = next((e for e in _ENDINGS if stripped[-len(e):].casefold() == e), "")
+    base = stripped[:len(stripped) - len(ending)]
+    if not base.strip(" ."):
+        return None
+    dot = base.rfind(".")
+    if dot >= 0 and _near_json(base[dot + 1:].casefold()):
+        stem = base[:dot]
+    elif dot < 0 and base.casefold().endswith("json"):
+        stem = base[:-4].rstrip("_-, ")
+    else:
+        return chosen if ending else chosen.with_name(name + PROJECT_SUFFIX)
+    if not stem.strip(" ."):
+        return None
+    return NameCorrection(chosen, chosen.with_name(stem + (ending or PROJECT_SUFFIX)))

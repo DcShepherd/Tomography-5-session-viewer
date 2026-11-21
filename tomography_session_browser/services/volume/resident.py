@@ -11,12 +11,14 @@ from tomography_session_browser.services.volume.store import resident_key
 def load_resident(volume: Volume, *, cancelled: Callable[[], bool],
                   budget: MemoryBudget = VOLUME_MEMORY) -> bool:
     """Sequential bounded readinto; no unaccounted copy, mapping or live UI reference."""
-    def check() -> None:
+    def check(read: int = 0) -> None:
         if cancelled():
             raise InterruptedError("Obsolete resident source")
         if is_cloud_placeholder(volume.path) or fingerprint(volume.path) != volume.fingerprint:
             raise ValueError("The volume is unavailable or changed. Reload the processing folder.")
-        if budget.used() > budget.limit():
+        # The reservation already counts the whole read, and the system's
+        # available memory falls as the read fills it: add the bytes read back.
+        if budget.used() > budget.limit() + read:
             raise BudgetExceeded("Memory allowance fell during optional source admission.")
     check()
     if volume.grid is None:
@@ -33,14 +35,14 @@ def load_resident(volume: Volume, *, cancelled: Callable[[], bool],
             stream.seek(volume.data_offset)
             offset = 0
             while offset < size:
-                check()
+                check(offset)
                 stop = min(size, offset+8*MIB)
                 count = stream.readinto(view[offset:stop])
                 if not count:
                     raise ValueError("The volume ended while loading. Reload the processing folder.")
                 offset += count
         del view
-        check()
+        check(offset)
         axes = tuple(reversed(volume.grid.axes_crs))
         native = storage.transpose(tuple(axes.index(a) for a in (3, 2, 1)))
         native.setflags(write=False)

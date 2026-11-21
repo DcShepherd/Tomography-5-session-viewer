@@ -5,11 +5,12 @@ import math
 from pathlib import Path
 import re
 from typing import Any
+from xml.etree import ElementTree
 
 from tomography_session_browser.domain.models import Atlas
 from tomography_session_browser.parsers.mrc_parser import read_mrc_metadata
 from tomography_session_browser.parsers.path_utils import safe_id, sorted_paths
-from tomography_session_browser.parsers.xml_parser import find_first, parse_xml_file, parse_xml_metadata
+from tomography_session_browser.parsers.xml_parser import element_to_data, find_first, local_name, parse_xml_metadata
 from tomography_session_browser.services.atlas_metadata import atlas_projection_mismatch, referenced_atlas_stem
 
 LOGGER = logging.getLogger(__name__)
@@ -207,18 +208,14 @@ def _compute_effective_mosaic_pixel_size(
     if mosaic_dims[0] <= 0 or mosaic_dims[1] <= 0:
         return None
 
-    # Cap the number of tile XMLs we parse to keep session-load fast.
-    sample = list(tile_xml_paths)[:64]
-
+    # Every tile: the extremes of a partial sample understate the span (a
+    # 10x10 grid sampled at 64 tiles reads 7 rows), and the error is silent.
     centres: list[tuple[float, float]] = []
     half_extents: list[tuple[float, float]] = []
 
-    for tile_xml in sample:
-        try:
-            data = parse_xml_file(tile_xml)
-        except Exception:  # pragma: no cover — defensive, parser already guards
-            continue
-        if _xml_problem(data):
+    for tile_xml in tile_xml_paths:
+        data = _tile_geometry_data(tile_xml)
+        if data is None:
             continue
         info = _tile_geometry(data)
         if info is None:
@@ -290,6 +287,32 @@ def _tile_geometry(data: Any) -> tuple[tuple[float, float], tuple[float, float]]
     return (cx, cy), (width_px * px / 2.0, height_px * py / 2.0)
 
 
+_TILE_GEOMETRY_TAGS = frozenset(("stage", "StagePosition", "pixelSize", "ReadoutArea", "ImageSize"))
+_TILE_GEOMETRY_ENOUGH = frozenset(("stage", "pixelSize", "ReadoutArea"))
+
+
+def _tile_geometry_data(path: Path) -> dict[str, Any] | None:
+    """The first of each element ``_tile_geometry`` reads, converted as ``parse_xml_file`` would.
+
+    Every tile is measured, so the rest of the document is not converted, and
+    reading stops once the stage, pixel size and readout area are in hand.
+    ``None`` when the file cannot be read or parsed before that point.
+    """
+
+    found: dict[str, Any] = {}
+    try:
+        with path.open("rb") as handle:
+            for _event, element in ElementTree.iterparse(handle, events=("end",)):
+                tag = local_name(element.tag)
+                if tag in _TILE_GEOMETRY_TAGS and tag not in found:
+                    found[tag] = element_to_data(element)
+                    if _TILE_GEOMETRY_ENOUGH <= found.keys():
+                        break
+    except (ElementTree.ParseError, OSError):
+        return None
+    return found
+
+
 def _numeric_value(node: Any) -> Any:
     if isinstance(node, dict):
         return node.get("numericValue", node)
@@ -324,9 +347,3 @@ def _read_image_dimensions(path: Path) -> tuple[int, int] | None:
     except (OSError, ValueError) as exc:
         LOGGER.debug("Could not read atlas image %s: %s", path, exc)
         return None
-
-
-
-
-def _xml_problem(data: Any) -> bool:
-    return isinstance(data, dict) and ("_parse_error" in data or "_read_error" in data)

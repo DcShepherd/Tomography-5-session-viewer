@@ -595,8 +595,9 @@ def _resolve_batch_overview(
             navigable_explanation="Resolved from the Overview's linked batch-position IDs.",
             ambiguous_prefix="Overview link is ambiguous between",
             unresolved_explanation=(
-                "The batch position records an Overview ID that is not present in "
-                "the current scope, and no Overview records this batch position."
+                f"The batch position records Overview {batch.linked_overview_id}, but no "
+                "single Overview in the current scope matches it, and no Overview "
+                "records this batch position."
             ),
         )
 

@@ -14,18 +14,19 @@ from tomography_session_browser.presentation.workspace import Workspace
 from tomography_session_browser.domain.models import Session
 from tomography_session_browser.presentation.report_scope import ProjectReportGroup
 from tomography_session_browser.reports import styles
-from tomography_session_browser.reports.pdf_export import ReportResult, write_pdf
+from tomography_session_browser.reports.pdf_export import ReportResult, report_keywords, write_pdf
 from tomography_session_browser.reports.folder_report import build_folder_report
 from tomography_session_browser.reports.context import report_sections, resolve_report_atlases, SessionContext
 from tomography_session_browser.reports.formatting import footer_label, report_title
 from tomography_session_browser.reports.sections.atlas_overview import linked_overview_section
 from tomography_session_browser.reports.sections.cover import cover_page
 from tomography_session_browser.reports.sections.dataset import data_collection_section
+from tomography_session_browser.reports.sections.recorded_sources import recorded_detail
 from tomography_session_browser.reports.sections.tomograms import tomogram_section
 from tomography_session_browser.presentation.report_tomograms import ScopedTomograms, member_slice_plans
 from tomography_session_browser.reports.sections.slices import numbered_tiles
 from tomography_session_browser.reports.tomogram_slices import (
-    CANCELLED, ReportSlices, render_slices, reserved_bytes, slice_keywords,
+    CANCELLED, ReportSlices, render_slices, reserved_bytes, slice_records,
 )
 from tomography_session_browser.services.volume.memory import VOLUME_MEMORY
 from tomography_session_browser.presentation.report_scope import ReportScope
@@ -121,7 +122,12 @@ def build_session_report(
     # Per-data-collection sections.
     datasets = [section for section in sections if section.kind == "dataset"]
     by_anchor = {section.anchor: section for section in tomograms.sections} if tomograms else {}
+    printed: list = []                 # the tomogram rows whose recorded values print
     for section in datasets:
+        block = by_anchor.get(f"{section.key}-tomograms")
+        tomogram_block = tomogram_section(block, tomograms, slices) if tomograms and block is not None else None
+        if tomogram_block is not None and block is not None:
+            printed += block.members
         flowables.append(PageBreak())
         flowables.extend(
             data_collection_section(
@@ -132,8 +138,7 @@ def build_session_report(
                 generation_warnings=generation_warnings,
                 position=(section.number, len(datasets)),
                 anchor=section.key,
-                tomograms=(tomogram_section(by_anchor[key], tomograms, slices)
-                           if tomograms is not None and (key := f"{section.key}-tomograms") in by_anchor else None),
+                tomograms=tomogram_block,
             )
         )
 
@@ -143,7 +148,9 @@ def build_session_report(
         title=title,
         footer_label=footer,
         protected_roots=roots,
-        keywords=slice_keywords(numbered_tiles(tomograms, slices)) if tomograms and slices else None,
+        keywords=report_keywords(
+            tiles=slice_records(numbered_tiles(tomograms, slices)) if tomograms and slices else None,
+            recorded=recorded_detail(printed, tomograms) if tomograms else None),
     )
     return ReportResult(path=output_path, page_count=page_count, warnings=generation_warnings)
 

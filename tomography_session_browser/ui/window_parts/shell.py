@@ -180,6 +180,8 @@ class WindowShell(QObject):
         toolbar.addAction(self.ui.refresh_action)
         self.ui.connections.append(lambda: self.parts.context_panel.sources.refresh_requested.connect(self.parts.project.refresh_processing_source))
         self.ui.connections.append(lambda: self.parts.context_panel.sources.remove_requested.connect(self.parts.project.remove_processing_source))
+        self.ui.connections.append(lambda: self.parts.context_panel.sources.read_as_requested.connect(self.parts.project.change_source_read_as))
+        self.ui.connections.append(lambda: self.parts.context_panel.metadata.set_row_action("Read as", self.parts.project.read_as_button))
         self.ui.connections.append(lambda: self.parts.context_panel.tomogram.parent_requested.connect(self.parts.viewers.open_tomogram_parent))
         self.ui.connections.append(lambda: self.parts.context_panel.tomogram.alignment_requested.connect(self.parts.link_review.alignment_requested))
 

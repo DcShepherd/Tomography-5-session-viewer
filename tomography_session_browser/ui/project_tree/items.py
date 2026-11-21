@@ -233,7 +233,7 @@ class ProjectTreeItems:
             for source in sources:
                 folder = FolderTomograms(holder, source.id)
                 name = self._workspace.group_names.get(processing_group_key(source.id), source.name)
-                item = self.item(f'{name} \u00b7 {source.pipeline}', folder)
+                item = self.item(f'{name} \u00b7 {source.display_pipeline}' if source.display_pipeline else name, folder)
                 item.setToolTip(0, str(source.path))
                 item.setText(1, str(len(self._workspace.tomograms(folder))))
                 self._say_what_opens(item, folder)

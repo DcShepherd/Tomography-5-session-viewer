@@ -287,11 +287,13 @@ class PreviewImage:
         overlay_reference_size: tuple[int, int] | None = None,
     ) -> None:
         # A new level of the same image (a pyramid upgrade) moves the scene
-        # coordinates under a flight to a jump's target; fly on from here once
-        # the new level is in.
-        resume_arrival = (
-            self.camera.arrival_in_flight
-            if logical_image_key is not None and logical_image_key == self.current_image_key
+        # coordinates under a flight to a jump's target, a cluster flight or
+        # an eased wheel zoom; go on from here once the new level is in.
+        same_key = logical_image_key is not None and logical_image_key == self.current_image_key
+        resume_arrival = self.camera.arrival_in_flight if same_key else None
+        resume_motion = (
+            self.camera.motion_across_level(self.pixmap_item.boundingRect())
+            if same_key and self.pixmap_item is not None
             else None
         )
         self.transition.end("newer_request")
@@ -308,7 +310,7 @@ class PreviewImage:
             if self.pixmap_item is not None else None)
         old_transform = self.view.transform()
         old_relative_center = relative_point(old_rect, old_center) if old_rect is not None and old_center is not None else None
-        same_logical_image = logical_image_key is not None and logical_image_key == self.current_image_key
+        same_logical_image = same_key
         is_new_logical_image = logical_image_key is None or not same_logical_image
         if overlay_reference_size is not None:
             self.overlay_reference_size = overlay_reference_size
@@ -373,6 +375,8 @@ class PreviewImage:
             self.transition.show(dissolve_from)
             self.transition.begin_next_turn(self.scene_picture)
         self.camera.retry_arrival(resume_arrival)
+        if resume_motion is not None and preserve_current_view:
+            resume_motion(pixmap_item.boundingRect())
         LOGGER.debug(
             "set_image: logical_key=%s pyramid_level=%s new_logical=%s "
             "user_interacted=%s pending_initial_fit=%s preserve_view=%s "

@@ -1,17 +1,21 @@
-"""The checkbox dialog that chooses what a PDF report covers.
+"""The checkbox dialog that chooses what a PDF report covers (plan B6, board 2b).
 
-What a selection means lives in ``presentation/report_scope.py``; this module
-only draws the tree and collects the request.
+What a selection means lives in ``presentation/report_scope.py`` and what the
+report then holds in ``presentation/report_preview.py``; this module draws the
+tree, the "In this report" pane and the INCLUDE line, and collects the request.
+The tree and the pane share one height, so their edges line up. The dialog
+opens as tall as the longer of the two, up to 80 % of the screen, and keeps
+that height while the user ticks.
 """
 
 from __future__ import annotations
 
-from tomography_session_browser.ui.widgets.link_button import link_button
 from typing import Any, Iterable, Sequence
 
-from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer
-from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QPushButton, QHeaderView,
-                               QScrollArea, QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtCore import QRect, Qt
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
+                               QPushButton, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.domain.models import Sample, Session
@@ -25,19 +29,23 @@ from tomography_session_browser.presentation.project_tree import (
     session_badge_tooltip,
     session_key,
 )
+from tomography_session_browser.presentation.report_preview import ReportPreview, report_preview
 from tomography_session_browser.presentation.report_scope import (
     ReportScope,
     ReportScopeRequest,
-    describe_report_scope,
     normalise_report_scope,
     reportable_samples,
     sample_key,
 )
 from tomography_session_browser.presentation.report_tomograms import ReportSource, ReportTomograms
+from tomography_session_browser.ui.report_preview_pane import ReportPreviewPane
+from tomography_session_browser.ui.report_scope_tree import ReportScopeTree
 from tomography_session_browser.ui.report_tomogram_options import TomogramOptions
 from tomography_session_browser.presentation.scopes import LinkedSampleGroup
 from tomography_session_browser.presentation.design_tokens import SPACE_L, SPACE_M, SPACE_S
-from tomography_session_browser.ui.widgets.elided_label import WrappedElidedLabel
+from tomography_session_browser.ui.dashboard.layout import FlowLayout
+from tomography_session_browser.ui.theme import current_palette
+from tomography_session_browser.ui.widgets.elided_label import ElidedLabel
 from tomography_session_browser.ui.widgets.rounded_viewport import round_viewport
 
 
@@ -47,44 +55,21 @@ REPORT_SAMPLE_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 REPORT_FOLDER_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 #: A user group heading (B4): a three-state parent of its acquisition members, never a scope itself.
 REPORT_USER_GROUP_ROLE = int(Qt.ItemDataRole.UserRole) + 4
+#: A folder row's own Type word, kept while the row reads "Not used".
+REPORT_TYPE_ROLE = int(Qt.ItemDataRole.UserRole) + 5
 
-SESSION_DETAIL = ("Ticks choose report content. Group checkboxes and Select all include full atlas overviews. "
-                  "The current linked-scope preset selects collection datasets only.")
-FOLDER_DETAIL = "For a session report, tick sessions or samples. For a folder report, tick only folders."
-FOLDER_NOTE = "The report reads only the ticked folders. Ticks do not change links."
-#: The tree keeps this height on a short screen; the options area scrolls instead (GR-03).
+#: Plain Type words for the badge codes (Q7); the tooltips keep the badge meanings.
+TYPE_WORDS = {"LS": "Linked group", "AT": "Atlas", "DC": "Collection", "!": "Unresolved"}
+NOT_USED = "Not used"
+NOT_USED_TIP = "Not used: the report does not include linked tomograms."
+FOLDER_TIP = "Ticks select the tomograms that the report shows. Ticks do not change links."
+NO_SESSIONS = "No sessions are loaded. Load a session to make a report."
+#: The dialog's width on a screen with room for it (board 2b); the tree takes three fifths.
+DIALOG_WIDTH = 940
+#: The tree keeps three rows on a short screen; above the cap both panels scroll (GR-03).
 TREE_MIN_HEIGHT = 140
-OPTIONS_MIN_HEIGHT = 72
-
-
-class _OptionsScroll(QScrollArea):
-    """A scroll area as tall as its content at the current width, never taller.
-
-    Qt's own size hint does not follow word-wrapped content, so spare height went
-    to the options instead of the tree. A content layout change asks again.
-    """
-
-    def setWidget(self, widget: QWidget) -> None:  # noqa: N802 - Qt API
-        super().setWidget(widget)
-        widget.installEventFilter(self)
-
-    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
-        if watched is self.widget() and event.type() == QEvent.Type.LayoutRequest:
-            self.updateGeometry()
-        return super().eventFilter(watched, event)
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
-        super().resizeEvent(event)
-        if event.oldSize().width() != event.size().width():
-            self.updateGeometry()
-
-    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
-        hint, content = super().sizeHint(), self.widget()
-        if content is None:
-            return hint
-        width = self.viewport().width() if self.viewport().width() > 0 else content.sizeHint().width()
-        height = content.heightForWidth(width) if content.hasHeightForWidth() else content.sizeHint().height()
-        return QSize(hint.width(), max(height, 0) + 2 * self.frameWidth())
+#: The opening height stops at this part of the available screen height.
+SCREEN_SHARE = 0.8
 
 
 def _repolish(widget: QWidget) -> None:
@@ -97,21 +82,6 @@ def _repolish(widget: QWidget) -> None:
     widget.update()
 
 
-def _selection_summary_text(request: ReportScopeRequest) -> str:
-    """Describe what was *clicked* — the fallback when no scope is resolvable."""
-
-    if not request.has_selection:
-        return "Nothing selected"
-    parts = [
-        count_phrase(len(request.group_keys), "project group"),
-        count_phrase(len(request.session_keys), "session"),
-        count_phrase(len(request.sample_keys), "sample"),
-        count_phrase(len(request.processing_source_ids), "processing folder"),
-    ]
-    chosen = [part for part in parts if not part.startswith("0 ")]
-    return "Selected: " + ", ".join(chosen)
-
-
 def _describe_current_scope(value: Any | None) -> str:
     """Name the scope under review, for the dialog's primary action."""
 
@@ -122,6 +92,12 @@ def _describe_current_scope(value: Any | None) -> str:
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
     return ""
+
+
+def _caption(text: str, parent: QWidget) -> QLabel:
+    label = QLabel(text, parent)
+    label.setObjectName("cardTitle")
+    return label
 
 
 class ReportScopeDialog(QDialog):
@@ -151,6 +127,7 @@ class ReportScopeDialog(QDialog):
         self._folder_preset = folder_preset
         self._scope: ReportScope | None = None
         self._folder_items: dict[str, QTreeWidgetItem] = {}
+        self._folder_heading: QTreeWidgetItem | None = None
         # Needed to preview the *normalised* scope rather than the raw
         # selection. Falls back to the groups' own sessions so an existing
         # caller that does not pass them still gets a usable preview.
@@ -165,6 +142,7 @@ class ReportScopeDialog(QDialog):
         )
         self._item_updates_blocked = False
         self._follows_screen = False
+        self._height_fitted = False
         self._group_items: dict[str, QTreeWidgetItem] = {}
         self._session_items: dict[str, QTreeWidgetItem] = {}
         self._sample_items: dict[str, QTreeWidgetItem] = {}
@@ -172,162 +150,112 @@ class ReportScopeDialog(QDialog):
         self.setWindowTitle("Select report scope")
         self.setModal(True)
         available = self.screen().availableGeometry()
-        self.resize(min(720, available.width() - 48), min(800, available.height() - 80))
+        # The height follows the content when the dialog first shows (_fit_height).
+        self.resize(min(DIALOG_WIDTH, available.width() - 48), min(600, available.height() - 80))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACE_L, SPACE_L, SPACE_L, SPACE_L)
         layout.setSpacing(SPACE_M)
+        # One grid, so the two panels share their top line and their height.
+        panels = QGridLayout()
+        panels.setHorizontalSpacing(SPACE_L)
+        panels.setVerticalSpacing(SPACE_S)
+        panels.setColumnStretch(0, 3)
+        panels.setColumnStretch(1, 2)
+        panels.setRowStretch(1, 1)
 
-        heading = QLabel("Choose sessions and samples for the report", self)
-        heading.setObjectName("cardTitle")
-        layout.addWidget(heading)
-
-        self.detail = QLabel(SESSION_DETAIL, self)
-        self.detail.setWordWrap(True)
-        self.detail.setObjectName("mutedLabel")
-        layout.addWidget(self.detail)
-
-        self.tree = QTreeWidget(self)
-        self.tree.setObjectName("projectTree")
+        # Its own tick tree (B4): no selection, a click ticks, one row-wide hover.
+        # Made first, so Tab goes tree, its buttons, the options, the footer.
+        self.tree = ReportScopeTree(self)
         round_viewport(self.tree)
-        self.tree.setAccessibleName("Report scope")
+        self.tree.setAccessibleName("Report content")
         self.tree.setAccessibleDescription(
-            "Choose linked groups, sessions, or samples to include in the report."
+            "Tick linked groups, sessions, samples or processing folders to include them in the report."
         )
         self.tree.setColumnCount(2)
-        self.tree.setHeaderLabels(["Scope", "Type"])
+        self.tree.setHeaderLabels(["Content", "Type"])
         self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.tree.header().setStretchLastSection(False)
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.setMinimumHeight(TREE_MIN_HEIGHT)
-        layout.addWidget(self.tree, stretch=1)
-        self.folder_note = QLabel(FOLDER_NOTE, self)
-        self.folder_note.setObjectName("mutedLabel")
-        self.folder_note.setWordWrap(True)
-        self.folder_note.setVisible(bool(tomograms is not None and tomograms.sources))
-        layout.addWidget(self.folder_note)
 
-        controls = QVBoxLayout()
-        controls.setSpacing(SPACE_S)
-        current_controls = QHBoxLayout()
-        content_controls = QHBoxLayout()
-        content_controls.setSpacing(SPACE_S)
         # "view" described the widget; this is about the scientific scope being
-        # reviewed. The name sits beside the button, bounded to two lines, so a
-        # long name cannot set the dialog's width (GR-03).
+        # reviewed. Its name is in the tooltip, so a long name cannot set the width (GR-03).
         scope_name = _describe_current_scope(current_scope)
         linked_preset = isinstance(current_scope, ProjectTreeGroup) and current_scope.kind == "linked"
-        current_label = "Select current collections" if linked_preset else "Select current review scope"
-        self.select_current_button = QPushButton(current_label, self)
+        self.select_current_button = QPushButton("Current scope", self)
         self.select_current_button.setEnabled(current_scope is not None)
-        current_tip = (f"Select {scope_name}, the scope currently under review"
-                       if scope_name else "No current reportable scope is available")
+        if not scope_name:
+            current_tip = "Not available: no scope is open."
+        elif linked_preset:
+            current_tip = f"Ticks the collections of {scope_name}, the scope that you examine."
+        else:
+            current_tip = f"Ticks {scope_name}, the scope that you examine."
         self.select_current_button.setToolTip(current_tip)
         self.select_current_button.setAccessibleDescription(current_tip)
-        self.current_scope_name = WrappedElidedLabel(scope_name, max_lines=2, parent=self)
-        self.current_scope_name.setObjectName("mutedLabel")
-        self.current_scope_name.setToolTip(scope_name)
-        self.current_scope_name.setAccessibleName("Current review scope")
-        self.current_scope_name.setVisible(bool(scope_name))
         self.select_all_button = QPushButton("Select all", self)
-        self.clear_button = QPushButton("Clear selection", self)
-        self.expand_button = QPushButton("Expand all", self)
-        self.collapse_button = QPushButton("Collapse all", self)
-        for button in (
-            self.select_current_button,
-            self.select_all_button,
-            self.clear_button,
-            self.expand_button,
-            self.collapse_button,
-        ):
+        self.select_all_button.setToolTip("Ticks all rows.")
+        self.clear_button = QPushButton("Clear", self)
+        self.clear_button.setToolTip("Removes all ticks.")
+        content_header = QHBoxLayout()
+        content_header.setSpacing(SPACE_S)
+        content_header.addWidget(_caption("Report content", self))
+        content_header.addStretch(1)
+        for button in (self.select_current_button, self.select_all_button, self.clear_button):
             button.setObjectName("dashboardFilterButton")
-        current_controls.addWidget(self.select_current_button)
-        current_controls.addWidget(self.current_scope_name, 1, Qt.AlignmentFlag.AlignVCenter)
-        for button in (self.select_all_button, self.clear_button, self.expand_button, self.collapse_button):
-            content_controls.addWidget(button)
-        content_controls.addStretch(1)
-        controls.addLayout(current_controls)
-        controls.addLayout(content_controls)
-        layout.addLayout(controls)
+            content_header.addWidget(button)
+        panels.addLayout(content_header, 0, 0)
+        panels.addWidget(self.tree, 1, 0)
 
-        # The options scroll only when the screen is too short for them; the tree
-        # keeps a usable height and the footer stays visible (GR-03). The widgets
-        # are made inside the area so the Tab order stays tree, options, footer.
-        self.options_scroll = _OptionsScroll(self)
-        self.options_scroll.setObjectName("reportOptionsScroll")
-        self.options_scroll.setWidgetResizable(True)
-        self.options_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.options_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.options_scroll.setMinimumHeight(OPTIONS_MIN_HEIGHT)
-        # Never taller than its content, so spare height goes to the tree.
-        self.options_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        options = QWidget(self.options_scroll)
-        options.setObjectName("reportOptions")
-        options_layout = QVBoxLayout(options)
-        options_layout.setContentsMargins(0, 0, 0, 0)
-        options_layout.setSpacing(SPACE_M)
+        # The count shortens before it widens the dialog.
+        self.preview_badge = ElidedLabel("", parent=self, prefer_full_width=True)
+        self.preview_badge.setObjectName("mutedLabel")
+        self.preview_badge.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        preview_header = QHBoxLayout()
+        preview_header.setSpacing(SPACE_S)
+        preview_header.addWidget(_caption("In this report", self))
+        preview_header.addWidget(self.preview_badge, 1)
+        self.preview_pane = ReportPreviewPane(self)
+        panels.addLayout(preview_header, 0, 1)
+        panels.addWidget(self.preview_pane, 1, 1)
+        layout.addLayout(panels, 1)
 
-        self.include_atlas_overview = QCheckBox("Also include supporting atlas-session overviews", options)
-        self.include_atlas_overview.setToolTip("Include the full supporting screening session, which may contain unrelated atlases.")
-        atlas_help = QLabel("Full atlas-session overviews can include atlases unrelated to the selected datasets.", options)
-        atlas_help.setObjectName("mutedLabel")
-        atlas_help.setWordWrap(True)
-        options_layout.addWidget(self.include_atlas_overview)
-        options_layout.addWidget(atlas_help)
-        self.include_atlas_overview.toggled.connect(self._update_generate_enabled)
-
-        self.include_exposure_thumbnails = QCheckBox("Include exposure thumbnails for each tilt series", options)
+        # The INCLUDE line and the buttons share the footer, under both panels. On a
+        # narrow screen the options wrap onto a second line instead of widening the dialog.
+        footer = QHBoxLayout()
+        footer.setSpacing(SPACE_L)
+        include = QWidget(self)
+        options = FlowLayout(spacing=SPACE_L, line_spacing=SPACE_S)
+        include.setLayout(options)
+        options.addWidget(_caption("Include", include))
+        # The AT row's tick is the only atlas control (plan B5, Q6 A).
+        self.include_exposure_thumbnails = QCheckBox("Exposure thumbnails", include)
         self.include_exposure_thumbnails.setChecked(include_exposure_thumbnails)
         exposure_help_text = (
-            "Adds one image per tilt series from its Thumbnails stack after its tilt-series table, four to a page: "
-            "the image nearest 0°, or nearest the pretilt for a lamella, with its time, camera dose and stage position."
+            "Adds one image for each tilt series after its tilt-series table, four on a page: the image nearest 0°, "
+            "or nearest the pretilt for a lamella, from its Thumbnails stack, with its time and camera dose."
         )
         self.include_exposure_thumbnails.setToolTip(exposure_help_text)
         self.include_exposure_thumbnails.setAccessibleDescription(exposure_help_text)
-        exposure_help = QLabel(exposure_help_text, options)
-        exposure_help.setObjectName("mutedLabel")
-        exposure_help.setWordWrap(True)
-        exposure_help.setVisible(False)
-        self.thumbnail_details = link_button(parent=options)
-        self.thumbnail_details.setText("Thumbnail details")
-        self.thumbnail_details.setCheckable(True)
-        self.thumbnail_details.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.thumbnail_details.setArrowType(Qt.ArrowType.RightArrow)
-        self.thumbnail_details.setAccessibleDescription(exposure_help_text)
-        def show_thumbnail_details(checked: bool) -> None:
-            exposure_help.setVisible(checked)
-            self.thumbnail_details.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
-            if checked:
-                QTimer.singleShot(0, lambda: self.options_scroll.ensureWidgetVisible(exposure_help))
-        self.thumbnail_details.toggled.connect(show_thumbnail_details)
-        options_layout.addWidget(self.include_exposure_thumbnails)
-        options_layout.addWidget(self.thumbnail_details)
-        options_layout.addWidget(exposure_help)
         self.include_exposure_thumbnails.toggled.connect(self._update_generate_enabled)
-
+        options.addWidget(self.include_exposure_thumbnails)
         self.tomogram_options = TomogramOptions(include_tomograms=include_tomograms,
-                                                include_slices=include_slices, parent=options)
+                                                include_slices=include_slices, parent=include)
         self.tomogram_options.setVisible(tomograms is not None or tomogram_issue is not None)
         self.tomogram_options.changed.connect(self._update_generate_enabled)
-        options_layout.addWidget(self.tomogram_options)
-        self.options_scroll.setWidget(options)
-        layout.addWidget(self.options_scroll)
-
-        self.selection_summary = QLabel("Nothing selected", self)
-        self.selection_summary.setObjectName("mutedLabel")
-        self.selection_summary.setWordWrap(True)
-        layout.addWidget(self.selection_summary)
+        options.addWidget(self.tomogram_options)
+        # Centred on the buttons' line (owner note 1 on Q7); Qt centres the fixed-height buttons already.
+        footer.addWidget(include, 1, Qt.AlignmentFlag.AlignVCenter)
 
         self.buttons = QDialogButtonBox(self)
         self.generate_button = self.buttons.addButton("Generate report", QDialogButtonBox.ButtonRole.AcceptRole)
         self.cancel_button = self.buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
         # The confirming action sat at the same visual weight as Cancel and
-        # the five secondary selection buttons above it. Qt has already
-        # polished the button by the time ``addButton`` returns, so the new
-        # object name needs an explicit re-polish to pick up the #primaryButton
-        # rules.
+        # the secondary selection buttons. Qt has already polished the button
+        # by the time ``addButton`` returns, so the new object name needs an
+        # explicit re-polish to pick up the #primaryButton rules.
         self.generate_button.setObjectName("primaryButton")
         _repolish(self.generate_button)
         self.generate_button.setDefault(True)
@@ -335,21 +263,20 @@ class ReportScopeDialog(QDialog):
         self.generate_button.setEnabled(False)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
-        layout.addWidget(self.buttons)
+        footer.addWidget(self.buttons)
+        layout.addLayout(footer)
 
         self.select_current_button.clicked.connect(lambda: self.select_scope(current_scope))
         self.select_all_button.clicked.connect(self.select_all)
         self.clear_button.clicked.connect(self.clear_selection)
-        self.expand_button.clicked.connect(self.tree.expandAll)
-        self.collapse_button.clicked.connect(self.tree.collapseAll)
 
         self._populate()
+        # Every row shows when the dialog opens, and the opening height follows them.
+        self.tree.expandAll()
         if current_scope is not None and not self._items_for_scope(current_scope):
-            # Nothing in the tree stands for it, so the button would do
-            # nothing. Say so in its label, not only on hover.
+            # Nothing in the tree stands for it, so the button would do nothing.
             self.select_current_button.setEnabled(False)
-            self.select_current_button.setText("Current review scope is not reportable")
-            reason = f"{scope_name or 'The current scope'} has no entry in this report scope list."
+            reason = f"Not available: {scope_name or 'the current scope'} has no entry in this list."
             self.select_current_button.setToolTip(reason)
             self.select_current_button.setAccessibleDescription(reason)
         if current_scope is not None or not self._session_items:
@@ -361,27 +288,28 @@ class ReportScopeDialog(QDialog):
 
         Routing the preview through ``normalise_report_scope`` is the point: a
         summary derived from the checkboxes could describe a scope the
-        generator never produces, and would miss the supporting Atlas sessions
-        normalisation adds.
+        generator never produces.
         """
 
         request = request if request is not None else self.selected_request()
-        return self._preview(request)[1]
+        return self._preview(request)[1].text
 
-    def _preview(self, request: ReportScopeRequest) -> tuple[ReportScope | None, str]:
-        """The normalised scope and its description; no scope when the selection has none.
+    def _preview(self, request: ReportScopeRequest) -> tuple[ReportScope | None, ReportPreview]:
+        """The normalised scope and its preview; no scope when the selection has none.
 
         Only the refusal of an unreportable selection is caught: any other
         failure is a fault that must not hide behind an enabled Generate.
         """
 
+        if not self.tree.isEnabled():
+            return None, report_preview(None, NO_SESSIONS)
         if not request.has_selection:
-            return None, "Nothing selected"
+            return None, report_preview(None)
         try:
             scope = normalise_report_scope(self._sessions, self._groups, request, self._tomograms)
         except ValueError as exc:
-            return None, f"{_selection_summary_text(request)}. {exc}"
-        return scope, describe_report_scope(scope)
+            return None, report_preview(None, str(exc))
+        return scope, report_preview(scope)
 
     def accepted_scope(self) -> ReportScope | None:
         """The exact scope the last preview described; the flow dispatches it unchanged."""
@@ -419,7 +347,6 @@ class ReportScopeDialog(QDialog):
             self._collect_descendant_selection(item, session_keys, sample_keys)
         return ReportScopeRequest(
             frozenset(group_keys), frozenset(session_keys), frozenset(sample_keys),
-            include_atlas_overview=self.include_atlas_overview.isChecked(),
             include_exposure_thumbnails=self.include_exposure_thumbnails.isChecked(),
             include_tomograms=include_tomograms,
             include_slices=include_slices,
@@ -461,7 +388,7 @@ class ReportScopeDialog(QDialog):
                 ancestor.setExpanded(True)
                 ancestor = ancestor.parent()
         self.tree.setCurrentItem(selected_items[0])
-        self.tree.scrollToItem(selected_items[0], QTreeWidget.ScrollHint.PositionAtTop)
+        self.tree.reveal(selected_items[0])
         self._update_generate_enabled()
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt API
@@ -470,17 +397,46 @@ class ReportScopeDialog(QDialog):
         if handle is not None and not self._follows_screen:
             handle.screenChanged.connect(lambda _screen: self._fit_to_screen())
             self._follows_screen = True
+        if not self._height_fitted:
+            self._height_fitted = True
+            self._fit_height()
         self._fit_to_screen()
-        if self.tree.currentItem() is not None:
-            self.tree.scrollToItem(self.tree.currentItem(), QTreeWidget.ScrollHint.PositionAtTop)
+        current = self.tree.currentItem()
+        if current is not None:
+            self.tree.reveal(current)
 
     def _available_geometry(self) -> QRect:
         return self.screen().availableGeometry()
 
+    def opening_body_height(self) -> int:
+        """The panels' shared height that shows every tree row and every preview line."""
+
+        tree = self.tree
+        rows = sum(1 for item in self._iter_items() if not item.isHidden() and _shown(item))
+        row_height = tree.sizeHintForRow(0) if tree.topLevelItemCount() else 0
+        tree_height = (tree.header().sizeHint().height() + rows * max(row_height, 1)
+                       + 2 * tree.frameWidth() + tree.contentsMargins().top() + tree.contentsMargins().bottom())
+        return max(tree_height, self.preview_pane.content_height(), TREE_MIN_HEIGHT)
+
+    def _fit_height(self) -> None:
+        """Set the opening height once: the longer panel, up to 80 % of the screen (Q7).
+
+        It does not change while the user ticks or folds rows; the user can
+        still resize the dialog. Above the cap both panels scroll.
+        """
+
+        layout = self.layout()
+        if layout is not None:
+            layout.activate()
+        chrome = self.height() - self.tree.height()          # margins, top line, footer
+        cap = int(self._available_geometry().height() * SCREEN_SHARE)
+        height = min(chrome + self.opening_body_height(), cap)
+        self.resize(self.width(), max(height, self.minimumSizeHint().height()))
+
     def _fit_to_screen(self) -> None:
         """Keep the whole frame, title bar included, on the available screen (GR-03).
 
-        The tree is the layout's stretch item, so it gives up height first.
+        The two panels are the layout's stretch row, so they give up height first.
         """
         available = self._available_geometry()
         frame, inner = self.frameGeometry(), self.geometry()
@@ -554,7 +510,6 @@ class ReportScopeDialog(QDialog):
     def _populate(self) -> None:
         sources = self._tomograms.sources if self._tomograms is not None else ()
         if not self._groups and not sources:
-            self.detail.setText("No sessions loaded. Load a session before generating a report.")
             self.tree.setEnabled(False)
             return
         self.tree.clear()
@@ -568,10 +523,11 @@ class ReportScopeDialog(QDialog):
             else:
                 self.tree.addTopLevelItem(self._filled_group_item(entry))
         if sources:
-            self.tree.addTopLevelItem(self._folders_item(sources))
+            self._folder_heading = self._folders_item(sources)
+            self.tree.addTopLevelItem(self._folder_heading)
 
     def _user_group_item(self, heading: UserHeading) -> QTreeWidgetItem:
-        item = QTreeWidgetItem([heading.group.name, ""])
+        item = QTreeWidgetItem([heading.group.name, "Your group"])
         item.setToolTip(0, f"{heading.group.name}\nYour group: {count_phrase(len(heading.members), 'row')}")
         item.setData(0, REPORT_USER_GROUP_ROLE, heading.group.key)
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
@@ -602,16 +558,22 @@ class ReportScopeDialog(QDialog):
     def _folders_item(self, sources: Iterable[ReportSource]) -> QTreeWidgetItem:
         """The processing folders, after the acquisition groups; ticks filter rows only."""
 
-        heading = QTreeWidgetItem(["Processing folders", ""])
-        heading.setToolTip(0, FOLDER_NOTE)
+        heading = QTreeWidgetItem(["Processing folders", "Folder group"])
+        heading.setToolTip(0, FOLDER_TIP)
+        heading.setData(1, REPORT_TYPE_ROLE, "Folder group")
         heading.setFlags(heading.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
         heading.setCheckState(0, Qt.CheckState.Unchecked)
         heading.setIcon(0, themed_icon("folder-open"))
         for source in sources:
-            count = count_phrase(len(source.source.tomograms), "tomogram")
-            item = QTreeWidgetItem([source.label, f"{source.source.pipeline} · {count}"])
-            item.setToolTip(0, f"{source.label}\n{source.source.pipeline} · {count}")
+            pipeline = source.source.display_pipeline
+            # The folder's tomogram count moves to the tooltip: the preview counts what prints (Q7).
+            detail = " · ".join(part for part in (pipeline, count_phrase(len(source.source.tomograms), 'tomogram')) if part)
+            kind = f"{pipeline} folder" if pipeline else "Folder"
+            item = QTreeWidgetItem([source.label, kind])
+            item.setToolTip(0, f"{source.label}\n{detail}")
+            item.setToolTip(1, detail)
             item.setData(0, REPORT_FOLDER_ROLE, source.source.id)
+            item.setData(1, REPORT_TYPE_ROLE, kind)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Unchecked)
             item.setIcon(0, themed_icon("folder-open"))
@@ -621,7 +583,8 @@ class ReportScopeDialog(QDialog):
         return heading
 
     def _group_item(self, group: ProjectTreeGroup) -> QTreeWidgetItem:
-        item = QTreeWidgetItem([group.display_name, project_group_badge(group)])
+        badge = project_group_badge(group)
+        item = QTreeWidgetItem([group.display_name, TYPE_WORDS.get(badge, badge)])
         item.setToolTip(0, _group_tooltip(group))
         item.setToolTip(1, project_group_badge_tooltip(group))
         item.setData(0, REPORT_GROUP_ROLE, group)
@@ -636,7 +599,7 @@ class ReportScopeDialog(QDialog):
         return item
 
     def _session_item(self, session: Session, badge: str) -> QTreeWidgetItem:
-        item = QTreeWidgetItem([session.name or session.path.name, badge])
+        item = QTreeWidgetItem([session.name or session.path.name, TYPE_WORDS.get(badge, badge)])
         item.setToolTip(0, str(session.path))
         item.setToolTip(1, session_badge_tooltip(badge))
         item.setData(0, REPORT_SESSION_ROLE, session)
@@ -698,13 +661,35 @@ class ReportScopeDialog(QDialog):
 
     def _update_generate_enabled(self) -> None:
         request = self.selected_request()
-        self._scope, text = self._preview(request)
+        self._scope, preview = self._preview(request)
         self.generate_button.setEnabled(self._scope is not None)
-        self.selection_summary.setText(text)
+        self.preview_pane.show_preview(preview)
+        self.preview_badge.setText(preview.badge)
         folder_mode = self._scope is not None and self._scope.folder_report
-        if self.tree.isEnabled():
-            self.detail.setText(FOLDER_DETAIL if folder_mode else SESSION_DETAIL)
+        # A folder report cannot use exposure thumbnails, so the box is not shown (board 2, state b).
+        self.include_exposure_thumbnails.setVisible(not folder_mode)
         self.tomogram_options.show_scope(self._scope, self._tomogram_issue)
+        self._mark_unused_folders(self._scope is not None and bool(self._scope.sessions)
+                                  and not self._scope.prints_tomograms)
+
+    def _mark_unused_folders(self, unused: bool) -> None:
+        """Folder ticks matter only when tomograms print: say so on the rows (board 2, state d)."""
+
+        rows = [*([self._folder_heading] if self._folder_heading is not None else []), *self._folder_items.values()]
+        muted = QColor(current_palette().text_muted)
+        self._item_updates_blocked = True
+        try:
+            for item in rows:
+                kind = item.data(1, REPORT_TYPE_ROLE)
+                text = NOT_USED if unused else kind
+                if item.text(1) == text:
+                    continue
+                item.setText(1, text)
+                item.setToolTip(1, NOT_USED_TIP if unused else (item.toolTip(0).partition("\n")[2] or FOLDER_TIP))
+                for column in (0, 1):
+                    item.setData(column, Qt.ItemDataRole.ForegroundRole, muted if unused else None)
+        finally:
+            self._item_updates_blocked = False
 
     def _set_checked(self, item: QTreeWidgetItem, checked: bool) -> None:
         item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
@@ -735,6 +720,16 @@ class ReportScopeDialog(QDialog):
         yield item
         for child_index in range(item.childCount()):
             yield from self._iter_item_tree(item.child(child_index))
+
+
+def _shown(item: QTreeWidgetItem) -> bool:
+    """Whether every ancestor of ``item`` is expanded, so the row is in the list."""
+    parent = item.parent()
+    while parent is not None:
+        if not parent.isExpanded():
+            return False
+        parent = parent.parent()
+    return True
 
 
 def _is_processing_group(value: object) -> bool:

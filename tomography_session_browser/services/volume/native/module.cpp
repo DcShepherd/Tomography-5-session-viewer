@@ -137,7 +137,9 @@ PyObject *sample(PyObject *, PyObject *args) {
     if (b.ndim != 3 || !dense(b)) { if (!PyErr_Occurred()) fail("Expected a 3D source"); return nullptr; }
     bool swap = false;
     const char type = format(b,swap);
-    const int mode = type=='b' && b.itemsize==1 ? 0 : type=='h' && b.itemsize==2 ? 1 :
+    // Mode 100 is not an MRC mode: IMOD unsigned bytes (the parser reads them as 'B').
+    const int mode = type=='b' && b.itemsize==1 ? 0 : type=='B' && b.itemsize==1 ? 100 :
+                     type=='h' && b.itemsize==2 ? 1 :
                      type=='f' && b.itemsize==4 ? 2 : type=='H' && b.itemsize==2 ? 6 :
                      type=='e' && b.itemsize==2 ? 12 : -1;
     if (mode < 0) { fail("Unsupported source dtype"); return nullptr; }
@@ -206,7 +208,8 @@ PyMODINIT_FUNC RESLICE_INIT() {
     if (result && (PyModule_AddIntConstant(result,"ABI_VERSION",2)<0 ||
                    PyModule_AddIntConstant(result,"MAX_TILE_ROWS",MAX_TILE_ROWS)<0 ||
                    PyModule_AddIntConstant(result,"MAX_WORKERS",MAX_WORKERS)<0 ||
-                   PyModule_AddIntConstant(result,"X86_64_V3",x86_64_v3())<0)) {
+                   PyModule_AddIntConstant(result,"X86_64_V3",x86_64_v3())<0 ||
+                   PyModule_AddIntConstant(result,"UNSIGNED_BYTES",1)<0)) {
         Py_DECREF(result); return nullptr;
     }
     return result;

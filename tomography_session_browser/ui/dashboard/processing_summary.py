@@ -55,7 +55,8 @@ class ProcessingSummaryPage(QWidget):
         layout.addWidget(header)
         if payload.sources:
             noun = 'source folder' if summary.source_count == 1 else 'source folders'
-            layout.addWidget(note(f'Processed with {summary.pipeline} · {summary.source_count} {noun}', self))
+            processed = f'Processed with {summary.pipeline} · ' if summary.pipeline else ''
+            layout.addWidget(note(f'{processed}{summary.source_count} {noun}', self))
         if summary.notice:
             layout.addWidget(note(summary.notice, self))
         if summary.missing_version_count:

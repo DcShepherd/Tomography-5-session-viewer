@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from tomography_session_browser.domain.enums import SessionKind
+from tomography_session_browser.domain.folder_type import TypeFoundBy
 from tomography_session_browser.domain.acquisition import AcquisitionEvidence, EvidenceFile
 
 
@@ -195,3 +196,5 @@ class Session:
     samples: list[Sample] = field(default_factory=list)
     metadata_summary: Metadata = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    #: How the app found that the folder holds tilt series, when no record says it (rule 5).
+    found_by: TypeFoundBy | None = None

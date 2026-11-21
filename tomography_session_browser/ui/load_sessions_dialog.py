@@ -47,6 +47,7 @@ from tomography_session_browser.services.session_intake import (
     QueueEntry,
     SessionIntake,
     admit,
+    folder_typing,
     replace_entry,
 )
 from tomography_session_browser.services.settings_service import recent_session_paths
@@ -174,9 +175,12 @@ class QueuedFolderRow(QFrame):
         """Show ``folder``'s check. Controls that no longer apply are retired."""
 
         self.folder = folder
-        self.setProperty("tone", "bad" if folder.problem else "")
+        # A folder the load will ask about takes the warning tone, not the refusal red (owner D14 a).
+        tone = "bad" if folder.problem else "warn" if folder.asks else ""
+        self.setProperty("tone", tone)
         self.badge.setText(folder.badge or "–")
         self.badge.setProperty("empty", not folder.badge)
+        self.badge.setProperty("tone", tone)
         self.name.setText(folder.name)
         if self.detail is not None:
             self._text.removeWidget(self.detail)
@@ -184,12 +188,18 @@ class QueuedFolderRow(QFrame):
         if folder.problem:
             self.detail = ElidedLabel(folder.reason, parent=self)
             self.detail.setObjectName("queuedFolderReason")
+        elif folder.type_note:
+            # "The app cannot find the type of 3 files." or "Read as: tomograms · your selection".
+            self.detail = ElidedLabel(folder.type_note, parent=self)
+            self.detail.setObjectName("queuedFolderNote" if folder.asks else "queuedFolderPath")
+            self.detail.setToolTip(folder.path)
         else:
             self.detail = ElidedLabel(folder.path, mode=Qt.TextElideMode.ElideMiddle, parent=self)
             self.detail.setObjectName("queuedFolderPath")
         self._text.addWidget(self.detail)
         self.kind.setText(folder.kind_label)
         self.kind.setHidden(not folder.kind_label)
+        self.kind.setProperty("tone", tone)
 
         for old in (self.parent_button, self.status):
             if old is not None:
@@ -204,19 +214,21 @@ class QueuedFolderRow(QFrame):
             self.parent_button.clicked.connect(lambda: self.use_parent_requested.emit(self.folder.path))
             self._layout.insertWidget(slot, self.parent_button)
         else:
-            glyph, tone, status = (
-                ("check-circle", "good", "Ready")
+            glyph, glyph_tone, status = (
+                ("help-circle", "warn", "Select at load")
+                if folder.asks
+                else ("check-circle", "good", "Ready")
                 if folder.ready
                 else ("x-circle", "bad", "Won’t load")
             )
-            self.status = Glyph(glyph, tone, 18, self)
+            self.status = Glyph(glyph, glyph_tone, 18, self)
             self.status.setAccessibleName(status)
             self._layout.insertWidget(slot, self.status)
 
         self.remove_button.setAccessibleName(f"Remove {folder.name}")
-        parts = (folder.name, folder.kind_label, folder.reason or "ready")
+        parts = (folder.name, folder.kind_label, folder.reason or folder.type_note or "ready")
         self.setAccessibleName(", ".join(part for part in parts if part))
-        for widget in (self, self.badge):
+        for widget in (self, self.badge, self.kind):
             widget.style().unpolish(widget)
             widget.style().polish(widget)
 
@@ -358,6 +370,10 @@ class LoadSessionsDialog(QDialog):
         self.ready_count.setObjectName("queueCount")
         self.ready_count.setProperty("tone", "good")
         queue_header.addWidget(self.ready_count)
+        self.select_count = QLabel("", self.queue)
+        self.select_count.setObjectName("queueCount")
+        self.select_count.setProperty("tone", "warn")
+        queue_header.addWidget(self.select_count)
         self.problem_count = QLabel("", self.queue)
         self.problem_count.setObjectName("queueCount")
         self.problem_count.setProperty("tone", "bad")
@@ -537,7 +553,8 @@ class LoadSessionsDialog(QDialog):
     def add_paths(self, paths: Iterable[str | Path]) -> Admission[object]:
         """Queue ``paths``. Only new paths, and paths of rows that can change on disk, are looked at."""
 
-        admission = admit(self._entries, paths, self._loader.classify, loaded_keys=self._loaded_keys)
+        admission = admit(self._entries, paths, self._loader.classify, loaded_keys=self._loaded_keys,
+                          read_as=folder_typing(self._loader))
         self._publish(admission.entries)
         return admission
 
@@ -562,7 +579,8 @@ class LoadSessionsDialog(QDialog):
         if index is None or not self._entries[index].folder.parent_folder:
             return
         parent = self._entries[index].folder.parent_folder
-        self._publish(replace_entry(self._entries, index, parent, self._loader.classify, loaded_keys=self._loaded_keys))
+        self._publish(replace_entry(self._entries, index, parent, self._loader.classify, loaded_keys=self._loaded_keys,
+                                    read_as=folder_typing(self._loader)))
 
     def clear(self) -> None:
         self._publish(())
@@ -612,6 +630,8 @@ class LoadSessionsDialog(QDialog):
 
         intake = self.intake
         queued, ready, problems = len(intake.folders), len(intake.ready), len(intake.problems)
+        # A folder that will ask counts in "Load N sessions", not in "N ready" (owner D14 a).
+        to_select = sum(1 for folder in intake.ready if folder.asks)
         self.queue.setVisible(bool(queued))
         # With nothing queued the drop well takes the room the list would, unless
         # it holds chips, which must stay where they are.
@@ -621,8 +641,10 @@ class LoadSessionsDialog(QDialog):
         )
         if self.recent_row is not None:
             self.recent_row.set_queued({path_identity_key(entry.spelling) for entry in self._entries})
-        self.ready_count.setText(f"{ready} ready")
-        self.ready_count.setVisible(bool(ready))
+        self.ready_count.setText(f"{ready - to_select} ready")
+        self.ready_count.setVisible(bool(ready - to_select))
+        self.select_count.setText(f"{to_select} to select")
+        self.select_count.setVisible(bool(to_select))
         self.problem_count.setText(f"{problems} won’t load")
         self.problem_count.setVisible(bool(problems))
         self.load_button.setText(load_button_text(ready))
@@ -698,7 +720,8 @@ class LoadSessionsDialog(QDialog):
             return
         # A preview within the drag budget; the queue does not change until the drop.
         self._preview = admit(self._entries, paths, self._loader.classify,
-                              loaded_keys=self._loaded_keys, budget_s=DRAG_CHECK_BUDGET_S)
+                              loaded_keys=self._loaded_keys, budget_s=DRAG_CHECK_BUDGET_S,
+                              read_as=folder_typing(self._loader))
         self.drop_well.set_tone(self._preview.supplied.tone)
         event.setDropAction(Qt.DropAction.CopyAction)
         event.accept()
@@ -724,7 +747,8 @@ class LoadSessionsDialog(QDialog):
         # Even folders that will not load are queued, so the list can say why. The
         # drag's completed checks are reused; only what it had no time for is looked at.
         known = preview.records if preview is not None else ()
-        admission = admit(self._entries, paths, self._loader.classify, loaded_keys=self._loaded_keys, known=known)
+        admission = admit(self._entries, paths, self._loader.classify, loaded_keys=self._loaded_keys, known=known,
+                          read_as=folder_typing(self._loader))
         self._publish(admission.entries)
 
     def done(self, result: int) -> None:  # noqa: D102 - Qt override

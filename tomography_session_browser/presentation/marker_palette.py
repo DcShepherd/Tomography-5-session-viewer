@@ -149,7 +149,9 @@ def status_reason(status: str | None) -> str | None:
 
     The viewer's long-standing substring reading of status words, kept
     exactly: "Partial" and "warning" read as incomplete, "done" and
-    "acquired" as complete, "error" and "aborted" as failed.
+    "acquired" as complete, "error" and "aborted" as failed. Batch markers
+    carry the shared outcome's words (``AtlasMarkerStatus``): "collected"
+    reads as complete, "partial" as incomplete, "queued" as pending.
     """
 
     if not status:
@@ -163,7 +165,7 @@ def status_reason(status: str | None) -> str | None:
         return "incomplete"
     if any(value in normalized for value in ("queue", "pending", "selected")):
         return "pending"
-    if any(value in normalized for value in ("acquired", "done", "complete", "ok", "available")):
+    if any(value in normalized for value in ("acquired", "collected", "done", "complete", "ok", "available")):
         return "complete"
     if any(value in normalized for value in ("refined", "initial")):
         return "complete"

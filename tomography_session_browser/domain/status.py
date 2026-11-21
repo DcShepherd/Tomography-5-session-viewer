@@ -65,7 +65,8 @@ def marker_severity(status: str) -> int:
 
 _RECORDED_WORDS: dict[str, RowStatus] = {
     **dict.fromkeys(("acquired", "done", "complete", "completed"), RowStatus.DONE),
-    **dict.fromkeys(("failed", "error"), RowStatus.FAILED),
+    # A recorded failure is an interruption: what it acquired still counts.
+    **dict.fromkeys(("failed", "error", "aborted"), RowStatus.FAILED),
     **dict.fromkeys(("pending", "queued", "scheduled"), RowStatus.PENDING),
     "missing": RowStatus.MISSING,
     **dict.fromkeys(("partial", "incomplete", "warning"), RowStatus.PARTIAL),

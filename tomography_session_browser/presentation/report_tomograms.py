@@ -27,7 +27,7 @@ from tomography_session_browser.presentation.project_tree import processing_grou
 from tomography_session_browser.presentation.report_datasets import report_datasets
 from tomography_session_browser.presentation.tomogram_placement import ExclusionKind
 from tomography_session_browser.presentation.tomogram_slices import (
-    SKIP_NO_VERSION, SKIP_UNREADABLE, SliceRequest, SliceSkip, plan_slice,
+    SliceRequest, SliceSkip, plan_slice,
 )
 from tomography_session_browser.presentation.workspace import EntityKind, Workspace
 from tomography_session_browser.services.tomogram_links import TomogramLink
@@ -39,6 +39,11 @@ RowState = Literal['placed', 'no_match', 'incomplete'] | ExclusionKind
 #: The print noun for each evidence step, for exclusion and incomplete notes.
 STEP_NOUNS: dict[str, str] = {'A': 'recorded paths', 'B': 'movie names', 'C': 'MDOC records',
                               'D': 'identical stacks', 'E': 'names'}
+
+#: The print name for a ticked row that is in no dataset's table (owner, 20 November;
+#: canvas board 7, option A). "Not linked" is not true for each such row: a row
+#: whose tilt series is in two datasets, or in the session only, has a link.
+NO_DATASET_LINK = "No dataset link"
 
 #: Print forms of the two calibration warnings: the screen text asks for
 #: screen actions (F20), which a printed page cannot offer.
@@ -346,80 +351,47 @@ def incomplete_note(rows: Sequence[ReportRow], folders: int) -> str:
     counts = Counter(row.link.step for row in rows)
     steps = ", ".join(f"{STEP_NOUNS[step]} {counts[step]}" for step in STEP_NOUNS if counts.get(step))
     boundary = "the ticked folder" if folders == 1 else f"the {folders} ticked folders"
-    return (f"Link data not complete: {count_phrase(len(rows), 'tomogram')} in {boundary} ({steps}). "
-            "Their dataset is not known. The linked count does not include them.")
+    # The cover's No dataset link card and line say that the counts do not include them.
+    known = "Its dataset is not known." if len(rows) == 1 else "Their datasets are not known."
+    return f"Link data not complete: {count_phrase(len(rows), 'tomogram')} in {boundary} ({steps}). {known}"
 
 
-# ------------------------------------------------------------------ dialog preview
+def unplaced_note(scoped: ScopedTomograms) -> str:
+    """The cover line that says where each row with no dataset link is listed (board 7, option A).
 
-def _phrase(parts: Sequence[str]) -> str:
-    return " · ".join(part for part in parts if part)
-
-
-def _names(labels: Sequence[str]) -> str:
-    return labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " and " + labels[-1]
-
-
-def _counted(count: int, text: str) -> str:
-    return f"{count} {text}" if count else ""
-
-
-def _has_tags_or_note(row: ReportRow) -> bool:
-    tags = row.summary.tags
-    return tags is not None and (any(value.count for value in tags.tags) or bool(tags.note.strip()))
-
-
-def folder_preview_line(source: ReportSource, rows: Sequence[ReportRow]) -> str:
-    """One ticked folder in a folder report: its rows by link state."""
-    if not rows:
-        return f"{source.label}: no tomograms."
-    linked = sum(row.link.status == 'resolved' for row in rows)
-    incomplete = sum(row.state == 'incomplete' for row in rows)
-    return source.label + ": " + _phrase((count_phrase(len(rows), "tomogram"), _counted(linked, "linked"),
-                                         _counted(len(rows) - linked - incomplete, "not linked"),
-                                         _counted(incomplete, "link data not complete"))) + "."
-
-
-def slice_preview_line(plans: Sequence[SliceRequest | SliceSkip]) -> str:
-    """How many volumes the central slices read, and why some rows get no image."""
-    images = sum(isinstance(plan, SliceRequest) for plan in plans)
-    text = f"Central slices: {count_phrase(images, 'image')} from {count_phrase(images, 'volume')}."
-    skipped = Counter(plan.reason for plan in plans if isinstance(plan, SliceSkip))
-    if skipped.get(SKIP_UNREADABLE):
-        text += f" The app cannot read the volume header of {count_phrase(skipped[SKIP_UNREADABLE], 'tomogram')}."
-    if skipped.get(SKIP_NO_VERSION):
-        count = skipped[SKIP_NO_VERSION]
-        text += f" {count_phrase(count, 'tomogram')} {'has' if count == 1 else 'have'} no volume to show."
-    return text
-
-
-def tomogram_preview_lines(scoped: ScopedTomograms, slices: bool) -> list[str]:
-    """The dialog lines for printed tomogram content (D4 §5.1, board B0 dialog)."""
-    lines: list[str] = []
-    if scoped.folder_report:
-        ticked = {source.source.id for source in scoped.sources}
-        by_source = {section.source_ids[0]: section.members for section in scoped.sections if section.source_ids}
-        lines += [folder_preview_line(source, by_source.get(source.source.id, ())) for source in scoped.sources]
-    else:
-        members = scoped.members
-        ticked = {row.tomogram.source_id for row in members}
-        if members:
-            linked = f"{len(members)} from {count_phrase(len(ticked), 'folder')}"
+    A row is in the notes of each dataset its link names, or else in a
+    session note or the incomplete note on the cover: never both, so the two
+    parts add up to the cover's No dataset link count.
+    """
+    # The number of dataset sections that list each row.
+    listed: Counter[str] = Counter(key for section in scoped.sections for key in {row.key for row in section.notes})
+    below = {row.key for note in scoped.session_notes for row in note.rows} | {row.key for row in scoped.incomplete}
+    below -= listed.keys()
+    total = len(listed) + len(below)
+    if not total:
+        return ""
+    parts = [f"{NO_DATASET_LINK}: {count_phrase(total, 'tomogram')}."]
+    if listed:
+        titles = [section.title for section in scoped.sections if section.notes]
+        if len(titles) == 1:
+            where, verb = f"The section of {titles[0]}", "lists"
+        elif len(titles) > 3 or len(set(titles)) < len(titles):   # many, or two datasets share a name
+            where, verb = f"{len(titles)} dataset sections", "list"
         else:
-            linked = "none"
-        not_counted = len(scoped.excluded) + len(scoped.incomplete)
-        lines.append("Linked tomograms: " + _phrase((linked, _counted(not_counted, "not counted"),
-                                                       _counted(sum(map(_has_tags_or_note, members)), "with tags or notes"))) + ".")
-    if slices:
-        lines.append(slice_preview_line(tuple(member_slice_plans(scoped).values())))
-    notes = []
-    if scoped.folders_left_out:
-        notes.append(f"The report does not include {count_phrase(scoped.folders_left_out, 'loaded folder')}.")
-    unsaved = [source.label for source in scoped.sources if source.source.id in ticked and source.tags.unsaved]
-    if unsaved:
-        verb = "has" if len(unsaved) == 1 else "have"
-        notes.append(f"{_names(unsaved)} {verb} tag changes that the reviewer did not save. "
-                     "The report shows them as they are on the screen.")
-    if notes:
-        lines.append(" ".join(notes))
-    return lines
+            where, verb = f"The sections of {and_list(titles)}", "list"
+        which = f"{len(listed)} of them" if below else ("it" if total == 1 else "them")
+        parts.append(f"{where} {verb} {which} with the cause.")
+    if below and listed:
+        parts.append(f"The {len(below)} below {'is' if len(below) == 1 else 'are'} not in a dataset section.")
+    elif below:
+        parts.append(f"{'It is' if total == 1 else 'They are'} not in a dataset section. The lines below give the cause.")
+    if any(count > 1 for count in listed.values()):
+        parts.append("A tomogram that goes to tilt series in more than one dataset is in the list of each.")
+    return " ".join(parts)
+
+
+def and_list(labels: Sequence[str]) -> str:
+    """ "A", "A and B", "A, B and C"."""
+    if len(labels) < 2:
+        return "".join(labels)
+    return ", ".join(labels[:-1]) + " and " + labels[-1]

@@ -151,16 +151,23 @@ class StartMarkHandoff(QObject):
     def show(self, window: QWidget) -> None:
         """Watch ``window`` and show it once the card has had its minimum time."""
         self.watch(window)
+        self._show_window()
+
+    def _show_window(self) -> None:
+        """Show the window, or wait again for the time the card still needs.
+
+        A timer can fire some milliseconds early (on Windows it can follow the
+        system tick), so the time is measured again on the card's own clock.
+        """
+        window = self._window
+        if window is None:
+            return
         mark = self._mark
         shown_ms = mark.first_paint.elapsed() if mark is not None and mark.first_paint.isValid() else MINIMUM_VISIBLE_MS
         if shown_ms >= MINIMUM_VISIBLE_MS:
             window.show()
         else:
             self._timer.start(MINIMUM_VISIBLE_MS - shown_ms)
-
-    def _show_window(self) -> None:
-        if self._window is not None:
-            self._window.show()
 
     def close(self) -> None:
         mark, self._mark = self._mark, None

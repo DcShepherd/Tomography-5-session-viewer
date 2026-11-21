@@ -15,7 +15,7 @@ from tomography_session_browser.domain.acquisition import AcquisitionEvidence
 from tomography_session_browser.parsers.mrc_metadata_parser import fei_spot_index
 from tomography_session_browser.parsers.mrc_parser import read_mrc_metadata
 from tomography_session_browser.parsers.path_utils import natural_key, safe_id, sorted_paths
-from tomography_session_browser.parsers.volume_header import file_records_volume
+from tomography_session_browser.parsers.volume_header import CLOUD_ONLY_FILE_WARNING, cloud_only, file_records_volume
 from tomography_session_browser.services.acquisition_metadata import (
     ACQUISITION_SPOT_LABEL,
     LEGACY_SPOT_LABEL,
@@ -54,6 +54,12 @@ def parse_tilt_series_in_folder(path: Path, warnings: list[str] | None = None) -
                 )
             continue
         try:
+            if stem not in mdoc_paths and cloud_only(mrc_path):
+                # Without an MDOC only the header tells a stack from a volume,
+                # and reading it would download the file.
+                if warnings is not None:
+                    warnings.append(f"{mrc_path.name}: {CLOUD_ONLY_FILE_WARNING} It has no MDOC, so it was not loaded.")
+                continue
             if stem not in mdoc_paths and file_records_volume(mrc_path):
                 if warnings is not None:
                     warnings.append(f"{mrc_path.name}: the header records a volume, not a tilt stack. It was not loaded as a tilt series.")

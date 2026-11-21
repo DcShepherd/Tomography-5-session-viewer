@@ -35,6 +35,7 @@ from tomography_session_browser.services.session_loader import (
 )
 from tomography_session_browser.services.settings_service import (
     Settings,
+    read_as_selections,
     save_settings,
 )
 from tomography_session_browser.ui.viewer.models import ViewerViewState
@@ -145,7 +146,7 @@ class WindowState:
         self.review.tomogram_sort = 'Name'
         self.shell = ShellState()
         self.viewer = ViewerState()
-        self.loading.loader = SessionLoader()
+        self.loading.loader = SessionLoader(selections=lambda: read_as_selections(self.review.settings))
         self.review.workspace = Workspace.build([])
         self.review.current_path: str | None = None
         self.review.scope: Scope = None

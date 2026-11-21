@@ -22,6 +22,9 @@ from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.domain.recorded_metrics import ProcessingEvidence, RecordedMetric
 from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogram
 
+#: The chain, said once in the PDF; each row's input is in its detail.
+DENOISED = 'From the input reconstruction, whose even and odd half sets cryoCARE denoised into this volume.'
+
 
 @dataclass(frozen=True, slots=True)
 class DenoisingLink:
@@ -75,10 +78,13 @@ def _same_grid(first: Tomogram, second: Tomogram) -> bool:
             and (one.shape_xyz, one.spacing_xyz) == (two.shape_xyz, two.spacing_xyz))
 
 
-def _lent(metric: RecordedMetric, origin: ProcessingSource, prefix: str) -> RecordedMetric:
-    source = Path(metric.source)
+def _lent(metric: RecordedMetric, origin: ProcessingSource, prefix: str, input_name: str) -> RecordedMetric:
+    source, pattern = Path(metric.source), Path(metric.pattern) if metric.pattern else None
     absolute = source if source.is_absolute() else origin.path / source
-    return replace(metric, source=str(absolute), qualification=f'{prefix} {metric.qualification}')
+    return replace(metric, source=str(absolute), qualification=f'{prefix} {metric.qualification}',
+                   caveats=(DENOISED, *(metric.caveats or (metric.qualification,))),
+                   detail=f'From "{origin.name}" / {input_name}. {metric.detail}'.rstrip(),
+                   pattern=str(pattern if pattern.is_absolute() else origin.path / pattern) if pattern else '')
 
 
 def denoised_row(tomogram: Tomogram, origin: ProcessingSource, input_row: Tomogram) -> Tomogram:
@@ -93,7 +99,7 @@ def denoised_row(tomogram: Tomogram, origin: ProcessingSource, input_row: Tomogr
             withheld.append(f'{metric.label} of "{origin.name}" / {input_row.name} is recorded in its pixels, and '
                             'this volume has another grid; it is not shown.')
         else:
-            metrics.append(_lent(metric, origin, prefix))
+            metrics.append(_lent(metric, origin, prefix, input_row.name))
     recorded = ProcessingEvidence().alignment
     alignment = own.alignment if own.alignment != recorded else input_row.processing.alignment
     return replace(tomogram, processing=ProcessingEvidence(alignment, (*own.metrics, *metrics),

@@ -1,8 +1,10 @@
 """Cards report components."""
 from __future__ import annotations
+import re
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 from reportlab.lib import colors
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import Flowable, Paragraph, Table
 from tomography_session_browser.reports import styles
 from tomography_session_browser.reports.graphics.overlays import MARK_LINES
@@ -15,8 +17,17 @@ class StatCardData:
     label: str
     value: str
     chips: list[Chip]
-    band: list[str]  # one tone per item, in item order
-    note: str | None = None  # muted line used instead of chips
+    #: One tone per item, in item order; empty draws the empty band; None draws no band.
+    band: list[str] | None
+    #: A muted sentence in place of the chips; it wraps and prints in full.
+    note: str | None = None
+    #: Smaller, muted text after the value: "of 3" in "2 of 3".
+    suffix: str = ""
+
+
+#: The card's note: the chips' size, wrapped.
+NOTE_STYLE = ParagraphStyle("stat-card-note", parent=styles.MUTED_STYLE, fontSize=styles.TYPE_SMALL - 0.5,
+                            leading=(styles.TYPE_SMALL - 0.5) * 1.3, spaceBefore=0, spaceAfter=0)
 
 
 class StatCard(Flowable):
@@ -24,7 +35,8 @@ class StatCard(Flowable):
 
     Title (uppercase caption), the count, a dot-chip strip and one status
     band. The row sets every card in it to the tallest card's height so the
-    bands line up.
+    bands line up. A card with a note shows the note, in full, in place of the
+    chips; a card with no band (``band=None``) has no band and no space for one.
     """
 
     PAD = 8.0
@@ -37,13 +49,17 @@ class StatCard(Flowable):
         self.height = 0.0
         self._chips = Chips(data.chips, size=styles.TYPE_SMALL - 0.5, gap=7.0)
 
+    def _note(self) -> Paragraph | None:
+        if not self.data.note or self.data.chips:
+            return None
+        return Paragraph(html_escape(self.data.note), NOTE_STYLE)
+
     def natural_height(self) -> float:
         inner = self.width - 2 * self.PAD
-        if self.data.note and not self.data.chips:
-            chips_h = styles.TYPE_SMALL * 1.5
-        else:
-            _w, chips_h = self._chips.wrap(inner, 1000)
-        return self.PAD + 9.0 + styles.TYPE_VALUE * 1.15 + 3.0 + chips_h + 5.0 + self.BAND_HEIGHT + self.PAD
+        note = self._note()
+        _w, below_h = note.wrap(inner, 1000) if note is not None else self._chips.wrap(inner, 1000)
+        band_h = 5.0 + self.BAND_HEIGHT if self.data.band is not None else 0.0
+        return self.PAD + 9.0 + styles.TYPE_VALUE * 1.15 + 3.0 + below_h + band_h + self.PAD
 
     def wrap(self, _avail_w, _avail_h):  # noqa: N802
         if not self.height:
@@ -67,17 +83,22 @@ class StatCard(Flowable):
         c.setFillColor(styles.TEXT_STRONG)
         c.setFont(styles.SANS_SEMIBOLD, styles.TYPE_VALUE)
         c.drawString(self.PAD - 0.6, value_baseline, self.data.value)
-
-        band_y = self.PAD
-        chips_top = value_baseline - styles.TYPE_VALUE * 0.3 - 3.0
-        if self.data.note and not self.data.chips:
+        if self.data.suffix:
+            after = self.PAD - 0.6 + c.stringWidth(self.data.value + " ", styles.SANS_SEMIBOLD, styles.TYPE_VALUE)
             c.setFillColor(styles.TEXT_MUTED)
-            c.setFont(styles.SANS, styles.TYPE_SMALL - 0.5)
-            c.drawString(self.PAD, chips_top - (styles.TYPE_SMALL - 0.5), fit_text(self.data.note, styles.SANS, styles.TYPE_SMALL - 0.5, inner))
+            c.setFont(styles.SANS, styles.TYPE_VALUE * 0.6)
+            c.drawString(after, value_baseline, self.data.suffix)
+
+        chips_top = value_baseline - styles.TYPE_VALUE * 0.3 - 3.0
+        note = self._note()
+        if note is not None:
+            _nw, note_h = note.wrap(inner, 1000)
+            note.drawOn(c, self.PAD, chips_top - note_h)
         else:
             _cw, chips_h = self._chips.wrap(inner, 1000)
             self._chips.drawOn(c, self.PAD, chips_top - chips_h)
-        draw_status_band(c, self.PAD, band_y, inner, self.BAND_HEIGHT, self.data.band)
+        if self.data.band is not None:
+            draw_status_band(c, self.PAD, self.PAD, inner, self.BAND_HEIGHT, self.data.band)
         c.restoreState()
 
 
@@ -103,6 +124,88 @@ def stat_card_row(cards: Sequence[StatCardData], *, total_width: float, gap: flo
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ],
     )
+
+
+@dataclass(frozen=True, slots=True)
+class FactCardData:
+    label: str
+    value: str
+    detail: str = ""
+
+
+#: Digits and number punctuation only ("1156 × 1628 × 282"): mono. Words: sans.
+_NUMBER_TEXT = re.compile(r"[\d\s×.,:/–-]*\d[\d\s×.,:/–-]*")
+
+
+def fact_value_style(value: str) -> ParagraphStyle:
+    """Mono for a number, sans for words (``REPORTS.md``: mono is for numbers)."""
+
+    return styles.VALUE_STYLE if _NUMBER_TEXT.fullmatch(value) else styles.VALUE_TEXT_STYLE
+
+
+class FactCard(Flowable):
+    """A fact card for paper: caption title, the full value, then a muted detail line.
+
+    ``fact_card_row`` gives every card in a row one height and one top for
+    the values and for the detail lines, so a value that wraps never moves
+    its detail line out of line with the others. The value is never shortened.
+    """
+
+    def __init__(self, data: FactCardData, *, width: float, padding: float = styles.CARD_PADDING,
+                 gap: float = 5.0) -> None:
+        super().__init__()
+        self.data = data
+        self.width = width
+        self.padding = padding
+        self.gap = gap
+        inner = width - 2 * padding
+        self.title = Paragraph(html_escape(data.label), styles.CARD_TITLE_STYLE)
+        self.value = Paragraph(html_escape(data.value), fact_value_style(data.value))
+        self.detail = Paragraph(html_escape(data.detail), styles.MUTED_STYLE) if data.detail else None
+        self.title_h = self.title.wrap(inner, 10_000)[1]
+        self.value_h = self.value.wrap(inner, 10_000)[1]
+        self.detail_h = self.detail.wrap(inner, 10_000)[1] if self.detail is not None else 0.0
+        # Distances from the card's top edge, as ``card`` spaces a title and its rows.
+        self.value_top = padding - 1 + self.title_h + gap + 1
+        self.detail_top = self.value_top + self.value_h + gap
+        self.height = self.natural_height()
+
+    def natural_height(self) -> float:
+        if self.detail is None:
+            return self.value_top + self.value_h + self.padding
+        return self.detail_top + self.detail_h + self.padding
+
+    def wrap(self, _avail_w, _avail_h):  # noqa: N802
+        return self.width, self.height
+
+    def draw(self) -> None:
+        c = self.canv
+        w, h, pad = self.width, self.height, self.padding
+        c.saveState()
+        c.setFillColor(styles.SURFACE)
+        c.setStrokeColor(styles.BORDER)
+        c.setLineWidth(styles.HAIRLINE)
+        c.roundRect(0.3, 0.3, w - 0.6, h - 0.6, styles.CARD_RADIUS, stroke=1, fill=1)
+        c.restoreState()
+        self.title.drawOn(c, pad, h - (pad - 1) - self.title_h)
+        self.value.drawOn(c, pad, h - self.value_top - self.value_h)
+        if self.detail is not None:
+            self.detail.drawOn(c, pad, h - self.detail_top - self.detail_h)
+
+
+def fact_card_row(cards: Sequence[FactCardData], *, total_width: float, gap: float = styles.CARD_GAP) -> Table:
+    """Fact cards evenly across ``total_width``: one height, values level, detail lines level."""
+
+    each = (total_width - gap * (len(cards) - 1)) / max(len(cards), 1)
+    flowables = [FactCard(card, width=each) for card in cards]
+    value_top = max((card.value_top for card in flowables), default=0.0)
+    detail_top = max((value_top + card.value_h + card.gap for card in flowables), default=0.0)
+    for card in flowables:
+        card.value_top, card.detail_top = value_top, detail_top
+    height = max((card.natural_height() for card in flowables), default=0.0)
+    for card in flowables:
+        card.height = height
+    return side_by_side(flowables, [each] * len(flowables), gap=gap)
 
 
 def draw_brand_mark(canvas, x: float, y: float, size: float) -> None:

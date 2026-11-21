@@ -83,13 +83,6 @@ QLabel#healthValue[valueState="ambiguous"] {{
     font-weight: 400;
 }}
 
-/* The report dialog's options area scrolls on a short screen; it shows the dialog's own background. */
-QScrollArea#reportOptionsScroll,
-QWidget#reportOptions {{
-    background: transparent;
-    border: 0;
-}}
-
 /* The dashboard's and the report dialog's secondary buttons: one rule for
    both classes (they were styled twice, with different borders and padding). */
 QToolButton#dashboardFilterButton,
@@ -387,9 +380,9 @@ QTreeWidget#viewerList::item:hover {{
 /* The main project tree paints its selection as one row-wide fill in its
    delegate (plan C9). Per-column ``::item:selected`` fills drew the name and
    the badge as two rounded cells with a seam between them, and
-   ``show-decoration-selected`` added a third block over the expander. The
-   property keeps the report dialog's tree, which shares the object name but
-   has no such delegate, on the sheet's own selection. */
+   ``show-decoration-selected`` added a third block over the expander. Only
+   the main tree carries the property and the object name; the report
+   dialog's tree has its own (below). */
 QTreeWidget#projectTree[paintsRowSelection="true"] {{
     show-decoration-selected: 0;
 }}
@@ -397,6 +390,81 @@ QTreeWidget#projectTree[paintsRowSelection="true"] {{
 QTreeWidget#projectTree[paintsRowSelection="true"]::item:selected {{
     background: transparent;
     color: {selection_text};
+}}
+
+/* The report dialog's tick tree (plan B4) keeps the generic tree card and
+   has no selection. ``ReportScopeTree.drawRow`` paints its hover as one
+   row-wide fill, so the per-column :hover fill, which left seams, is off. */
+QTreeWidget#reportScopeTree::item {{
+    min-height: 24px;  /* 34 px rows (plan B6, board 1) */
+    border-radius: {radius_control}px;
+    padding: 5px 8px;
+}}
+
+/* The report dialog (plan B6, board 2b): the tree and the "In this report"
+   pane are two cards with one border and one fill, so their edges match. */
+QTreeWidget#reportScopeTree,
+QScrollArea#reportPreview {{
+    background: {surface};
+    border: 1px solid {border};
+    border-radius: {radius_card}px;
+}}
+
+QWidget#reportPreviewContent {{
+    background: {surface};
+}}
+
+QWidget#reportPreviewBody {{
+    background: transparent;
+}}
+
+QLabel#reportPreviewTitle {{
+    color: {text_strong};
+    font-weight: 600;
+}}
+
+QLabel#reportPreviewItem {{
+    color: {text};
+}}
+
+QLabel#reportPreviewCount {{
+    color: {text_strong};
+    font-weight: 600;
+}}
+
+QLabel#reportPreviewBullet {{
+    color: {accent};
+}}
+
+QLabel#reportPreviewCaption,
+QLabel#reportPreviewLead {{
+    color: {text_muted};
+    font-size: {type_caption}pt;
+}}
+
+/* The switch to a folder report (Q8) is said, not made silently. */
+QLabel#reportPreviewLead[notice="true"] {{
+    background: {accent_soft};
+    border: 1px solid {accent};
+    border-radius: {radius_control}px;
+    color: {text_strong};
+    font-size: {type_body}pt;
+    padding: 6px 8px;
+}}
+
+QFrame#reportPreviewRule {{
+    background: {border};
+    border: 0;
+}}
+
+QTreeWidget#reportScopeTree::item:hover {{
+    background: transparent;
+}}
+
+/* The generic tree focus border, stated for the ID as for the trees above. */
+QTreeWidget#reportScopeTree:focus {{
+    border: 1px solid {accent};
+    outline: 0;
 }}
 
 QTabWidget::pane {{

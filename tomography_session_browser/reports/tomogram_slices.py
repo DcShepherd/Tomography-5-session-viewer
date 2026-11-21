@@ -12,7 +12,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 import io
-import json
 
 from PIL import Image
 
@@ -26,7 +25,6 @@ from tomography_session_browser.services.volume.models import RenderRecipe
 from tomography_session_browser.services.volume.render import render_xy
 from tomography_session_browser.services.volume.store import SourceUnavailable, VolumeUnreadable, require_unchanged
 
-KEYWORD_SCHEMA = "tomography-session-browser.report-slices/1"
 CANCELLED = "Report cancelled. The app did not write a PDF."
 
 #: progress(done, total) after each image.
@@ -143,8 +141,8 @@ def _skip(request: SliceRequest, reason: str, error: Exception, warnings: list[s
     return SliceSkip(request.tomogram, request.volume.version, reason, request.portrait)
 
 
-def slice_keywords(numbered: list[tuple[Tile, str]]) -> str:
-    """One record per printed tile, keyed by tile number: no path, row, source or project key."""
+def slice_records(numbered: list[tuple[Tile, str]]) -> dict[str, dict]:
+    """One keyword record per printed tile, keyed by tile number: no path, row, source or project key."""
     records: dict[str, dict] = {}
     for number, (tile, folder) in enumerate(numbered, start=1):
         if isinstance(tile, SliceSkip):
@@ -160,4 +158,4 @@ def slice_keywords(numbered: list[tuple[Tile, str]]) -> str:
             "planes": request.planes, "spacing_source": request.spacing_source,
             "calibration": tile.calibration, "bar": tile.bar_label,
         }
-    return json.dumps({"schema": KEYWORD_SCHEMA, "tiles": records}, allow_nan=False)
+    return records

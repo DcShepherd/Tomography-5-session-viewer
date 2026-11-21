@@ -7,7 +7,7 @@ from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogr
 from tomography_session_browser.presentation.scope_identity import scope_key
 from tomography_session_browser.presentation.tomogram_selection import AllTomograms, FolderTomograms
 from tomography_session_browser.presentation.tomogram_tabs import TomogramRow, needs_attention, prepare_tomogram_tab, sorted_within_groups
-from tomography_session_browser.presentation.tomogram_versions import review_versions
+from tomography_session_browser.presentation.tomogram_versions import unique_version
 from tomography_session_browser.presentation.workspace import Scope, Workspace
 from tomography_session_browser.services.tomogram_links import TomogramLink
 from tomography_session_browser.presentation.tomogram_review_state import RowReview, TomogramReviewState
@@ -62,7 +62,7 @@ def summary_input(workspace: Workspace, scope: Scope, sort: str = 'Name',
         title += ' · ' + version
     result = TomogramSummaryInput(scope_key(selection or scope), version, sort,
         tuple(SummaryTomogram(row.tomogram, row.link, row.group,
-                              next((volume for volume in review_versions(row.tomogram) if volume.version == version), None))
+                              unique_version(row.tomogram, version))
               for row in sorted_within_groups(list(payload.rows), sort)), payload.sources, payload.notice, title)
     return with_review(result, review_state) if review_state is not None else result
 

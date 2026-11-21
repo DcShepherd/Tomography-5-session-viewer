@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from collections.abc import Callable
 from typing import Literal
 import numpy as np
+import math
 import mmap
 
 from tomography_session_browser.domain.tomograms import Volume
@@ -35,6 +36,22 @@ def require_current(volume: Volume, message: str) -> None:
     if is_cloud_placeholder(volume.path):
         raise SourceUnavailable(message, "cloud")
     require_unchanged(volume, message)
+
+
+#: A map past the end of the file faults on access (SIGBUS on Linux), so every
+#: map first checks that the file still holds the bytes the header records.
+SHORT_FILE_MESSAGE = ("The volume file is shorter than its header records; it may still be being written. "
+                      "Reload the processing folder.")
+
+
+def require_bytes(volume: Volume, end: int) -> None:
+    """Refuse to map unless the file holds ``end`` bytes now (owner decision 9).
+
+    The file can still be cut between this check and a read; on Linux that
+    read then stops the process (a known limit, PERFORMANCE.md).
+    """
+    if volume.path.stat().st_size < end:
+        raise SourceUnavailable(SHORT_FILE_MESSAGE, "changed")
 
 
 def resident_key(volume: Volume) -> tuple:
@@ -114,6 +131,7 @@ class VolumeStore:
         if is_cloud_placeholder(volume.path):
             raise SourceUnavailable("The volume is cloud-only. Make it available locally, then reload.", "cloud")
         require_unchanged(volume, "The volume changed or was replaced. Reload the processing folder.")
+        require_bytes(volume, volume.data_offset + math.prod(grid.shape_zyx) * np.dtype(volume.dtype).itemsize)
         mapped = np.memmap(volume.path, dtype=volume.dtype, mode="r", offset=volume.data_offset,
                            shape=grid.shape_zyx, order="C")
         mapping = mapped.base
@@ -131,6 +149,7 @@ class VolumeStore:
         assert volume.grid is not None
         _, rows, columns = volume.grid.shape_zyx
         size = rows * columns * np.dtype(volume.dtype).itemsize
+        require_bytes(volume, volume.data_offset + (index + 1) * size)
         mapped = np.memmap(volume.path, dtype=volume.dtype, mode="r",
                            offset=volume.data_offset + index * size, shape=(rows, columns))
         mapping = mapped.base
@@ -167,6 +186,8 @@ class VolumeStore:
         sections = range(start, stop) if storage_normal == 2 else range(grid.shape_zyx[0])
         with self.read_session(volume, whole=storage_normal != 2) as reader:
             streamed_slab = reader.native is None and storage_normal == 2 and slices > 1
+            # Float data can hold NaN or infinity: a slab mean counts only finite voxels.
+            hits = np.zeros(output.shape, dtype=np.int32) if streamed_slab and np.dtype(volume.dtype).kind == "f" else None
             if reader.native is not None:
                 # Arrange a view only: slab, output rows, output columns. Nothing
                 # referencing this mapping survives the operation-scoped lease.
@@ -182,7 +203,7 @@ class VolumeStore:
                     if slices == 1:
                         target[:] = view[(index, *span)]
                     else:
-                        np.mean(view[(slice(start, stop), *span)], axis=0, dtype=np.float32, out=target)
+                        finite_mean(view[(slice(start, stop), *span)], 0, out=target)
             else:
                 for section_index in sections:
                     if cancelled():
@@ -190,24 +211,51 @@ class VolumeStore:
                     with reader.section(section_index) as mapped:
                         if storage_normal == 2:
                             values = mapped if grid.axes_crs[1] == vertical else mapped.T
-                            if slices > 1:
+                            if hits is not None:
+                                finite = np.isfinite(values)
+                                output += np.where(finite, values, 0)
+                                hits += finite
+                            elif slices > 1:
                                 output += values
                             else:
                                 output[:] = values
                         else:
                             if storage_normal == 1:
-                                values = mapped[index, :] if slices == 1 else np.mean(mapped[start:stop, :], axis=0, dtype=np.float32)
+                                values = mapped[index, :] if slices == 1 else finite_mean(mapped[start:stop, :], 0)
                             else:
-                                values = mapped[:, index] if slices == 1 else np.mean(mapped[:, start:stop], axis=1, dtype=np.float32)
+                                values = mapped[:, index] if slices == 1 else finite_mean(mapped[:, start:stop], 1)
                             if grid.axes_crs[2] == vertical:
                                 output[section_index, :] = values
                             else:
                                 output[:, section_index] = values
-        if streamed_slab:
+        if hits is not None:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                output /= hits  # 0/0 is NaN: no finite voxel in that column of the slab
+        elif streamed_slab:
             output /= stop-start
         require_unchanged(volume)
         return output
 
+
+
+def finite_mean(values: np.ndarray, axis: int, *, out: np.ndarray | None = None) -> np.ndarray:
+    """The float32 mean over ``axis`` of the finite voxels only; NaN where none is finite.
+
+    The oblique and compiled samplers already skip NaN and infinity (owner
+    decision 6). Integer data, and float data with no non-finite voxel, keep
+    the plain mean, so their result is unchanged.
+    """
+
+    finite = np.isfinite(values) if values.dtype.kind == "f" else None
+    if finite is None or finite.all():
+        return np.asarray(np.mean(values, axis=axis, dtype=np.float32, out=out))
+    total = np.where(finite, values, 0).sum(axis=axis, dtype=np.float32)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        result = total / finite.sum(axis=axis, dtype=np.float32)
+    if out is None:
+        return result
+    out[...] = result
+    return out
 
 
 class ReadSession:

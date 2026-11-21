@@ -21,6 +21,17 @@ from tomography_session_browser.parsers.tomopitch import parse_tomopitch, positi
 METADATA_LIMIT = 8 * 1024 * 1024
 THICKNESS_FIELD = "CTFSpecimenThicknessAngstrom"
 UNVERIFIED = "Import into this reconstruction is unverified; values are not ranked across runs."
+#: The series name in a source pattern ("warp_tiltseries/<series>.xml").
+SERIES = "<series>"
+# Caveats: each holds for every tomogram of its definition, so the PDF says it once.
+CTF_ESTIMATE = "Recorded Warp CTF estimate; not measured by this application."
+DEFOCUS_SIGN = "Positive means underfocus; the recorded sign is retained."
+ROBUST_WEIGHTS = "IMOD robust weights; weighting settings can differ between runs."
+SUGGESTED = "Suggested by IMOD tomopitch from a boundary model; not applied by this application."
+BORDERS = "The recommendation includes ExtraThickness on each surface and FFT rounding."
+CONVERTED = ("Changed to nm with Setup.PixelSize from the Etomo .edf file, after a check against tilt.com "
+             "and the aligned-stack header.")
+ALREADY_SCALED = "The log recommendation is already scaled; ScaleFactor is not applied again."
 
 
 def matched_from(job_label: str) -> str:
@@ -104,8 +115,7 @@ def _positioning_spacing(folder: Path, stem: str, scale: float) -> tuple[float, 
     if any(fingerprint(path) != stamp for path, stamp in stamps.items()):
         raise ValueError('Calibration metadata changed while reading.')
     note = (f'{paths[0].name}: IMAGEBINNED={binning:g}; {paths[1].name}: Setup.PixelSize={pixel_nm:g} nm, '
-            f'TomoPosBinningA={scale:g}; {stack_path.relative_to(folder.resolve()).as_posix()} header XY={x:g} Å. '
-            'The log recommendation is already scaled; ScaleFactor is not applied again.')
+            f'TomoPosBinningA={scale:g}; {stack_path.relative_to(folder.resolve()).as_posix()} header XY={x:g} Å.')
     return pixel_nm, note
 
 
@@ -122,11 +132,14 @@ class Lent:
     place: str
 
 
-def _tomopitch(folder: Path, stem: str, source_root: Path, lent: Lent | None = None) -> ProcessingEvidence:
+def _tomopitch(folder: Path, stem: str, source_root: Path, lent: Lent | None = None,
+               pattern: str = '') -> ProcessingEvidence:
     """The positioning thickness in ``folder``.
 
     When ``lent``, a value known only in pixels is withheld, because Etomo's
     positioning pixels are not the other reconstruction's voxels (ruling R2).
+    The qualification holds this tomogram's numbers; ``caveats`` hold only
+    what is true for every tomogram, and ``detail`` the numbers.
     """
     folder, source_root = folder.absolute(), source_root.absolute()
     log = folder / 'tomopitch.log'
@@ -138,12 +151,12 @@ def _tomopitch(folder: Path, stem: str, source_root: Path, lent: Lent | None = N
         if text is None:
             return ProcessingEvidence()
         result = parse_tomopitch(text)
-        qualification = ('Suggested by IMOD tomopitch from a boundary model; not applied by this application. '
-            f'Final {result.field} recommendation: {result.pixels} pixels; unrounded {result.computed_pixels:g} pixels. '
+        detail = (f'Final {result.field} recommendation: {result.pixels} pixels; unrounded {result.computed_pixels:g} pixels. '
             f'Includes ExtraThickness={result.border:g} pixels on each surface and FFT rounding. '
             f'Recorded ScaleFactor={result.scale:g}.')
+        qualification, caveats = f'{SUGGESTED} {detail}', (SUGGESTED, BORDERS)
         if lent is not None:
-            qualification = f'{lent.qualification} {qualification}'
+            qualification, caveats = f'{lent.qualification} {qualification}', (lent.qualification, *caveats)
         warnings = ()
         value, unit = float(result.pixels), 'pixels'
         try:
@@ -151,7 +164,9 @@ def _tomopitch(folder: Path, stem: str, source_root: Path, lent: Lent | None = N
             value, unit = result.pixels * spacing, 'nm'
             if not math.isfinite(value):
                 raise ValueError('Converted thickness is not finite.')
-            qualification += ' ' + note
+            qualification += f' {note} {ALREADY_SCALED}'
+            caveats += (CONVERTED, ALREADY_SCALED)
+            detail += ' ' + note
         except (OSError, ValueError) as exc:
             if lent is not None:
                 return ProcessingEvidence(warnings=(f'{named}: IMOD positioning thickness withheld; it is known only '
@@ -159,10 +174,12 @@ def _tomopitch(folder: Path, stem: str, source_root: Path, lent: Lent | None = N
             value, unit = float(result.pixels), 'pixels'
             warnings = (f'{source}: {exc}',)
             qualification += ' Physical conversion unavailable: ' + str(exc)
+            caveats += ('Physical conversion unavailable: ' + str(exc),)
         if fingerprint(log) != stamp:
             raise ValueError('Tomopitch log changed while reading.')
         metric = RecordedMetric('imod.tomopitch.specimen_thickness', 'IMOD positioning thickness', value, unit,
-                                source, f'Final aggregate {result.field}: set to', qualification)
+                                source, f'Final aggregate {result.field}: set to', qualification, caveats, detail,
+                                pattern)
         return ProcessingEvidence(metrics=(metric,), warnings=warnings)
     except (OSError, ValueError) as exc:
         return ProcessingEvidence(warnings=(f'{named}: {exc}',))
@@ -188,7 +205,7 @@ def read_imod_processing_evidence(root: Path, output: Path) -> ProcessingEvidenc
         return ProcessingEvidence(warnings=(f'tomopitch.log: {exc}',))
 
 
-def _warp(text: str, source: str) -> ProcessingEvidence:
+def _warp(text: str, source: str, pattern: str = "") -> ProcessingEvidence:
     # DTDs/entities have no role in this scalar metadata adapter.
     if "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
         raise ValueError("XML declarations with DTDs or entities are unsupported.")
@@ -223,18 +240,16 @@ def _warp(text: str, source: str) -> ProcessingEvidence:
                 raise ValueError("Recorded thickness must be non-negative.")
             if (rule == "thickness" and value == 0) or (rule == "resolution" and value <= 0):
                 continue  # Warp's unavailable sentinels; signed CTF zero remains data.
-            qualification = "Recorded Warp CTF estimate; not measured by this application."
-            if field == "Defocus":
-                qualification += " Positive means underfocus; the recorded sign is retained."
+            caveats = (CTF_ESTIMATE, DEFOCUS_SIGN) if field == "Defocus" else (CTF_ESTIMATE,)
             metrics.append(RecordedMetric(definition, label, value, unit, source,
-                f"CTF/Param[{field}]" if rule == "signed" else field, qualification))
+                f"CTF/Param[{field}]" if rule == "signed" else field, " ".join(caveats), caveats, pattern=pattern))
         except (ValueError, TypeError) as exc:
             warnings.append(f"{field}: {exc}")
     return ProcessingEvidence(metrics=tuple(metrics), warnings=tuple(warnings))
 
 
 def _imod(text: str, source: str, stem: str, qualification: str = UNVERIFIED,
-          model_stems: tuple[str, ...] = ()) -> tuple[str, tuple[RecordedMetric, ...]]:
+          model_stems: tuple[str, ...] = (), pattern: str = "") -> tuple[str, tuple[RecordedMetric, ...]]:
     header = "*** Entries to program tiltalign ***"
     if text.count(header) != 1 or not text.rstrip().endswith("SUCCESSFULLY COMPLETED"):
         raise ValueError("Expected one completed IMOD tiltalign run.")
@@ -254,24 +269,22 @@ def _imod(text: str, source: str, stem: str, qualification: str = UNVERIFIED,
         ("mean", "Mean alignment residual", "Residual error mean and sd", r"\s*(\S+)\s+\S+\s+(\S+)"),
         ("weighted_mean", "Weighted mean alignment residual", "Residual error weighted mean", r"\s*(\S+)\s+(\S+)"),
     )
-    for key, label, field, pattern in patterns:
+    for key, label, field, shape in patterns:
         lines = [line.strip() for line in text.splitlines() if line.strip().startswith(field + ":")]
         if len(lines) > 1:
             raise ValueError("Multiple alignment residual summaries are ambiguous.")
         if not lines:
             continue
-        match = re.fullmatch(re.escape(field) + ":" + pattern, lines[0])
+        match = re.fullmatch(re.escape(field) + ":" + shape, lines[0])
         if match is None:
             raise ValueError("Alignment residual value or unit is missing.")
         raw, unit = match.groups()
         if unit not in ("nm", "pixels"):
             raise ValueError("Alignment residual unit is unsupported or missing.")
         value = _number(raw)
-        detail = qualification
-        if key == "weighted_mean":
-            detail += " IMOD robust weights; weighting settings can differ between runs."
+        caveats = (qualification, ROBUST_WEIGHTS) if key == "weighted_mean" else (qualification,)
         metrics.append(RecordedMetric(f"imod.tiltalign.{key}", label, value, unit,
-                                     source, field, detail))
+                                     source, field, " ".join(caveats), caveats, pattern=pattern))
     return alignment, tuple(metrics)
 
 
@@ -300,16 +313,19 @@ def read_alignment_offer(folder: Path, stem: str, job_label: str, model_endings:
 
 def _lent_evidence(folder: Path, stem: str, lent: Lent, model_endings: tuple[str, ...]) -> ProcessingEvidence:
     log = (folder / "align.log").absolute()
+    series = log.parent.with_name(SERIES) if folder.name == stem else None
     residuals = ProcessingEvidence()
     try:
         text = _read(log)
         if text is not None:
             summary, metrics = _imod(text, str(log), stem, lent.qualification,
-                                     tuple(stem + ending for ending in model_endings))
+                                     tuple(stem + ending for ending in model_endings),
+                                     str(series / log.name) if series else "")
             residuals = ProcessingEvidence(summary, metrics)
     except (OSError, ValueError) as exc:
         residuals = ProcessingEvidence(warnings=(f"{lent.place}/{log.name}: {exc}",))
-    positioning = _tomopitch(folder, stem, folder, lent)  # Etomo jobs only write tomopitch.log.
+    positioning = _tomopitch(folder, stem, folder, lent,  # Etomo jobs only write tomopitch.log.
+                             str(series / "tomopitch.log") if series else "")
     return ProcessingEvidence(residuals.alignment, (*residuals.metrics, *positioning.metrics),
                               (*residuals.warnings, *positioning.warnings))
 
@@ -318,22 +334,24 @@ def read_processing_evidence(root: Path, stem: str) -> ProcessingEvidence:
     metrics: list[RecordedMetric] = []
     warnings: list[str] = []
     alignment = "Not recorded"
-    for kind, relative in (
-        ("warp", f"warp_tiltseries/{stem}.xml"),
-        ("imod", f"warp_tiltseries/tiltstack/{stem}/align.log"),
+    for kind, template in (
+        ("warp", "warp_tiltseries/{}.xml"),
+        ("imod", "warp_tiltseries/tiltstack/{}/align.log"),
     ):
+        relative, pattern = template.format(stem), template.format(SERIES)
         try:
             text = _read(root / relative)
             if text is None:
                 continue
             if kind == "warp":
-                evidence = _warp(text, relative)
+                evidence = _warp(text, relative, pattern)
                 metrics.extend(evidence.metrics)
                 warnings.extend(f"{relative}: {warning}" for warning in evidence.warnings)
             else:
-                alignment, values = _imod(text, relative, stem)
+                alignment, values = _imod(text, relative, stem, pattern=pattern)
                 metrics.extend(values)
         except (OSError, ValueError, ElementTree.ParseError) as exc:
             warnings.append(f"{relative}: {exc}")
-    positioning = _tomopitch(root / 'warp_tiltseries' / 'tiltstack' / stem, stem, root)
+    positioning = _tomopitch(root / 'warp_tiltseries' / 'tiltstack' / stem, stem, root,
+                             pattern=f'warp_tiltseries/tiltstack/{SERIES}/tomopitch.log')
     return ProcessingEvidence(alignment, (*metrics, *positioning.metrics), (*warnings, *positioning.warnings))

@@ -24,6 +24,9 @@ class ResidentSource:
         self.running = None
         self.pending = None
         self.closed = False
+        #: (volume, memory share) of the last read that failed: not retried
+        #: until either changes. Selecting a volume clears it.
+        self.failed = None
         self.pool = QThreadPool(tab)
         self.pool.setMaxThreadCount(1)
         self.signals = TaskSignals()
@@ -40,12 +43,15 @@ class ResidentSource:
                     VOLUME_MEMORY.retire(resident_key(self.volume))
             self.pending = None
             self.volume = volume
+            self.failed = None
         self.ensure()
 
     def ensure(self) -> None:
         if self.closed or self.volume is None or self.volume.grid is None:
             return
         if VOLUME_MEMORY.contains(resident_key(self.volume)):
+            return
+        if self.failed == (self.volume, VOLUME_MEMORY.percent):
             return
         if self.running is not None and self.running.volume == self.volume and not self.running.cancelled.is_set():
             return
@@ -66,10 +72,12 @@ class ResidentSource:
         self.pool.start(BackgroundTask(read, context=job, signals=self.signals,
                                      logger=logging.getLogger(__name__), failure_log="Optional source read failed"))
 
-    def finished(self, job, _result) -> None:
+    def finished(self, job, result) -> None:
         if self.running is not job:
             return
         self.running = None
+        if result is not True and not job.cancelled.is_set():
+            self.failed = (job.volume, VOLUME_MEMORY.percent)
         self.tab.image_settings.update_memory()
         if self.pending is not None:
             self.start_next()

@@ -174,8 +174,22 @@ class TimelineStrip(QWidget):
                     return
         super().mousePressEvent(event)
 
+    def keyboard_segments(self) -> list[TimelineSegment]:
+        """The series the arrow keys walk: every one drawn, in time order.
+
+        The same list in lanes and in density view, and not the paint order,
+        which draws a highlighted segment last.
+        """
+
+        state = self.painter.state
+        drawn = [segment for _rect, segment in state.segment_rects]
+        for _rect, payload in state.density_rects:
+            drawn.extend(payload.get("segments") or ())
+        unique = {segment.tilt_series_id: segment for segment in drawn}
+        return sorted(unique.values(), key=lambda segment: (segment.start, segment.label, segment.tilt_series_id))
+
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt signature
-        segments = [segment for _rect, segment in self.painter.state.segment_rects]
+        segments = self.keyboard_segments()
         if not segments:
             super().keyPressEvent(event)
             return
@@ -193,7 +207,7 @@ class TimelineStrip(QWidget):
             event.accept()
             return
         if key in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space}:
-            self._emit_segment_clicked(segments[self._keyboard_segment_index])
+            self._emit_segment_clicked(segments[min(self._keyboard_segment_index, len(segments) - 1)])
             event.accept()
             return
         super().keyPressEvent(event)

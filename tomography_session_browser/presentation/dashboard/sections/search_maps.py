@@ -169,13 +169,11 @@ def _inferred_failed_groups_for_search_map(
     if not inferred_groups:
         return [], frozenset()
 
+    # A group joins a map only through its series' stage positions. Its
+    # label never joins it to a recorded batch of the same name (divergence
+    # register rule 9): assembly already decided that the series belong to
+    # no recorded batch, and may have refused an ambiguous name.
     assigned: dict[tuple[str | None, str], InferredBatchGroup] = {}
-    linked_batches = search_map_batches(search_map, batch_positions)
-    for batch in linked_batches:
-        for group in inferred_groups:
-            if batch.id in group.batch_ids:
-                assigned[(group.owner, group.key)] = group
-
     failed_tilt_ids = frozenset(
         tilt_id
         for tilt_id, validation in validation_by_id.items()

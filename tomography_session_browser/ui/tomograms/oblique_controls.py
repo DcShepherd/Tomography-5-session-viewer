@@ -35,7 +35,7 @@ class ObliqueControls:
         self.lock.setAccessibleName("Lock the pivot")
         self.lock.setIcon(themed_icon("unlock", color=CANVAS_CHROME.text, size=16))
         self.lock.setCheckable(True)
-        self.lock.setToolTip("Lock the pivot (Ctrl+L). When unlocked, a click moves it.")
+        self.lock.setToolTip("Lock the pivot (Ctrl+L). When unlocked, a double-click moves it.")
         self.lock.toggled.connect(self.set_lock)
         # The icon and the three angles, also at zero; the toolbar reserves the widest text.
         self.angles = QPushButton(angles_text((0, 0, 0)), parent)

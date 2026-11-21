@@ -152,8 +152,87 @@ QLabel#queuedFolderName {{
     color: {text_strong};
 }}
 
-QLabel#queuedFolderReason {{
+QLabel#queuedFolderReason,
+QLabel#queuedFolderNote {{
     font-size: {type_caption}pt;
+}}
+
+/* The pop-up for MRC files that no record decides (ui/folder_type_dialog.py). */
+QDialog#folderTypeDialog {{
+    background: {surface};
+}}
+
+QLabel#folderTypeEmblem {{
+    background: {accent_soft};
+    border: 1px solid {accent_line};
+    border-radius: {radius_card}px;
+}}
+
+QLabel#folderTypeTitle {{
+    color: {text_strong};
+    font-size: {type_heading}pt;
+    font-weight: 600;
+}}
+
+QLabel#folderTypeFolder,
+QLabel#folderTypeBody {{
+    color: {text};
+}}
+
+QLabel#folderTypePath,
+QLabel#folderTypeNote {{
+    color: {text_muted};
+}}
+
+QLabel#folderTypeChip {{
+    color: {text_muted};
+    border: 1px solid {border_strong};
+    border-radius: 9px; /* pill */
+    padding: 1px 8px;
+    min-height: 16px;
+    font-size: {type_caption}pt;
+}}
+
+QTableWidget#folderTypeTable {{
+    background: {panel};
+    border: 1px solid {border};
+    border-radius: {radius_card}px;
+    color: {text};
+}}
+
+QTableWidget#folderTypeTable::item {{
+    padding: 4px 10px;
+    border-bottom: 1px solid {border};
+}}
+
+QTableWidget#folderTypeTable QHeaderView::section {{
+    background: {panel};
+    border: none;
+    border-bottom: 1px solid {border};
+    color: {text_muted};
+    font-size: {type_caption}pt;
+    font-weight: 600;
+    padding: 6px 10px;
+}}
+
+QPushButton#folderTypeChoice {{
+    background: {accent_soft};
+    border-color: {accent_line};
+    color: {text_strong};
+}}
+
+QPushButton#folderTypeChoice:hover {{
+    border-color: {accent};
+}}
+
+QPushButton#folderTypeChoice:pressed {{
+    background: {accent_soft};
+    border-color: {accent};
+}}
+
+QPushButton#folderTypeChoice:focus,
+QPushButton#folderTypeSkip:focus {{
+    border-color: {link_text};
 }}
 
 QFrame#loadSessionsFooter {{

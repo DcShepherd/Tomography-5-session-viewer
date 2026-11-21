@@ -4,9 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from tomography_session_browser.domain.folder_type import TypeFoundBy
 from tomography_session_browser.domain.tomograms import ProcessingSource
 from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.presentation.dashboard.tomogram_summary_input import TomogramSummaryInput
+from tomography_session_browser.presentation.folder_type import NO_PROJECT_NOTE, read_as_line
 from tomography_session_browser.presentation.read_times import READ_INTO_APP, SourceReadTimes, read_time_text
 from tomography_session_browser.presentation.tomogram_context import ContextFile
 from tomography_session_browser.services.tomogram_links import COUNT_LABELS, link_step_counts
@@ -42,8 +44,14 @@ class ProcessingContext:
         if self.notice:
             lines.append(self.notice)
         for value in self.sources:
-            lines += [f'Processing folder: {value.source.path}', f'Pipeline: {value.source.pipeline}',
-                      f'{READ_INTO_APP}: {read_time_text(value.read_at)}', 'Source version folders:',
+            lines.append(f'Processing folder: {value.source.path}')
+            if value.source.display_pipeline:
+                lines.append(f'Pipeline: {value.source.display_pipeline}')
+            if read_as := read_as_line(value.source.found_by):
+                lines.append(read_as)
+                if value.source.found_by == TypeFoundBy.WARP_NAMES:
+                    lines.append(NO_PROJECT_NOTE)
+            lines += [f'{READ_INTO_APP}: {read_time_text(value.read_at)}', 'Source version folders:',
                       *(f'  {file.label}: {file.path}' for file in value.versions)]
             if value.empty_note:
                 lines.append(value.empty_note)

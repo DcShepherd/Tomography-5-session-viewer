@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Mapping, Sequence
 from reportlab.platypus import Paragraph, Table
 from tomography_session_browser.domain.units import ANGSTROM_PER_PIXEL, DEGREE
+from tomography_session_browser.presentation.formatting import format_tilt_angle
 from tomography_session_browser.domain.models import BatchPosition, TiltSeries
 from tomography_session_browser.reports import graphics, styles
 from tomography_session_browser.services.acquisition_metadata import ACQUISITION_SPOT_LABEL, SEARCH_SPOT_LABEL, format_target_defocus_values
@@ -65,7 +66,7 @@ def acquisition_settings_rows(
         ("Target defocus", format_target_defocus_values(target_def)),
         (
             "Tilt range",
-            f"{tilt_lo:g}{DEGREE} to {tilt_hi:g}{DEGREE}"
+            f"{format_tilt_angle(tilt_lo)} to {format_tilt_angle(tilt_hi)}"
             if tilt_lo is not None and tilt_hi is not None
             else "n/a",
         ),

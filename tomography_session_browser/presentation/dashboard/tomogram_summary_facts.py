@@ -25,7 +25,8 @@ def outcome_facts(summary: ProcessingSummary) -> tuple[SummaryFact, ...]:
     versions = ' · '.join(f'{name} {count}' for name, count in summary.version_counts if name not in ('Even', 'Odd')) or 'None found'
     halves = ' · '.join(f'{name} {count}' for name, count in summary.version_counts if name in ('Even', 'Odd'))
     # The kind of output only (its first line): paths and qualifications differ per
-    # tomogram and stay in its detail and the PDF Sources list (owner, 15 Nov 2026).
+    # tomogram and stay in its detail and the PDF Sources list, which says each shared
+    # caveat once (owner, 15 Nov 2026; Sources revised by Q3 C, 19 Nov 2026).
     alignments = tuple(dict.fromkeys(row.tomogram.processing.alignment.partition('\n')[0] for row in payload.rows
                                     if row.tomogram.processing.alignment != 'Not recorded'))
     alignment = alignments[0] if len(alignments) == 1 else f'{len(alignments)} output types' if alignments else 'Not recorded'

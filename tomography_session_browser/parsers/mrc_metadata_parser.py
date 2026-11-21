@@ -89,7 +89,7 @@ def parse_mrc_metadata(path: Path) -> ParsedMrcMetadata:
     if nx is None or ny is None or nz is None or mode is None:
         record_aggregate_phase("parse_mrc_header", time.perf_counter() - header_started)
         raise ValueError("; ".join(warnings) or "MRC header dimensions are not plausible.")
-    dtype = mrc_numpy_dtype(mode, endian)
+    dtype = mrc_numpy_dtype(mode, endian, unsigned_bytes=mode == 0 and imod_unsigned_bytes(header, endian))
     nsymbt = _int_at(header, 92, endian, warnings)
     exttyp = _extended_header_type(header)
     mapc, mapr, maps = _axis_mapping(header, endian)
@@ -765,14 +765,18 @@ def _axis_mapping(header: bytes, endian: str) -> tuple[int | None, int | None, i
 
 
 def _voxel_size(header: bytes, endian: str, nx: int, ny: int, nz: int) -> tuple[float | None, float | None, float | None]:
+    """Cell length over the sampling count (MRC2014 ``mx``/``my``/``mz``); the size count only when that is 0."""
+
     if len(header) < 52:
         return (None, None, None)
+    mx, my, mz = struct.unpack(f"{endian}3i", header[28:40])
     cell_x, cell_y, cell_z = struct.unpack(f"{endian}3f", header[40:52])
-    return (
-        cell_x / nx if nx > 0 and cell_x > 0 else None,
-        cell_y / ny if ny > 0 and cell_y > 0 else None,
-        cell_z / nz if nz > 0 and cell_z > 0 else None,
-    )
+    return (_axis_spacing(cell_x, mx, nx), _axis_spacing(cell_y, my, ny), _axis_spacing(cell_z, mz, nz))
+
+
+def _axis_spacing(cell: float, sampling: int, size: int) -> float | None:
+    count = sampling if sampling > 0 else size
+    return cell / count if count > 0 and cell > 0 else None
 
 
 def fei_spot_index(metadata: Any, warnings: list[str], source: str) -> str | None:
@@ -800,14 +804,34 @@ def fei_spot_index(metadata: Any, warnings: list[str], source: str) -> str | Non
     return str(next(iter(values)))
 
 
-def mrc_numpy_dtype(mode: int, endian: str) -> np.dtype | None:
-    """The NumPy type of an MRC data mode, or ``None`` for a mode the app does not read."""
+#: IMOD writes this number at header byte 152 ("IMOD" read as a little-endian int).
+IMOD_STAMP = 1146047817
 
-    code_by_mode = {0: "i1", 1: "i2", 2: "f4", 6: "u2"}
+
+def imod_unsigned_bytes(header: bytes, endian: str) -> bool:
+    """IMOD records mode-0 data as unsigned bytes: its stamp, with bit 0 of imodFlags clear.
+
+    MRC2014 defines mode 0 as signed; IMOD sets imodFlags bit 0 when its bytes
+    are signed. A file without the stamp keeps the MRC2014 meaning.
+    """
+
+    if len(header) < 160:
+        return False
+    stamp, flags = struct.unpack_from(endian + "2i", header, 152)
+    return stamp == IMOD_STAMP and not flags & 1
+
+
+def mrc_numpy_dtype(mode: int, endian: str, *, unsigned_bytes: bool = False) -> np.dtype | None:
+    """The NumPy type of an MRC data mode, or ``None`` for a mode the app does not read.
+
+    ``unsigned_bytes`` reads mode 0 as unsigned (``imod_unsigned_bytes``).
+    """
+
+    code_by_mode = {0: "u1" if unsigned_bytes else "i1", 1: "i2", 2: "f4", 6: "u2"}
     code = code_by_mode.get(mode)
     if code is None:
         return None
-    return np.dtype(code if code == "i1" else f"{endian}{code}")
+    return np.dtype(code if mode == 0 else f"{endian}{code}")
 
 
 def _parser_name_for_exttyp(exttyp: str | None, has_angles: bool) -> str:

@@ -55,6 +55,7 @@ from tomography_session_browser.services.tilt_series_validation import GridValid
 from tomography_session_browser.ui.load_sessions_dialog import LoadSessionsDialog
 from tomography_session_browser.ui.main_window import MainWindow
 from tomography_session_browser.ui.shell.chrome import TAB_LABELS
+from tomography_session_browser.presentation.report_scope import preset_folders
 from tomography_session_browser.ui.report_scope_dialog import ReportScopeDialog
 from tomography_session_browser.ui import theme as theme_module
 from tomography_session_browser.presentation.design_tokens import palette_for
@@ -577,6 +578,34 @@ def _save_widget(widget, filename: str, app: QApplication) -> None:
         raise RuntimeError(f"Could not save screenshot: {target}")
 
 
+def _capture_report_scope(window: MainWindow, app: QApplication) -> None:
+    """The report dialog as Report opens it: the same arguments as ``ReportFlow.on_generate_report``.
+
+    No resize: the dialog fits its height to the longer panel, so the picture
+    has the size that users see.
+    """
+    flow = window.parts.report  # noqa: SLF001 - documentation screenshot harness
+    workspace = flow.workspace()
+    current = flow.default_scope()
+    snapshot, issue = flow.snapshot(workspace)
+    settings = flow.settings
+    report_dialog = ReportScopeDialog(
+        flow.project_groups(),
+        current_scope=current,
+        sessions=workspace.sessions,
+        include_exposure_thumbnails=settings.report_exposure_thumbnails,
+        tomograms=snapshot,
+        tomogram_issue=issue,
+        include_tomograms=settings.report_tomograms,
+        include_slices=settings.report_tomogram_slices,
+        folder_preset=preset_folders(flow.review_scope(), current, snapshot),
+        user_groups=flow.user_groups(),
+        parent=window,
+    )
+    _save_widget(report_dialog, "04-report-scope.png", app)
+    report_dialog.close()
+
+
 def main() -> int:
     os.chdir(REPOSITORY_ROOT)
     OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
@@ -628,11 +657,7 @@ def main() -> int:
     window.setFocus()
     _save_widget(window, "03-search-map-review.png", app)
 
-    groups = window.parts.scopes.project_groups()  # noqa: SLF001 - documentation screenshot harness
-    report_dialog = ReportScopeDialog(groups, current_scope=groups[0] if groups else None)
-    report_dialog.resize(660, 600)
-    _save_widget(report_dialog, "04-report-scope.png", app)
-    report_dialog.close()
+    _capture_report_scope(window, app)
     window.close()
 
     shutil.rmtree(TEMP_DIRECTORY)

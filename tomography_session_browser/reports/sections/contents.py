@@ -10,7 +10,7 @@ from tomography_session_browser.reports.constants import CONTENTS_BAND_GAP, CONT
 from tomography_session_browser.reports.context import ReportSection
 from tomography_session_browser.reports.formatting import tilt_outcome_sub_label
 from tomography_session_browser.reports.layout import longest_word, shrink_widths, spread_widths
-from tomography_session_browser.reports.sections.atlas_overview import resolved_sample_atlases
+from tomography_session_browser.reports.sections.atlas_overview import session_atlas_count
 from tomography_session_browser.reports.sections.dataset import sample_validation_summary
 
 
@@ -26,7 +26,7 @@ class ContentsEntry:
 def contents_entry(section: ReportSection, tomograms: str = "") -> ContentsEntry:
     ctx = section.ctx
     if section.kind == "atlas":
-        atlases = len(resolved_sample_atlases(ctx.session))
+        atlases = session_atlas_count(ctx.session)
         return ContentsEntry(section, ctx.session.name, f"Atlas session · {count_phrase(atlases, 'atlas', 'atlases')}")
     sample = section.sample
     tones = tuple(

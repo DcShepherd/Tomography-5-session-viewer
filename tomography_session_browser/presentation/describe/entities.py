@@ -84,6 +84,7 @@ def describe_object(
     list_status: ItemListStatus | None = None,
     describes_page_item: bool = False,
     read_times: SourceReadTimes | None = None,
+    selected_samples: frozenset[str] = frozenset(),
 ) -> str:
     """Describe ``value`` for the context panel.
 
@@ -95,17 +96,19 @@ def describe_object(
     out the ``Status`` row (design review B2.2). Everything else is the same.
 
     ``read_times`` gives a session's folder the time the app read it (D16).
+    ``selected_samples`` are the ids of samples whose session was read by the
+    user's selection: their folder says so (owner D15 a).
     """
 
     if isinstance(value, EntityGroup):
         return _entity_group_description(value, grid_validations or GridValidations(
             ungridded=(item for item in value.values if isinstance(item, TiltSeries))))
     if isinstance(value, LinkedSampleGroup):
-        return _linked_sample_group_description(value)
+        return _linked_sample_group_description(value, selected_samples)
     if isinstance(value, Session):
         return "\n".join(session_summary_lines(value, read_times))
     if isinstance(value, Sample):
-        return _sample_description(value)
+        return _sample_description(value, selected_samples)
     if isinstance(value, Atlas):
         return _atlas_description(value)
     if isinstance(value, SearchMap):
@@ -133,10 +136,10 @@ def _emit_warnings_section(blocks: list[str], warnings: Iterable[str]) -> None:
     emit_section(blocks, "Warnings", [f"- {warning}" for warning in summarized[:100]])
 
 
-def _sample_description(sample: Sample) -> str:
+def _sample_description(sample: Sample, selected: frozenset[str] = frozenset()) -> str:
     return "\n".join(
         summary_lines(
-            [sample_folder(sample)],
+            [sample_folder(sample, selected)],
             tilt_series=sample.tilt_series,
             batch_positions=sample.batch_positions,
             atlases=[sample.atlas] if sample.atlas is not None else [],
@@ -358,10 +361,10 @@ def _entity_group_description(group: EntityGroup, grid_validations: GridValidati
     return "\n".join([f"{group.label}: {len(group.values)} items"])
 
 
-def _linked_sample_group_description(group: LinkedSampleGroup) -> str:
+def _linked_sample_group_description(group: LinkedSampleGroup, selected: frozenset[str] = frozenset()) -> str:
     return "\n".join(
         summary_lines(
-            [sample_folder(sample) for sample in group.samples],
+            [sample_folder(sample, selected) for sample in group.samples],
             tilt_series=group.tilt_series,
             batch_positions=group.batch_positions,
             atlases=[group.atlas] if group.atlas is not None else [],

@@ -47,6 +47,7 @@ def session_overview_block(
 
     session = ctx.session
     sample_atlases = resolved_sample_atlases(session)
+    missing = missing_atlas_images(session)
     flowables: list = [
         Paragraph("Atlas-session overview", styles.EYEBROW_STYLE),
         Spacer(1, 2),
@@ -56,11 +57,21 @@ def session_overview_block(
         ),
         meta_row([
             ("Kind", f"{print_session_kind(session.kind)} session"),
-            ("Acquired atlases", f"{len(sample_atlases):,}"),
+            ("Acquired atlases", f"{session_atlas_count(session):,}"),
             ("Acquisition", acquisition_window_text(ctx.dashboard)),
         ]),
         Spacer(1, 10),
     ]
+    if missing:
+        # The count includes them, as the cover does; the contact sheet
+        # cannot show them, so name them.
+        names = ", ".join(missing)
+        flowables.append(Paragraph(
+            f"Atlas image file not found: {graphics.html_escape(names)}. "
+            "The contact sheet does not show these atlases.",
+            styles.NOTE_STYLE,
+        ))
+        generation_warnings.append(f"{session.name}: atlas image file not found for {names}.")
 
     # The session-level Atlas/ folder typically only holds the .dm metadata;
     # the images live under each SampleN/Atlas/ subfolder.
@@ -69,6 +80,25 @@ def session_overview_block(
     elif include_thumbnails:
         flowables.append(Paragraph("No embeddable atlas images on disk for this session.", styles.NOTE_STYLE))
     return flowables
+
+
+def session_atlas_count(session: Session) -> int:
+    """How many grids of ``session`` have an atlas, with or without its image.
+
+    The section header and the contents use it, so they count what the cover
+    counts.
+    """
+
+    return sum(1 for sample in session.samples if sample.atlas is not None)
+
+
+def missing_atlas_images(session: Session) -> list[str]:
+    """The grids whose atlas has no image the report can embed."""
+
+    return [
+        sample.name for sample in session.samples
+        if sample.atlas is not None and embeddable_image_path(sample.atlas.image_path) is None
+    ]
 
 
 def resolved_sample_atlases(session: Session) -> list[tuple[str, Atlas]]:

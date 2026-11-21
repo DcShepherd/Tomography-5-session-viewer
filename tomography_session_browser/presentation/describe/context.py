@@ -20,6 +20,7 @@ from tomography_session_browser.domain.models import (
     Session,
     TiltSeries,
 )
+from tomography_session_browser.domain.folder_type import TypeFoundBy
 from tomography_session_browser.domain.traversal import has_collection_data
 from tomography_session_browser.presentation.describe.entities import describe_object
 from tomography_session_browser.presentation.describe.sections import emit_section
@@ -114,6 +115,8 @@ class ContextDescriber:
             list_status=list_status,
             describes_page_item=describes_page_item,
             read_times=self._read_times,
+            selected_samples=frozenset(sample.id for session in self._workspace.sessions
+                                       if session.found_by == TypeFoundBy.SELECTION for sample in session.samples),
         )
         if isinstance(value, Session | Sample | LinkedSampleGroup):
             # A scope's summary is its source folders and settings; which atlas

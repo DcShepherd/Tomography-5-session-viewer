@@ -20,6 +20,7 @@ from tomography_session_browser.presentation.workspace import Scope, Workspace
 from tomography_session_browser.services.session_loader import SessionLoader
 from tomography_session_browser.parsers.processing_intake import load_processing_source
 from tomography_session_browser.domain.enums import SessionKind
+from tomography_session_browser.domain.folder_type import ReadAs
 from pathlib import Path
 from tomography_session_browser.ui.loading.requests import LoadJob, LoadCandidate, PreparedLoad
 from tomography_session_browser.services.stack_verification import prepare_stack_verification
@@ -109,7 +110,11 @@ def session_load_task(
     progress: LoadProgressSignals,
     logger: logging.Logger,
 ) -> LoadTask:
-    """Parse ``job``'s folder into a ``Session``."""
+    """Parse ``job``'s folder into a ``Session`` or a ``ProcessingSource``.
+
+    A folder whose MRC files no record decides, with no kept selection, gives
+    its ``FolderQuestion`` instead: nothing from it is read for review (rule 5).
+    """
 
     path, profile = job.attempt.request.path, job.profile
 
@@ -126,9 +131,12 @@ def session_load_task(
             progress.stage.emit(job, "parse")
             progress.status.emit(job, "Parsing metadata and MRC headers...")
             with profile.phase("load_session_worker"), active_profile(profile):
-                if SessionLoader().classify(path) == SessionKind.PROCESSING:
-                    return load_processing_source(Path(path))
-                return SessionLoader().load(
+                loader = SessionLoader(selections=lambda: job.selections)
+                if (question := loader.question(path)) is not None:
+                    return question
+                if loader.classify(path) == SessionKind.PROCESSING:
+                    return load_processing_source(Path(path), selected=loader.selection(path) == ReadAs.TOMOGRAMS)
+                return loader.load(
                     path,
                     profile=profile,
                     # Emitted from this worker thread; queued to the window.

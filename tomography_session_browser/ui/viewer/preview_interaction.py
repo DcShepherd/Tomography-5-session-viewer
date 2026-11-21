@@ -459,11 +459,13 @@ class PreviewInteraction:
             if marker is not None:
                 if marker.marker_type == MarkerType.BATCH_CLUSTER:
                     self.activate_cluster(marker)
-                elif bool(marker.metadata.get("navigation_enabled", False)) and self.marker_opened is not None:
+                elif marker.metadata.get("navigation_enabled") is not False and self.marker_opened is not None:
                     # ``navigation_enabled`` is the resolver's verdict carried
-                    # on the marker. Enter must never open a marker the
-                    # resolver declined to resolve uniquely, so the keyboard
-                    # path cannot bypass what the pointer path obeys.
+                    # on the marker (Atlas markers). Enter must never open a
+                    # marker the resolver declined to resolve uniquely. A
+                    # marker with no verdict (Overview, Search map and Search
+                    # tile markers) opens as a double-click does: its jump
+                    # resolves, or refuses inline, when it is opened.
                     self.marker_opened(marker)
                 elif self.marker_selected is not None:
                     self.marker_selected(marker)

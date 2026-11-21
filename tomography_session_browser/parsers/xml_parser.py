@@ -38,18 +38,25 @@ def parse_xml_file(path: Path) -> dict[str, Any]:
     return {"_root": local_name(root.tag), "_path": str(path), "value": data}
 
 
+def is_name_tag(tag: str) -> bool:
+    """A ``Name`` or ``...Name`` leaf is identity text: ``001``, ``1.10`` and ``1_2`` are names, not numbers."""
+
+    return tag == "Name" or tag.endswith("Name")
+
+
 def element_to_data(element: ElementTree.Element) -> Any:
     children = list(element)
     text = (element.text or "").strip()
     attributes = {local_name(key): value for key, value in element.attrib.items()}
 
     if not children:
+        leaf = (lambda value: value) if is_name_tag(local_name(element.tag)) else coerce_scalar
         if attributes:
             payload: dict[str, Any] = {"_attributes": attributes}
             if text:
-                payload["value"] = coerce_scalar(text)
+                payload["value"] = leaf(text)
             return payload
-        return coerce_scalar(text) if text else None
+        return leaf(text) if text else None
 
     grouped: dict[str, list[Any]] = {}
     for child in children:

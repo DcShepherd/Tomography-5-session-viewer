@@ -11,10 +11,12 @@ class TomogramWorkers:
         self.closed = False
 
     def close(self, *_args) -> None:
-        if self.closed:
-            return
-        self.closed = True
+        # Every call drains the lanes, the one at destruction too: work started
+        # after shutdown must end before Qt deletes its pool, whose destructor
+        # waits with the GIL held and so never returns. The writer closes once.
         for pool in self.producers:
             pool.waitForDone()
-        self.writer.close()
+        if not self.closed:
+            self.closed = True
+            self.writer.close()
         self.history.waitForDone()

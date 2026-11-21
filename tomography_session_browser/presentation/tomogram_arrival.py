@@ -2,7 +2,7 @@
 from dataclasses import dataclass, replace
 
 from tomography_session_browser.presentation.tomogram_tabs import PreparedTomogramTab
-from tomography_session_browser.presentation.tomogram_versions import review_versions
+from tomography_session_browser.presentation.tomogram_versions import review_versions, unique_version
 from tomography_session_browser.presentation.tomogram_state import TomogramViewState
 from tomography_session_browser.presentation.tomogram_list_filter import ListFilter
 
@@ -45,6 +45,6 @@ def valid_arrival(arrival: TomogramArrival, payload: PreparedTomogramTab, histor
         return True
     volumes = review_versions(target.tomogram)
     selected_version = payload.selection.version if payload.selection else None
-    scoped = next((volume for volume in volumes if volume.version == selected_version), None)
+    scoped = unique_version(target.tomogram, selected_version)
     return (scoped.id == arrival.view.volume_id if scoped is not None
             else any(volume.id == arrival.view.volume_id for volume in volumes))

@@ -385,7 +385,18 @@ class _KeyValueRow(QWidget):
         self._detail_label.setVisible(False)
         column.addWidget(self._detail_label)
         layout.addLayout(column, stretch=1)
+        self._column = column
         self.set_value(value, tooltip)
+
+    def add_action(self, action: QWidget) -> None:
+        """A control under the value, in the value column (a row action, ``set_row_action``).
+
+        Under, not beside: the Context dock is narrow, and a control beside the
+        value wraps a short value to three lines.
+        """
+
+        action.setParent(self)
+        self._column.addWidget(action, 0, Qt.AlignmentFlag.AlignLeft)
 
     def set_value(self, value: str, tooltip: str | None = None) -> None:
         main, qualifier = split_qualifier(value) if tooltip is None else (value, None)
@@ -495,7 +506,7 @@ class _RowSpec:
     in place without rebuilding the widget.
     """
 
-    kind: str  # "section" | "fold" | "kv" | "path" | "plain" | "spacer" | "status" | "callout"
+    kind: str  # "section" | "fold" | "kv" | "path" | "plain" | "spacer" | "status" | "callout" | "action"
     signature: tuple
     value: str
     indented: bool
@@ -561,6 +572,9 @@ class MetadataPanel(QWidget):
         # dashboard tone. Without them, rows render as plain key/values.
         self._status_tone: Callable[[str], str | None] | None = None
         self._warning_tone: Callable[[str], str] | None = None
+        # Controls the window adds under a key's value, by key: ``factory(path)``
+        # gets the folder path of the row's section and gives a widget or None.
+        self._row_actions: dict[str, Callable[[str], QWidget | None]] = {}
 
         self._placeholder = "Metadata, warnings, and linked objects will appear here."
         self.set_text(self._placeholder)
@@ -590,6 +604,18 @@ class MetadataPanel(QWidget):
         """``rule(warning)`` is the dashboard tone of one raw warning."""
 
         self._warning_tone = rule
+
+    def set_row_action(self, key: str, factory: Callable[[str], QWidget | None] | None) -> None:
+        """Under each ``key`` row, the widget ``factory`` makes for the folder path above it.
+
+        The path is the last ``Path`` row before it in the same folder block;
+        the factory decides from typed records, never from the row's text.
+        """
+
+        if factory is None:
+            self._row_actions.pop(key, None)
+        else:
+            self._row_actions[key] = factory
 
     def set_content(self, content: QWidget, text: str) -> None:
         """Publish a typed presenter's widget and its canonical copied text.
@@ -747,7 +773,7 @@ class MetadataPanel(QWidget):
                 return False
             # ``plain`` and ``section`` rows have no separate value slot, so
             # any text change is a structural change for those kinds.
-            if new_spec.kind in {"plain", "section", "fold", "spacer"}:
+            if new_spec.kind in {"plain", "section", "fold", "spacer", "action"}:
                 continue
             # For kv/path the indent class is part of the structure (it
             # changes contentsMargins, which we don't update in place).
@@ -804,6 +830,13 @@ class MetadataPanel(QWidget):
             return header
         if spec.kind == "path":
             row: QWidget = _PathRow(spec.signature[1], spec.value)
+        elif spec.kind == "action":
+            key, folder = spec.signature[1], spec.signature[3]
+            row = _KeyValueRow(key, spec.value, spec.tooltip)
+            factory = self._row_actions.get(key)
+            action = factory(folder) if factory is not None and folder else None
+            if action is not None:
+                row.add_action(action)
         elif spec.kind == "kv":
             row = _KeyValueRow(spec.signature[1], spec.value, spec.tooltip)
         elif spec.kind == "status":
@@ -818,9 +851,12 @@ class MetadataPanel(QWidget):
 
     def _parse(self, lines: Iterable[str]) -> Iterable[_RowSpec]:
         section = ""
+        # The folder path a row action belongs to: the last Path row of its block.
+        folder = ""
         for raw in lines:
             line = raw.rstrip()
             if not line.strip():
+                folder = ""
                 yield _RowSpec("spacer", ("spacer",), "", False)
                 continue
             stripped = line.lstrip()
@@ -845,7 +881,13 @@ class MetadataPanel(QWidget):
                     yield _RowSpec(kind, (kind, key), key, indented)
                     continue
                 if key not in _IDENTITY_KEYS and _looks_like_path(key, value):
+                    if key == "Path":
+                        folder = value
                     yield _RowSpec("path", ("path", key, indented), value, indented)
+                    continue
+                if key in self._row_actions:
+                    shown, tooltip = _display_value_and_tooltip(key, value)
+                    yield _RowSpec("action", ("action", key, indented, folder, value), shown, indented, tooltip)
                     continue
                 tone = self._status_tone(value) if key in _STATUS_KEYS and self._status_tone is not None else None
                 if tone is not None:

@@ -129,7 +129,7 @@ def summary_from_input(payload: TomogramSummaryInput) -> ProcessingSummary:
         attention_keys=attention_keys(payload),
         usable_count=sum(any(volume.grid is not None for volume in item.volumes) for item in volume_items),
         version_count=sum(versions.values()), warnings=tuple(warning for source in sources for warning in source.warnings),
-        metric_rows=tuple(metric_row(item) for item in items), pipeline=', '.join(dict.fromkeys(source.pipeline for source in sources)),
+        metric_rows=tuple(metric_row(item) for item in items), pipeline=', '.join(dict.fromkeys(source.display_pipeline for source in sources if source.display_pipeline)),
         link_counts=link_step_counts(row.link for row in rows), charts=processing_charts(chart_rows),
         volume_rows=volume_inventory(volume_items), chart_key=key,
         version_counts=tuple(sorted(versions.items())), link_status_counts=tuple(sorted(statuses.items())),

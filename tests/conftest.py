@@ -15,6 +15,7 @@ one test still share settings, bindings and review history.
 from __future__ import annotations
 
 import atexit
+import gc
 import os
 import shutil
 import sys
@@ -168,7 +169,8 @@ def _isolate_qt_state_between_tests(_isolate_profile_between_tests):
     a test that needs a theme applies it, as it must to pass on its own.
 
     Only windows that appeared during the test are deleted. Module-scoped
-    fixtures are set up before this one, so a window they share survives.
+    fixtures are set up before this one, so a window they share survives
+    until ``_retire_module_windows`` deletes it at the end of the module.
     Work the test left queued for a window (background tasks, zero-delay
     timers) runs first, while the window still exists: a timer calling a Qt
     method on a deleted widget crashes the process. Each window is then
@@ -184,6 +186,42 @@ def _isolate_qt_state_between_tests(_isolate_profile_between_tests):
     before = _window_addresses()
     theme_before = _theme_state()
     yield
+    try:
+        _retire_windows_since(before)
+    finally:
+        _restore_theme_state(theme_before)
+        _clear_held_keys()
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _retire_module_windows():
+    """Delete the windows a module-scoped fixture shared, once the module ends.
+
+    The per-test cleanup keeps those windows, and closing one does not delete
+    it. Each shared main window kept about 2000 widgets alive for the rest of
+    the process. By the end of a serial run that was over 18000 widgets, and a
+    dialog test that sets the style sheet nine times took 113 seconds in place
+    of 4: close to the 120-second watchdog. Autouse fixtures are set up first in
+    their scope, so this one ends after the module's own fixtures have closed
+    their windows.
+
+    A deleted window's Python side, such as its volume leases, is held in
+    reference cycles. Collected at once, it cannot return memory to the shared
+    ledgers in the middle of a later module's test.
+    """
+
+    before = _window_addresses()
+    yield
+    if _retire_windows_since(before):
+        gc.collect()
+
+
+def _retire_windows_since(before: dict[int, object]) -> int:
+    """Run the work queued for each new window, then delete each on its own.
+
+    Returns how many windows there were.
+    """
+
     left = [window for address, window in _window_addresses().items() if address not in before]
     try:
         if left:
@@ -205,5 +243,4 @@ def _isolate_qt_state_between_tests(_isolate_profile_between_tests):
         from tomography_session_browser.ui.loading import heap
 
         heap.thaw()
-        _restore_theme_state(theme_before)
-        _clear_held_keys()
+    return len(left)

@@ -8,13 +8,14 @@ from SessionScanner; they are intentionally not unified with other variants.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Iterable
 from typing import TypeVar
 
 from tomography_session_browser.diagnostics.profiling import NULL_PROFILE, LoadingProfiler
 from tomography_session_browser.domain.enums import SessionKind
 from tomography_session_browser.domain.identity import dedupe_entities, summary_entity_key
-from tomography_session_browser.domain.models import Atlas, BatchPosition, Sample, SearchMap, Session
+from tomography_session_browser.domain.models import Atlas, BatchPosition, Overview, Sample, SearchMap, Session
 from tomography_session_browser.parsers.scan_progress import ScanProgress, ScanProgressReporter
 from tomography_session_browser.services.acquisition_metadata import (
     ACQUISITION_METADATA_KEY,
@@ -28,6 +29,8 @@ from tomography_session_browser.services.navigation.resolution import dedupe_nav
 
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
+# A later exposure of batch X is recorded as X_2, X_3, ...: one integer >= 2.
+_EXPOSURE_SUFFIX = re.compile(r"[2-9]\d*|1\d+")
 
 
 def assemble_session(
@@ -43,6 +46,7 @@ def assemble_session(
         for sample in session.samples:
             report.part("links")
             with profile.phase("link_batch_positions"):
+                _link_batch_positions_to_overviews(sample, session_overviews=session.overviews)
                 map_targets = _link_batch_positions_to_search_maps(sample)
                 _link_batch_positions_to_tilt_series(sample, map_targets=map_targets)
             report.part("search tiles")
@@ -104,16 +108,17 @@ def _link_batch_positions_to_tilt_series(sample: Sample, *, map_targets: dict[in
     for tilt in sample.tilt_series:
         resolution = batch_by_name.get(tilt.name)
         if resolution is None:
-            # Strict prefix-only match. We deliberately don't
-            # fuzzy-attach orphaned failed tilts (e.g. sepia_1
-            # whose batch was never recorded in
-            # BatchPositionsList.xml) to a sibling batch — that
-            # would tag the sibling's overlays as failed in the
-            # GUI / PDF even though the sibling acquisition
-            # succeeded. Orphans stay orphaned and simply don't
-            # contribute to any search-map bar.
+            # A later exposure X_<n> (n >= 2) joins batch X. Nothing else
+            # does: an orphaned failed tilt such as sepia_1 or sepia_1_2,
+            # whose batch sepia_1 was never recorded in
+            # BatchPositionsList.xml, must not attach to the sibling batch
+            # sepia — that would tag the sibling's overlays as failed in the
+            # GUI / PDF even though the sibling acquisition succeeded.
+            # Orphans stay orphaned and simply don't contribute to any
+            # search-map bar. The longest matching name decides, so an
+            # ambiguous longer name never falls through to a shorter one.
             resolution = next(
-                (batch_by_name[name] for name in batch_names if tilt.name.startswith(f"{name}_")),
+                (batch_by_name[name] for name in batch_names if _is_later_exposure(tilt.name, name)),
                 None,
             )
         if resolution is None:
@@ -133,6 +138,41 @@ def _link_batch_positions_to_tilt_series(sample: Sample, *, map_targets: dict[in
                       else map_resolution.target if map_resolution is not None and map_resolution.navigable else None)
         if search_map is not None and tilt.id not in search_map.linked_tilt_series_ids:
             search_map.linked_tilt_series_ids.append(tilt.id)
+
+
+def _is_later_exposure(tilt_name: str, batch_name: str) -> bool:
+    prefix = f"{batch_name}_"
+    return tilt_name.startswith(prefix) and _EXPOSURE_SUFFIX.fullmatch(tilt_name[len(prefix):]) is not None
+
+
+def _link_batch_positions_to_overviews(sample: Sample, *, session_overviews: Iterable[Overview] = ()) -> None:
+    """Replace each batch's recorded ``OverviewImageName`` with the Overview's ID.
+
+    The name is matched only against this grid's Overview images. One match
+    sets the ID. No match or several matches keep the recorded name, which no
+    Overview ID equals, so the Overview jump refuses with an explanation and
+    no other image is chosen in its place; the batch also gets a warning.
+    """
+
+    overviews = dedupe_navigation_candidates([*sample.overviews, *session_overviews])
+    overview_ids = {overview.id for overview in overviews}
+    by_name = _candidate_index(overviews, lambda overview: overview.name, "Overview name")
+    for batch in sample.batch_positions:
+        recorded = batch.linked_overview_id
+        if not recorded or recorded in overview_ids:
+            continue
+        resolution = by_name.get(recorded)
+        if resolution is None and recorded.lower().endswith(".mrc"):
+            resolution = by_name.get(recorded[:-4])
+        if resolution is not None and resolution.navigable and isinstance(resolution.target, Overview):
+            batch.linked_overview_id = resolution.target.id
+            continue
+        message = (
+            resolution.explanation if resolution is not None and resolution.ambiguous
+            else f"Batch position {batch.name} records Overview {recorded}, but this grid has no Overview image of that name."
+        )
+        if message not in batch.warnings:
+            batch.warnings.append(message)
 
 
 def _link_batch_positions_to_search_maps(sample: Sample) -> dict[int, SearchMap]:

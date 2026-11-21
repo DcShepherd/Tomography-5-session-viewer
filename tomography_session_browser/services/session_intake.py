@@ -19,12 +19,13 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 import time
-from typing import Generic, TypeVar
+from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from tomography_session_browser.domain.display_names import count_phrase
 from tomography_session_browser.domain.enums import SessionKind
+from tomography_session_browser.domain.folder_type import FolderQuestion, ReadAs
 from tomography_session_browser.domain.identity import path_identity_key
-from tomography_session_browser.parsers.scipion_jobs import processing_root
+from tomography_session_browser.parsers.processing_intake import refusal_reason, source_root
 
 #: How long a drag may spend classifying before the rest wait for the drop.
 #: Classification is cheap on a local disk, but a slow network share must not
@@ -36,6 +37,32 @@ SESSION_FILE_REASON = "A session file — drop its folder instead"
 MISSING_REASON = "Folder not found"
 UNREADABLE_REASON = "This folder could not be read"
 ALREADY_LOADED_REASON = "Already in the project"
+#: The receipt's reason for a folder whose question was not answered (the load stopped first).
+TYPE_NOT_SELECTED_REASON = "You did not select the type of its MRC files"
+#: A dragged folder that the load will ask about (owner D14 a): the pop-up shows after the drop.
+SELECT_AFTER_RELEASE = "Select after you release"
+#: The words for a selection in a row or a Context line ("Read as: tomograms · your selection").
+READ_AS_WORDS = {ReadAs.TOMOGRAMS: "tomograms", ReadAs.TILT_SERIES: "tilt series"}
+
+
+class FolderRefused(ValueError):
+    """A folder the loader refuses, for the reason in its message (``refusal_reason``).
+
+    A path that skips the check (a Recent row) is refused when it loads, and
+    the load result shows this message as the reason.
+    """
+
+
+class TypeNotSelected(ValueError):
+    """A folder whose MRC files no record decides, loaded with no selection kept (rule 5).
+
+    The loader does not guess. The window asks the user (``question``) and loads
+    the folder again with the selection.
+    """
+
+    def __init__(self, question: FolderQuestion) -> None:
+        super().__init__("Select the type of the MRC files in this folder.")
+        self.question = question
 
 
 class FolderCheck(StrEnum):
@@ -67,6 +94,10 @@ class DroppedFolder:
     parent_folder: str | None = None
     #: Overrides the status's usual reason (an unreadable folder).
     note: str = ""
+    #: How many MRC files no record decides, with no selection kept: the load asks (rule 5).
+    asks: int = 0
+    #: The user's kept selection for such a folder (owner D8 a).
+    selection: ReadAs | None = None
 
     @property
     def name(self) -> str:
@@ -84,6 +115,8 @@ class DroppedFolder:
     def badge(self) -> str:
         """The project tree's badge for what this folder holds, if known."""
 
+        if self.asks:
+            return "?"
         if self.kind == SessionKind.PROCESSING:
             return "PR"
         if self.kind == SessionKind.ATLAS_SCREENING:
@@ -94,6 +127,8 @@ class DroppedFolder:
 
     @property
     def kind_label(self) -> str:
+        if self.asks:
+            return "Select at load"
         if self.kind == SessionKind.PROCESSING:
             return "Processing folder"
         if self.status == FolderCheck.UNCHECKED:
@@ -109,6 +144,16 @@ class DroppedFolder:
         # Only a finished check can say this. A missing or unreadable folder was
         # never classified, so it has no kind to name; its reason says why.
         return "Not a session" if self.kind == SessionKind.UNKNOWN else ""
+
+    @property
+    def type_note(self) -> str:
+        """What the row says about a folder whose MRC files no record decides; empty for others."""
+
+        if self.asks:
+            return f"The app cannot find the type of {count_phrase(self.asks, 'file')}."
+        if self.selection is not None:
+            return f"Read as: {READ_AS_WORDS[self.selection]} · your selection"
+        return ""
 
     @property
     def reason(self) -> str:
@@ -128,10 +173,26 @@ class DroppedFolder:
         return self.status in (FolderCheck.MISSING, FolderCheck.NOT_A_SESSION)
 
 
-def source_key(path: str | Path) -> str:
-    """The key of the source a path loads: a Scipion job folder loads its ``extra`` folder."""
+@runtime_checkable
+class FolderTyping(Protocol):
+    """What the check asks the loader about MRC files that no record decides (``SessionLoader``)."""
 
-    return path_identity_key(processing_root(Path(path)))
+    def question(self, path: str | Path) -> FolderQuestion | None: ...
+
+    def kept_selection(self, path: str | Path) -> ReadAs | None: ...
+
+
+def folder_typing(loader: object) -> FolderTyping | None:
+    """``loader`` when it can say which folders ask (rule 5); a loader that only classifies cannot."""
+
+    return loader if isinstance(loader, FolderTyping) else None
+
+
+def source_key(path: str | Path) -> str:
+    """The key of the source a path loads: a Scipion job folder loads its ``extra``
+    folder, and a Warp output folder its Warp project (``source_root``)."""
+
+    return path_identity_key(source_root(Path(path)))
 
 
 def names_a_file(path: Path) -> bool:
@@ -147,11 +208,13 @@ def check_folder(
     *,
     loaded_keys: Collection[str] = (),
     key: str | None = None,
+    read_as: FolderTyping | None = None,
 ) -> DroppedFolder:
     """Check one path: exists, is a folder, holds a session, is not loaded.
 
     ``key`` is the path's ``source_key`` when the caller has it already; it is
-    not worked out a second time.
+    not worked out a second time. With ``read_as``, a folder whose MRC files no
+    record decides says that the load asks, or shows the kept selection.
     """
 
     path = Path(raw_path)
@@ -164,13 +227,20 @@ def check_folder(
         if not path.is_dir():
             return DroppedFolder(text, FolderCheck.MISSING)
         kind = classify(path)
+        # The classifier says Unknown for a refused folder; the row says why.
+        note = (refusal_reason(path) or "") if kind == SessionKind.UNKNOWN else ""
+        asks, selection = 0, None
+        if read_as is not None and kind != SessionKind.UNKNOWN:
+            question = read_as.question(path)
+            asks = len(question.files) if question is not None else 0
+            selection = None if question is not None else read_as.kept_selection(path)
     except OSError:
         return DroppedFolder(text, FolderCheck.NOT_A_SESSION, note=UNREADABLE_REASON)
     if kind == SessionKind.UNKNOWN:
-        return DroppedFolder(text, FolderCheck.NOT_A_SESSION, kind=kind)
+        return DroppedFolder(text, FolderCheck.NOT_A_SESSION, kind=kind, note=note)
     if (source_key(path) if key is None else key) in loaded_keys:
         return DroppedFolder(text, FolderCheck.ALREADY_LOADED, kind=kind)
-    return DroppedFolder(text, FolderCheck.READY, kind=kind)
+    return DroppedFolder(text, FolderCheck.READY, kind=kind, asks=asks, selection=selection)
 
 
 @dataclass(frozen=True)
@@ -331,6 +401,7 @@ def admit(
     budget_s: float | None = None,
     known: Iterable[Admitted] = (),
     clock: Callable[[], float] = time.monotonic,
+    read_as: FolderTyping | None = None,
 ) -> Admission[T]:
     """Admit ``paths`` to the queue ``entries``. Pure: it returns a result and changes nothing.
 
@@ -382,7 +453,7 @@ def admit(
         else:
             key = source_key(spelling)
             if key not in checked:
-                checked[key] = check_folder(spelling, classify, loaded_keys=loaded_keys, key=key)
+                checked[key] = check_folder(spelling, classify, loaded_keys=loaded_keys, key=key, read_as=read_as)
             record = Admitted(spelling, key, _at(checked[key], spelling))
         this_call[text_key] = record
         records.append(record)
@@ -404,6 +475,7 @@ def replace_entry(
     classify: Callable[[Path], SessionKind],
     *,
     loaded_keys: Collection[str] = (),
+    read_as: FolderTyping | None = None,
 ) -> tuple[QueueEntry[T], ...]:
     """Put ``path`` in place of entry ``index`` ("Use parent folder"), checking only ``path``.
 
@@ -414,7 +486,7 @@ def replace_entry(
     queue = list(entries)
     spelling = str(Path(path))
     key = source_key(spelling)
-    folder = check_folder(spelling, classify, loaded_keys=loaded_keys, key=key)
+    folder = check_folder(spelling, classify, loaded_keys=loaded_keys, key=key, read_as=read_as)
     queue[index] = QueueEntry(spelling, key, folder, queue[index].token)
     _merge(queue, key, folder)
     return tuple(queue)
@@ -427,6 +499,7 @@ def assess_paths(
     loaded_keys: Collection[str] = (),
     budget_s: float | None = None,
     clock: Callable[[], float] = time.monotonic,
+    read_as: FolderTyping | None = None,
 ) -> SessionIntake:
     """Check each distinct source, in order: ``admit`` to an empty queue.
 
@@ -435,7 +508,7 @@ def assess_paths(
     finishes them at the drop.
     """
 
-    return admit((), paths, classify, loaded_keys=loaded_keys, budget_s=budget_s, clock=clock).intake
+    return admit((), paths, classify, loaded_keys=loaded_keys, budget_s=budget_s, clock=clock, read_as=read_as).intake
 
 
 def recheck_unchecked(
@@ -443,6 +516,7 @@ def recheck_unchecked(
     classify: Callable[[Path], SessionKind],
     *,
     loaded_keys: Collection[str] = (),
+    read_as: FolderTyping | None = None,
 ) -> SessionIntake:
     """Finish a drag's check at the drop: look at what it had no time for, and nothing else."""
 
@@ -450,4 +524,5 @@ def recheck_unchecked(
         return intake
     # An intake built by hand has no records: its folders are what was supplied.
     records = intake.records or tuple(Admitted(folder.path, None, folder) for folder in intake.folders)
-    return admit((), [record.spelling for record in records], classify, loaded_keys=loaded_keys, known=records).intake
+    return admit((), [record.spelling for record in records], classify, loaded_keys=loaded_keys, known=records,
+                 read_as=read_as).intake

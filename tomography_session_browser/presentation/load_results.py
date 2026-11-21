@@ -11,10 +11,12 @@ from tomography_session_browser.presentation.empty_states import (
 from tomography_session_browser.services.load_results import (
     FailureCategory, LoadBatchResult, LoadFailure, LoadIntent, LoadOutcome, OutcomeKind,
 )
-from tomography_session_browser.services.session_intake import ALREADY_LOADED_REASON
+from tomography_session_browser.services.session_intake import ALREADY_LOADED_REASON, TYPE_NOT_SELECTED_REASON
 
 
 def failure_reason(failure: LoadFailure) -> str:
+    if failure.category == FailureCategory.REFUSED:
+        return failure.diagnostic  # The loader's own reason (``FolderRefused``).
     return {
         FailureCategory.MISSING: "This folder could not be found",
         FailureCategory.UNREADABLE: "This folder could not be read",
@@ -75,8 +77,9 @@ def load_result_content(result: LoadBatchResult) -> LoadResultContent:
     failed = tuple(item for item in result.outcomes if item.kind == OutcomeKind.FAILED)
     retained = tuple(item for item in result.outcomes if item.kind == OutcomeKind.RETAINED)
     skipped = tuple(LoadResultLine(item.name, item.reason, item.path) for item in result.admission_skips)
-    skipped += tuple(LoadResultLine(item.name, ALREADY_LOADED_REASON, item.attempt.request.path)
-                     for item in result.outcomes if item.kind == OutcomeKind.SKIPPED)
+    skipped += tuple(LoadResultLine(item.name, item.note or (
+        TYPE_NOT_SELECTED_REASON if item.kind == OutcomeKind.UNANSWERED else ALREADY_LOADED_REASON),
+        item.attempt.request.path) for item in result.outcomes if item.kind in (OutcomeKind.SKIPPED, OutcomeKind.UNANSWERED))
     sections: list[LoadResultSection] = []
     if failed:
         sections.append(LoadResultSection(f"{count_phrase(len(failed), 'folder')} could not be loaded",

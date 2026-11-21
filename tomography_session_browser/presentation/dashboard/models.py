@@ -360,8 +360,6 @@ class InferredBatchGroup:
     tilt_series: list[TiltSeries]
     #: The grid (sample folder) the group's series sit on, when known.
     owner: str | None = None
-    #: Recorded batches this group may join: same name *and* same grid.
-    batch_ids: frozenset[str] = frozenset()
 
 
 @dataclass(slots=True)

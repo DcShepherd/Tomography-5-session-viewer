@@ -2,6 +2,83 @@
 
 This file lists the fixes and new functions in each release.
 
+## 1.2.1 (21 November 2026)
+
+### Processing folders
+
+- **Warp output folders:** You can select one of the output folders in a Warp processing folder, for example `warp_tiltseries/reconstruction/deconv`. The application then loads the full Warp processing folder.
+- **Warp volumes without their project:** When the Warp processing folder is not available, for example in a copy of the `deconv` folder only, the application reads the volumes that have a Warp file name (`<name>_<pixel size>Apx`) as tomograms. The Context panel shows "Read as: tomograms, by Warp file names". Links to tilt series, CTF data and frame data are not available.
+- **Warp folder refused:** The application does not load a Warp CTF, power-spectrum or frame folder, or a Warp folder that has no volumes, without its Warp processing folder. The message "This folder has Warp output, but its Warp project folder was not found." tells you why. The drop panel shows the full reason.
+- **MRC files with no type:** Some MRC files have no MDOC file, no extended header and no Warp file name. In **Load sessions**, their folder shows **Select at load**. When you load the folders, the application shows one window for each of these folders. Select **Tomograms**, **Tilt series** or **Do not load**. The application keeps your selection for that folder in its settings, not in the folder. To change the selection, select **Change…** in the Context panel. The application then loads the folder again.
+- **Two volumes with one version:** When a Warp folder has two or more volumes of one tomogram with the same version, the application shows a warning. The version list then shows the pixel size of each volume, for example "Raw · 5.00 Å/px". The Summary page and the report use only a version that has one volume. The report does not show a central slice for the other versions, and tells you why.
+
+### Reports
+
+- **Section order:** In each dataset, the tilt-series table comes first, then the exposure thumbnails, then the tomograms. Before, the tomograms came between the table and the thumbnails.
+- **Exposure thumbnails:** The thumbnails do not show the stage position (Stage X, Y).
+- **Two decimals:** In the report, the tilt range, the MRC pixel size and the stack pixel size show a maximum of two decimals, for example "-60.01 to 59.99" and "6.77". The mean residual and the weighted mean residual show two decimals on the screen and in the report, for example "0.95 nm". The recorded values do not change.
+- **Fact cards:** The fact cards of the Tomograms section (Versions, Volume, Alignment and Parent link) have the same height, and their detail lines align.
+- **Sources:** The **Sources** block has one short line for each column of the Recorded values table: what the value is, the file pattern and its caveat. A caveat that applies to all columns shows one time. A tomogram whose values differ from the others gets one short line. The details for each tomogram are in the PDF metadata. The "Not recorded" line below the table is removed, because the table does not show a column that has no value.
+- **No dataset link:** The cover, the contents, the sections and the report dialog use the same words for tomograms that have no link to a dataset: "No dataset link". The cover gives the number of central slices, for example "Central slices 2 of 3". A slice that the report cannot show has the text "Not shown" and the reason.
+- **Report dialog:** A pane on the right, **In this report**, shows the parts of the report in their sequence, with their counts. When you tick only processing folders, its first line tells you that this makes a folder report. The dialog has less text. The help is in tooltips, and a disabled option tells you why in its tooltip. The option names are shorter: **Exposure thumbnails**, **Linked tomograms** and **Central slices**. The Type column shows words, not codes. The dialog height follows the number of rows.
+- **Ticks in the dialog:** The tree has no row selection. Click a row to tick or untick it. The tick boxes look the same as the other tick boxes, in the two themes. When you put the pointer on a row, the full row shows the highlight. When the dialog opens, the group and atlas rows show at the top.
+- **One atlas control:** The tick of the atlas row (AT) is the only control for the full screening overview. **Also include supporting atlas-session overviews** is removed.
+- **Warnings:** The report lists the warning "Failed batch … could not be associated with a search map", as the Summary page does. The cover totals include it.
+- **Atlas sessions:** The header and the contents of an atlas session count all the grids that have an atlas. When the image of a grid is missing, a note gives the name of that grid.
+- **Atlas markers:** When the application cannot calculate the atlas markers, the caption says "Atlas markers unavailable: they could not be computed." Before, it said that no marker could be placed.
+
+### Tags
+
+- **Tag project file names:** When you create a tag project (with the first tag, **Create project…** or **Save As**), you can type a name without `.json`. The application adds `.json`. When the extension has a typo, for example `test.jsn`, `testjson` or `test.jons`, the application asks you to use the corrected name `test.json` or to choose again. The application does not replace a file that exists. It tells you that a file with this name exists, and you choose again.
+
+### Atlas and image tabs
+
+- **Marker colours:** The markers on the Search map, Overview and Search tile images show the same batch result as the Atlas: collected, partial, failed or queued. Each exposure area shows the result of its own tilt series.
+- **Search maps card:** On the Summary page, the tile of each search map shows the same status as its row in the list.
+- **Overview links:** When a batch position records the name of its Overview image, the application links the position to the Overview of that name. When no Overview, or more than one, has that name, the application shows a warning and makes no link. Before, it could use the Overview of the search map.
+- **Tilt-series names:** A tilt series joins a batch position by its name only when the name is the batch name, or the batch name followed by `_2`, `_3` and so on.
+- **Failed batches on search maps:** The application puts an inferred failed batch on a search map only by its stage position, not by its name.
+- **Search tiles for other exposures:** When all the search tiles of a position record a different exposure area, the application does not open them for this exposure, also when there is only one tile.
+- **Enter:** Enter opens each marker that a double-click opens.
+- **Camera fields:** When the exposure areas are hidden, the camera field of the selected exposure shows. Before, the first camera field with the same area name could show.
+- **Zoom:** When a sharper level of the same image loads during a zoom or a flight, the motion continues.
+- **Labels while you move:** While you pan or zoom, the marker labels follow the motion. The application does not draw all the markers again for each frame.
+
+### Acquisition data
+
+- **Aborted:** A recorded status of "Aborted" is a failure (an interruption), as "Failed" and "Error" are.
+- **Names that look like numbers:** Names in the Tomography 5 XML files stay as they are recorded, for example `001` or `1.10`. Before, the application could read them as numbers, so the positions `1.1` and `1.10` could become one position.
+- **Incomplete stacks:** When an MRC stack holds fewer frames than its header records, the application shows the frames on disk. A missing frame shows the reason, for example "MRC frame 41 is not on disk: the file holds 40 of 41 frames (incomplete data block)."
+- **Atlases with JPG tiles:** When an atlas has only JPG tiles, the application reads the pixel size from all the tiles, not from the first 64. It reads only the position and size fields of each tile file, so the load stays fast.
+- **Voxel size:** The voxel size of an MRC file is the cell size divided by the sampling (MX), as the MRC format defines it. The application uses the number of columns (NX) only when MX is 0.
+- **Timestamps:** When a timestamp has more than six decimals of seconds, the application removes the other decimals. It does not round them, so a time does not move to the next second.
+- **Cloud-only files:** The application does not open a cloud placeholder file, for example a file that is only online. It shows "Cloud-only file: make it available locally, then reload the folder." It skips a placeholder stack that has no MDOC file, with this warning.
+
+### Tomograms tab
+
+- **IMOD unsigned bytes:** The application reads an IMOD volume of mode 0 as unsigned bytes when its header has the IMOD stamp and does not set the signed-bytes flag. Before, it read all mode 0 volumes as signed bytes, so the grey values of these volumes were incorrect.
+- **Slabs with missing values:** In a view along an axis, **Slices** calculates the average of adjacent planes from finite voxels only. A voxel shows no value only when no voxel of the slab is finite. Before, one missing value removed the average at that position. Integer data do not change.
+- **Changed files:** When a volume file becomes shorter after the load, the application does not read it and tells you why.
+- **Intersection:** A click without a drag does not move the intersection point. Double-click to move it. The tooltip of the lock button tells you this.
+- **Home and End:** Home goes to the first plane, and End goes to the last plane.
+- **Pointer readout:** The pointer readout and the intersection use the same voxel. Before, they could differ by one voxel.
+- **Minimise:** When you minimise the window, the Tomograms tab only stops playback. **Focus**, a snapshot that waits and an open movie dialog stay. Before, a minimise stopped **Focus** and cancelled a snapshot that waited.
+- **Failed reads:** When the application cannot read a volume into memory, it does not try again and again. Select a different volume, then select the volume again to try again.
+- **Preview clip memory:** **Preview clip** uses the shared memory limit. When the limit is too small, it tells you why.
+
+### Summary
+
+- **Dose chart:** A time axis shows only the images that have a timestamp. A note gives the number of the other images, for example "3 dose images have no timestamp and are not shown." The statistics include all the values.
+- **Timeline keys:** The arrow keys go through the timeline segments in time order. Before, they followed the sequence in which the application drew them.
+
+### Window
+
+- **Close during a movie export:** When you close the window during a movie export, the application asks about the movie first, before it checks the tags. When you select **Keep the app open**, nothing stops.
+- **Close during a report:** When you close the window while the application makes a report, the application stops the report. It does not ask. When the application is writing the PDF file, it completes the file first.
+- **Background work at close:** Preview clips and contact sheets stop when you close the application.
+- **Current row:** After you group, rename or ungroup rows of the project tree, the row of the current scope stays the current row.
+- **Start mark:** The window shows only after the start card has shown for its minimum time, also when a Windows timer starts early.
+
 ## 1.2.0 (16 November 2026)
 
 ### Atlas overlays

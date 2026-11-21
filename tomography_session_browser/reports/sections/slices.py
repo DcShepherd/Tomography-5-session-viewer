@@ -4,7 +4,7 @@ Images are never rotated: each shows the XY plane as the viewer shows it,
 fitted inside a cell of one size with its aspect ratio kept. Four columns give
 square cells (16 on a page); three columns, used when any volume is higher
 than it is wide, give portrait cells (9 on a page). A skipped tile keeps its
-cell with "No image" and its print reason.
+cell with "Not shown" and its print reason.
 """
 from __future__ import annotations
 
@@ -25,7 +25,8 @@ GAP = 6.0
 ROW_GAP = 8.0
 #: Portrait cell proportion from the B5 board: about 164 × 191 pt.
 PORTRAIT_RATIO = 191 / 164
-NO_IMAGE = "No image"
+#: A skipped tile's word, as the cover's "1 not shown" (board 7, option A).
+NOT_SHOWN = "Not shown"
 
 
 def cell_size(columns: int) -> tuple[float, float]:
@@ -34,7 +35,7 @@ def cell_size(columns: int) -> tuple[float, float]:
 
 
 class SliceCell(Flowable):
-    """One fixed cell: the image fitted and centred, or "No image" and the reason."""
+    """One fixed cell: the image fitted and centred, or "Not shown" and the reason."""
 
     def __init__(self, tile: Tile, width: float, height: float) -> None:
         super().__init__()
@@ -59,7 +60,7 @@ class SliceCell(Flowable):
             x, y, w, h = self.image_box()
             c.drawImage(ImageReader(io.BytesIO(self.tile.png)), x, y, width=w, height=h)
         else:
-            reason = Paragraph(f"<b>{NO_IMAGE}</b><br/>{graphics.html_escape(self.tile.reason)}", styles.MUTED_STYLE)
+            reason = Paragraph(f"<b>{NOT_SHOWN}</b><br/>{graphics.html_escape(self.tile.reason)}", styles.MUTED_STYLE)
             _, used = reason.wrap(self.width - 12, self.height)
             reason.drawOn(c, 6, (self.height - used) / 2)
         c.setStrokeColor(styles.BORDER_STRONG)
@@ -118,5 +119,11 @@ def numbered_tiles(scoped: ScopedTomograms, slices: ReportSlices) -> list[tuple[
 
 
 def cover_cards(slices: ReportSlices) -> list[graphics.StatCardData]:
-    return [graphics.StatCardData("Central slices", f"{slices.shown:,}", [], []),
-            graphics.StatCardData(NO_IMAGE, f"{slices.skipped:,}", [], [])]
+    """One card, "2 of 3": a skipped tile is one of the linked tomograms, not a group of its own."""
+    total = len(slices.tiles)
+    if not total:
+        return []
+    skipped = slices.skipped
+    note = (f"{skipped:,} not shown. " + ("Its tile gives the cause." if skipped == 1 else "Their tiles give the cause.")
+            if skipped else None)
+    return [graphics.StatCardData("Central slices", f"{slices.shown:,}", [], None, note=note, suffix=f"of {total:,}")]

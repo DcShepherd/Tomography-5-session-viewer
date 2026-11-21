@@ -209,10 +209,17 @@ def dose_information_plot_model(scope: DashboardScope) -> DoseInformationPlotMod
             x_axis_label="Frame order",
         )
 
+    plotted = points
     if timestamp_tilt_ids and len(timestamp_tilt_ids) == len(dose_tilt_ids):
         x_mode = "absolute_time"
         x_axis_label = "Acquisition time"
         note = None
+        # A time axis cannot place an image without a time, and its frame
+        # order is not a time: leave those images off the chart, and say so.
+        plotted = [point for point in points if point.acquisition_time is not None]
+        if len(plotted) < len(points):
+            untimed = len(points) - len(plotted)
+            note = f"{untimed:,} dose {'image has' if untimed == 1 else 'images have'} no timestamp and {'is' if untimed == 1 else 'are'} not shown."
     else:
         x_mode = "frame_order"
         x_axis_label = "Frame order"
@@ -239,7 +246,7 @@ def dose_information_plot_model(scope: DashboardScope) -> DoseInformationPlotMod
     )
 
     return DoseInformationPlotModel(
-        points=points,
+        points=plotted,
         total_tilt_series=total_tilt_series,
         dose_tilt_series=len(dose_tilt_ids),
         timestamp_tilt_series=len(timestamp_tilt_ids),

@@ -24,12 +24,13 @@ from tomography_session_browser.presentation.report_tomograms import (
 from tomography_session_browser.reports import graphics, styles
 from tomography_session_browser.reports.formatting import footer_label
 from tomography_session_browser.reports.layout import meta_row
-from tomography_session_browser.reports.pdf_export import PORTRAIT_USABLE_W, ReportResult, write_pdf
+from tomography_session_browser.reports.pdf_export import PORTRAIT_USABLE_W, ReportResult, report_keywords, write_pdf
+from tomography_session_browser.reports.sections.recorded_sources import recorded_detail
 from tomography_session_browser.reports.sections.slices import central_slices, cover_cards, numbered_tiles
 from tomography_session_browser.reports.sections.tomograms import (
     attention, data_table, facts_row, labelled, recorded_values, tags_and_notes, versions_text,
 )
-from tomography_session_browser.reports.tomogram_slices import ReportSlices, slice_keywords
+from tomography_session_browser.reports.tomogram_slices import ReportSlices, slice_records
 from tomography_session_browser.services.output_boundary import check_output_path
 from tomography_session_browser.services.tomogram_links import COUNT_LABELS
 
@@ -67,7 +68,9 @@ def build_folder_report(scoped: ScopedTomograms, output_path: Path, *, title: st
         output_path, flowables, title=title,
         footer_label=footer_label((), project_title=title, generated_at=generated_at),
         protected_roots=roots,
-        keywords=slice_keywords(numbered_tiles(scoped, slices)) if slices is not None else None)
+        keywords=report_keywords(
+            tiles=slice_records(numbered_tiles(scoped, slices)) if slices is not None else None,
+            recorded=recorded_detail([row for section in scoped.sections for row in section.members], scoped)))
     return ReportResult(path=output_path, page_count=page_count, warnings=warnings)
 
 
@@ -85,12 +88,13 @@ def folder_cover(scoped: ScopedTomograms, title: str, generated_at: datetime, sl
         Spacer(1, 10),
     ]
     linked = sum(row.link.status == 'resolved' for row in rows)
-    cards = [graphics.StatCardData("Tomograms", f"{len(rows):,}", [], [])]
+    # No band: as on the session cover, which shares the Central slices card (board 7, option A).
+    cards = [graphics.StatCardData("Tomograms", f"{len(rows):,}", [], None)]
     if scoped.acquisition_sessions:    # with none, the sentence below says it once
-        cards.append(graphics.StatCardData("Linked", f"{linked:,}", [], []))
+        cards.append(graphics.StatCardData("Linked", f"{linked:,}", [], None))
     if slices is not None:
         cards += cover_cards(slices)
-    body: list = [graphics.stat_card_row(cards, total_width=PORTRAIT_USABLE_W - 2 * styles.CARD_PADDING, columns=4)]
+    body: list = [graphics.stat_card_row(cards, total_width=PORTRAIT_USABLE_W - 2 * styles.CARD_PADDING, columns=3)]
     if not scoped.acquisition_sessions:
         body.append(Paragraph(graphics.html_escape(NO_ACQUISITION), styles.SMALL_STYLE))
     else:
@@ -101,7 +105,8 @@ def folder_cover(scoped: ScopedTomograms, title: str, generated_at: datetime, sl
                                            if counts[state]])]
     by_folder = Counter(row.tomogram.source_id for row in rows)
     body.append(labelled("Processing folders:", " · ".join(
-        f"{source.label} ({source.source.pipeline}), {count_phrase(by_folder[source.source.id], 'tomogram')}"
+        f"{source.label}{f' ({source.source.display_pipeline})' if source.source.display_pipeline else ''}, "
+        f"{count_phrase(by_folder[source.source.id], 'tomogram')}"
         for source in scoped.sources) + "."))
     if scoped.folders_left_out:
         body.append(Paragraph(graphics.html_escape(
@@ -123,7 +128,8 @@ def contents(scoped: ScopedTomograms):
     cells = []
     for section in scoped.sections:
         source = section_sources(section, scoped)[0]
-        detail = f"{source.source.pipeline} · {count_phrase(len(section.members), 'tomogram')}"
+        detail = " · ".join(part for part in (source.source.display_pipeline,
+                                              count_phrase(len(section.members), 'tomogram')) if part)
         cells.append([Paragraph(f"<b>{graphics.html_escape(section.title)}</b><br/>{graphics.html_escape(detail)}",
                                 styles.SMALL_STYLE),
                       graphics.PageRef(section.anchor, width=page_w - 4)])
@@ -163,7 +169,7 @@ def folder_section(section: TomogramSection, scoped: ScopedTomograms, position: 
         Spacer(1, 2),
         graphics.AnchoredParagraph(graphics.html_escape(section.title), styles.SECTION_TITLE_STYLE,
                                    anchor=section.anchor, outline=section.title, level=0),
-        meta_row([("Pipeline", source.source.pipeline), ("Tomograms", f"{len(section.members):,}")]),
+        meta_row([("Pipeline", source.source.display_pipeline), ("Tomograms", f"{len(section.members):,}")]),
         Spacer(1, 10),
     ]
     if not section.members:

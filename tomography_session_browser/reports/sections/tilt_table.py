@@ -6,6 +6,7 @@ from reportlab.platypus import Paragraph, Spacer, Table
 from tomography_session_browser.services.tilt_series_validation import tilt_range_evidence, validation_for
 from tomography_session_browser.domain.models import TiltSeries
 from tomography_session_browser.domain.status import ValidationStatus
+from tomography_session_browser.presentation.formatting import two_decimals
 from tomography_session_browser.reports import graphics, styles
 from tomography_session_browser.reports.pdf_export import PORTRAIT_USABLE_W
 from tomography_session_browser.services.item_status import display_status_label
@@ -131,14 +132,14 @@ def tilt_row(tilt: TiltSeries, ctx: SessionContext) -> TiltRow:
     tilt_range_text = "n/a"
     low, high, _step = tilt_range_evidence(validation)[1] if validation else (None, None, None)
     if low is not None and high is not None:
-        tilt_range_text = f"{low:g} to {high:g}"
+        tilt_range_text = f"{two_decimals(low)} to {two_decimals(high)}"
     elif tilt.tilt_range is not None:
-        tilt_range_text = f"{tilt.tilt_range[0]:g} to {tilt.tilt_range[1]:g}"
+        tilt_range_text = f"{two_decimals(tilt.tilt_range[0])} to {two_decimals(tilt.tilt_range[1])}"
 
-    original_pixel = f"{tilt.original_pixel_size:g}" if tilt.original_pixel_size is not None else "n/a"
+    original_pixel = two_decimals(tilt.original_pixel_size) if tilt.original_pixel_size is not None else "n/a"
     mrc_pixel = mrc_pixel_size_angstrom(tilt.mrc_metadata, [])
-    pixel = f"{mrc_pixel:g}" if mrc_pixel is not None else (
-        f"{tilt.pixel_size:g}*" if tilt.pixel_size is not None else "n/a"
+    pixel = two_decimals(mrc_pixel) if mrc_pixel is not None else (
+        f"{two_decimals(tilt.pixel_size)}*" if tilt.pixel_size is not None else "n/a"
     )
     # The unit is in the column heading: the same formatter, without it.
     target_def = format_target_defocus_values([tilt.target_defocus], unit="").strip()

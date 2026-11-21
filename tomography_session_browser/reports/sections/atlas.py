@@ -21,7 +21,7 @@ from tomography_session_browser.services.atlas_lod import ATLAS_LABEL_MIN_ZOOM, 
 from tomography_session_browser.services.marker_clustering import MAX_ATLAS_ZOOM
 from tomography_session_browser.services.atlas_metadata import atlas_projection_mismatch
 from tomography_session_browser.reports.constants import ATLAS_DETAIL_MARGIN_DP, ATLAS_DETAIL_MAX_ZOOM, ATLAS_MRC_MATCH, ATLAS_PRINT_DPI, FIGURE_GUTTER, LOGGER
-from tomography_session_browser.reports.images import embeddable_image_path, resolve_overlay_geometry
+from tomography_session_browser.reports.images import embeddable_image_path, note_overlay_failure, resolve_overlay_geometry
 from tomography_session_browser.reports.layout import figure_cell, figure_row
 
 
@@ -51,6 +51,7 @@ def atlas_image_block(
         text = f"{graphics.html_escape(label)} — atlas image not available."
         return [Paragraph(text, styles.NOTE_STYLE)]
 
+    markers_failed = False
     try:
         ctx_markers = MarkerContext(
             overviews=tuple(scope_overviews),
@@ -65,8 +66,9 @@ def atlas_image_block(
             ctx_markers,
             include_detail_markers=False,
         )
-    except Exception as exc:  # pragma: no cover — defensive
-        LOGGER.debug("Atlas marker computation failed: %s", exc)
+    except Exception as exc:  # defensive boundary: the figure still prints
+        note_overlay_failure(generation_warnings, f"atlas {label}", exc)
+        markers_failed = True
         raw_markers = []
     native, markers = resolve_overlay_geometry(atlas, raw_markers, embed)
     batch_markers, unattributed = atlas_status_markers(markers)
@@ -122,7 +124,11 @@ def atlas_image_block(
         cells.append(figure_cell(figure, "Batch positions", f"{where} · {zoom:g}× zoom", cell_w, inline=True))
 
     # One line: where the atlas came from is already in the dataset header.
-    if not details:
+    if markers_failed:
+        # No markers because they could not be computed, not because none
+        # could be placed: say which, never the negative.
+        caption = f"{graphics.html_escape(label)}. Atlas markers unavailable: they could not be computed."
+    elif not details:
         caption = f"{graphics.html_escape(label)}: none of this dataset's batch positions could be placed on this atlas."
     else:
         caption = (

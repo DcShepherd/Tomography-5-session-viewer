@@ -397,6 +397,14 @@ VALUE_STYLE = _style(
     textColor=TEXT_STRONG,
 )
 
+# A readout in words ("IMOD tiltalign output found"): sans, as strong as VALUE_STYLE.
+VALUE_TEXT_STYLE = _style(
+    "ReportValueText",
+    fontSize=TYPE_BODY,
+    leading=TYPE_BODY * 1.3,
+    textColor=TEXT_STRONG,
+)
+
 # A readout that is an absence ("n/a"): the same face, in the muted colour.
 VALUE_MUTED_STYLE = _style(
     "ReportValueMuted",

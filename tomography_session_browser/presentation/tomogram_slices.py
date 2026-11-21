@@ -15,7 +15,7 @@ from tomography_session_browser.domain.tomograms import Tomogram, Volume
 from tomography_session_browser.presentation.tomogram_render_plan import PaneViewport, render_plan
 from tomography_session_browser.presentation.tomogram_selection import REVIEW_VERSION_ORDER
 from tomography_session_browser.presentation.tomogram_state import TomogramViewState
-from tomography_session_browser.presentation.tomogram_versions import review_versions
+from tomography_session_browser.presentation.tomogram_versions import ambiguous_versions, review_versions, unique_version
 from tomography_session_browser.services.volume.models import RenderRecipe
 from tomography_session_browser.services.volume.render import calibrated_spacing, plane_geometry
 
@@ -42,6 +42,7 @@ SKIP_CLOUD = "The file is only in the cloud."
 SKIP_CHANGED = "The file changed after the app read it."
 SKIP_UNREADABLE = "The app cannot read the file."
 SKIP_NO_VERSION = "The tomogram has no volume to show."
+SKIP_AMBIGUOUS_VERSION = "More than one volume has this version name. The report does not choose between them."
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,14 +75,16 @@ class SliceSkip:
     portrait: bool = False
 
 
-def slice_version(tomogram: Tomogram) -> Volume | None:
-    """Denoised, else Deconvolved, else Raw; else the first reviewable version."""
+def slice_name(tomogram: Tomogram) -> str | None:
+    """The version name the report uses: Denoised, else Deconvolved, else Raw; else the first reviewable one."""
     versions = review_versions(tomogram)
-    for name in SLICE_VERSION_ORDER:
-        match = next((volume for volume in versions if volume.version == name), None)
-        if match is not None:
-            return match
-    return versions[0] if versions else None
+    present = {volume.version for volume in versions}
+    return next((name for name in SLICE_VERSION_ORDER if name in present), versions[0].version if versions else None)
+
+
+def slice_version(tomogram: Tomogram) -> Volume | None:
+    """The one volume of ``slice_name``; ``None`` when no volume, or several, have that name."""
+    return unique_version(tomogram, slice_name(tomogram))
 
 
 def largest_odd(limit: int) -> int:
@@ -109,6 +112,9 @@ def slab_caption(planes: int, z_spacing: float | None) -> str:
 
 
 def plan_slice(tomogram: Tomogram, stated_for: Callable[[Volume], float | None]) -> SliceRequest | SliceSkip:
+    name = slice_name(tomogram)
+    if name is not None and name in ambiguous_versions(tomogram):
+        return SliceSkip(tomogram, name, SKIP_AMBIGUOUS_VERSION)
     volume = slice_version(tomogram)
     if volume is None:
         return SliceSkip(tomogram, "", SKIP_NO_VERSION)

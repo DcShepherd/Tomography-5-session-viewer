@@ -11,9 +11,10 @@ from tomography_session_browser.services.warning_classification import WarningSu
 from tomography_session_browser.services.tilt_series_validation import GridValidations, TiltSeriesValidation
 from tomography_session_browser.presentation.dashboard.dashboard import analysed_dashboard_model
 from tomography_session_browser.presentation.dashboard.models import DashboardModel
+from tomography_session_browser.presentation.dashboard.derived_warnings import derived_scope_warnings
+from tomography_session_browser.presentation.dashboard.scopes import scope_from
 from tomography_session_browser.presentation.warnings import session_warnings
-from tomography_session_browser.presentation.report_datasets import report_datasets
-from tomography_session_browser.services.session_linking import atlas_link_resolutions
+from tomography_session_browser.presentation.report_datasets import dataset_atlases, report_datasets
 
 
 @dataclass(slots=True)
@@ -48,7 +49,13 @@ class SessionContext:
         # Sample so the per-sample section logic keeps working.
         collection_samples = report_datasets(session)
 
+        # The recorded warnings plus the ones the dashboard derives, so the
+        # cover's totals and the warning list match the dashboard's Findings.
         warnings = session_warnings(session)
+        warnings += [
+            warning.text for warning in derived_scope_warnings(scope_from(session, workspace), analysis)
+            if warning.text not in warnings
+        ]
         warning_rows = summarise_warnings(warnings)
 
         return cls(
@@ -74,41 +81,19 @@ def resolve_report_atlases(
 ) -> None:
     """Resolve display-only atlas context without expanding exported content.
 
-    Include every loaded candidate so ambiguity cannot disappear when the
-    reviewer selects a subset. Synthetic session-level samples follow the same
-    resolver as ordinary collection samples.
+    ``presentation.report_datasets.dataset_atlases`` decides, so the dialog
+    preview names the same atlases as the PDF.
     """
-    lookup_sessions = list(sources) + [
-        replace(ctx.session, samples=ctx.session.samples or ctx.collection_samples)
-        for ctx in contexts
-    ]
-    session_names = {
-        id(sample): session.name
-        for session in lookup_sessions
-        for sample in session.samples
-    }
-    resolutions = atlas_link_resolutions(lookup_sessions)
+    resolved = dataset_atlases([(ctx.session, ctx.collection_samples) for ctx in contexts], sources)
     for ctx in contexts:
         for sample in ctx.collection_samples:
-            resolution = resolutions.get(id(sample))
-            atlas = sample.atlas
-            if atlas is None and resolution is not None:
-                if resolution.linked:
-                    atlas = resolution.sample.atlas
-                    source_session = session_names.get(id(resolution.sample))
-                    ctx.atlas_sources[id(sample)] = " / ".join(
-                        name for name in (source_session, resolution.sample.name) if name
-                    )
-                else:
-                    ctx.atlas_notes[id(sample)] = (
-                        "Atlas link is ambiguous; no atlas has been selected."
-                        if resolution.ambiguous else
-                        "Linked atlas is unavailable. Load the matching atlas session to include it."
-                    )
-            elif atlas is None:
-                atlas = fallback_session_atlas(ctx, sample)
-            if atlas is not None:
-                ctx.sample_atlases[id(sample)] = atlas
+            atlas = resolved[id(sample)]
+            if atlas.note is not None:
+                ctx.atlas_notes[id(sample)] = atlas.note
+            if atlas.source is not None:
+                ctx.atlas_sources[id(sample)] = atlas.source
+            if atlas.atlas is not None:
+                ctx.sample_atlases[id(sample)] = atlas.atlas
 
 
 def atlas_count_scope(ctx: SessionContext, represented: frozenset[int]) -> Session:

@@ -4,7 +4,7 @@ from enum import StrEnum
 import errno
 
 from tomography_session_browser.domain.identity import path_identity_key
-from tomography_session_browser.services.session_intake import DroppedFolder
+from tomography_session_browser.services.session_intake import DroppedFolder, FolderRefused
 
 
 class LoadIntent(StrEnum):
@@ -44,6 +44,8 @@ class FailureCategory(StrEnum):
     UNREACHABLE = "unreachable"
     PREPARATION = "preparation"
     PUBLICATION = "publication"
+    #: The loader refused the folder; the diagnostic is the reason to show.
+    REFUSED = "refused"
     UNKNOWN = "unknown"
 
 
@@ -62,6 +64,8 @@ def classify_failure(attempt: LoadAttempt, stage: LoadStage, error: Exception) -
         category = FailureCategory.PREPARATION
     elif stage == LoadStage.PUBLICATION:
         category = FailureCategory.PUBLICATION
+    elif isinstance(error, FolderRefused):
+        category = FailureCategory.REFUSED
     elif isinstance(error, OSError) and (error.errno in {
         errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED, errno.ECONNRESET,
     } or getattr(error, "winerror", None) in {53, 64, 67, 1201, 1222, 1231, 1232}):
@@ -85,6 +89,8 @@ class OutcomeKind(StrEnum):
     RETAINED = "retained"
     SKIPPED = "skipped"
     CANCELLED = "cancelled"
+    #: The folder's MRC files need the user's selection (rule 5); nothing from it is published.
+    UNANSWERED = "unanswered"
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +100,8 @@ class LoadOutcome:
     name: str
     failure: LoadFailure | None = None
     replaced_project: bool = False
+    #: Why a skipped folder was skipped, when not because it is loaded already.
+    note: str = ""
 
     def __post_init__(self) -> None:
         needs_failure = self.kind in (OutcomeKind.FAILED, OutcomeKind.RETAINED)
@@ -121,7 +129,8 @@ class LoadBatchResult:
 
     @property
     def unresolved(self) -> bool:
-        return bool(self.admission_skips or any(item.retryable or item.kind == OutcomeKind.SKIPPED for item in self.outcomes))
+        return bool(self.admission_skips or any(
+            item.retryable or item.kind in (OutcomeKind.SKIPPED, OutcomeKind.UNANSWERED) for item in self.outcomes))
 
     @property
     def published_count(self) -> int:

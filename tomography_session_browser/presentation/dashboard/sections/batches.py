@@ -21,7 +21,6 @@ from tomography_session_browser.services.batch_inference import (
     batch_inference_key,
     inferred_batch_label_for_tilt,
     inferred_group_token,
-    inferred_label_matches_batch,
 )
 from tomography_session_browser.services.entity_links import (
     batch_tilt_series,
@@ -172,8 +171,10 @@ def inferred_failed_batch_groups(
     distinct batch positions.
 
     ``owners`` (``batch_inference.entity_owner_keys``) keeps a group on its
-    own grid: batch names repeat across grids, and an orphan from one grid
-    must not join another grid's batch of the same name.
+    own grid: batch names repeat across grids, so orphans of one label on two
+    grids are two groups. A group never joins a recorded batch position, even
+    when its label matches one: Search-map rollups place it only through its
+    series' stage positions.
     """
 
     explicitly_linked = explicitly_linked_tilt_ids(batch_positions, tilt_series)
@@ -203,13 +204,6 @@ def inferred_failed_batch_groups(
         if (owner, key) not in grouped:
             grouped[(owner, key)] = InferredBatchGroup(key=key, label=label, tilt_series=[], owner=owner)
         grouped[(owner, key)].tilt_series.append(tilt)
-    for group in grouped.values():
-        first = group.tilt_series[0].id
-        group.batch_ids = frozenset(
-            batch.id
-            for batch in batch_positions
-            if inferred_label_matches_batch(group.label, batch, tilt_id=first, owners=owners)
-        )
     return list(grouped.values())
 
 

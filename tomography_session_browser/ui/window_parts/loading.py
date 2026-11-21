@@ -7,11 +7,13 @@ import time
 
 from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QDialog, QMainWindow
+from tomography_session_browser.domain.folder_type import FolderQuestion
 from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.domain.models import Sample, Session
 from tomography_session_browser.domain.tomograms import ProcessingSource
 from tomography_session_browser.diagnostics.profiling import NULL_PROFILE, LoadingProfiler
 from tomography_session_browser.presentation.describe.context import describe_project_group
+from tomography_session_browser.presentation.folder_type import NOT_LOADED_BY_SELECTION
 from tomography_session_browser.presentation.load_results import (
     ResultSurface, folder_progress_detail, load_result_content, load_result_state, result_surface,
 )
@@ -25,9 +27,10 @@ from tomography_session_browser.services.load_results import (
     LoadRequest, LoadIntent, LoadStage, LoadFailure, LoadOutcome, OutcomeKind, classify_failure,
 )
 from tomography_session_browser.services.session_intake import (
-    DRAG_CHECK_BUDGET_S, DroppedFolder, SessionIntake, assess_paths, recheck_unchecked,
+    DRAG_CHECK_BUDGET_S, DroppedFolder, SessionIntake, assess_paths, folder_typing, recheck_unchecked,
 )
-from tomography_session_browser.services.settings_service import add_recent_session
+from tomography_session_browser.services.settings_service import add_recent_session, keep_read_as, read_as_selections
+from tomography_session_browser.ui.folder_type_dialog import ask_folder_type
 from tomography_session_browser.ui.folder_picker import normalise_session_folder_for_import
 from tomography_session_browser.ui.load_sessions_dialog import LoadSessionsDialog
 from tomography_session_browser.ui.loading import heap
@@ -54,6 +57,8 @@ class SessionLoading(QObject):
         self.closed = False
         self.batch: LoadBatch | None = None
         self.pending_receipt_batch: str | None = None
+        #: The current batch's folders whose MRC files need the user's selection (rule 5), by request key.
+        self.questions: dict[str, FolderQuestion] = {}
 
     def retire_candidate(self) -> None:
         if self.candidate is not None:
@@ -129,13 +134,15 @@ class SessionLoading(QObject):
             self.state.loading.loader.classify,
             loaded_keys=self.parts.loading.loaded_path_keys(),
             budget_s=DRAG_CHECK_BUDGET_S,
+            read_as=folder_typing(self.state.loading.loader),
         )
 
 
     def load_dropped_sessions(self, intake: SessionIntake) -> None:
         if self.parts.loading.project_drops_refused():
             return
-        intake = recheck_unchecked(intake, self.state.loading.loader.classify, loaded_keys=self.parts.loading.loaded_path_keys())
+        intake = recheck_unchecked(intake, self.state.loading.loader.classify, loaded_keys=self.parts.loading.loaded_path_keys(),
+                                   read_as=folder_typing(self.state.loading.loader))
         paths = list(intake.ready_paths)
         self.ui.drop_receipt.dismiss()
         self.parts.loading.load_session_paths(paths, admission_skips=intake.problems)
@@ -247,6 +254,7 @@ class SessionLoading(QObject):
         if not normalised_loads and not admission_skips:
             return
         self.retire_run()
+        self.questions = {}
         self.batch = LoadBatch(normalised_loads, has_sources=self.state.review.workspace.has_sources,
                                admission_skips=admission_skips)
         if not normalised_loads:
@@ -282,7 +290,8 @@ class SessionLoading(QObject):
         self.state.loading.instrumentation.attach_stall_monitor(profile)
         previous = [source for source in (*self.state.review.workspace.sessions, *self.state.review.workspace.processing_sources)
                     if path_identity_key(source.path) == request.key] if request.intent == LoadIntent.RELOAD else []
-        job = LoadJob(attempt, profile, batch.replaces_project(attempt), previous[0] if len(previous) == 1 else None)
+        job = LoadJob(attempt, profile, batch.replaces_project(attempt), previous[0] if len(previous) == 1 else None,
+                      read_as_selections(self.state.review.settings))
         self.state.loading.load_thread_pool.start(session_load_task(job, self.state.loading.session_load_signals, self.state.loading.load_progress, LOGGER))
 
 
@@ -291,6 +300,12 @@ class SessionLoading(QObject):
         if batch is None or not self.accepts_job(job):
             return
         request = job.attempt.request
+        if isinstance(session, FolderQuestion):
+            # Nothing from the folder is published until the user selects (rule 5).
+            self.questions[request.key] = session
+            batch.record(LoadOutcome(job.attempt, OutcomeKind.UNANSWERED, Path(request.path).name))
+            self.advance_load(job)
+            return
         if not isinstance(session, (Session, ProcessingSource)):
             self.fail_job(job, ValueError("Loader returned an unexpected session object."), LoadStage.PARSE)
             return
@@ -553,6 +568,42 @@ class SessionLoading(QObject):
         self.state.loading.instrumentation.fold_into(profile)
         profile.emit_perf_report(LOGGER, path=job.attempt.request.path)
         if batch.running:
+            self.parts.loading.start_next_session_load()
+            return
+        if batch.unanswered():
+            # After the pass, one pop-up for each folder (owner D13 a); the window is the timer's context.
+            QTimer.singleShot(0, self.window, lambda: self.parts.loading.ask_folder_types(batch, profile))
+            return
+        self.state.loading.loading_task_active = False
+        self.parts.loading.record_loading_animation_profile(profile)
+        self.parts.loading.finish_loading_after_repaint("Loading complete", fade=True)
+
+    def ask_folder_types(self, batch: LoadBatch, profile: LoadingProfiler = NULL_PROFILE) -> None:
+        """Ask how to read each folder whose MRC files no record decides, then load those again.
+
+        A selection is kept in the app's settings, by folder (owner D8 a); "Do
+        not load" keeps nothing and skips the folder with that reason. The
+        selected folders load again in this batch, as a pass of their own.
+        """
+
+        if self.closed or self.batch is not batch or batch.running:
+            return
+        keys = batch.unanswered()
+        settings = self.state.review.settings
+        selected: list[str] = []
+        for number, key in enumerate(keys, 1):
+            question = self.questions.pop(key, None)
+            selection = ask_folder_type(self.window, question, (number, len(keys))) if question is not None else None
+            if self.closed or self.batch is not batch:
+                return
+            if selection is None or question is None:
+                batch.skip(key, NOT_LOADED_BY_SELECTION)
+                continue
+            keep_read_as(settings, question.path, selection)
+            selected.append(key)
+        if selected:
+            self.state.review.save_settings(settings)
+        if batch.again(selected):
             self.parts.loading.start_next_session_load()
             return
         self.state.loading.loading_task_active = False

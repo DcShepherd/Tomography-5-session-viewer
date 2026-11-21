@@ -6,9 +6,24 @@ from pathlib import Path
 
 from tomography_session_browser.domain.alignment import AlignmentOffer, RecordedAlignment
 from tomography_session_browser.domain.denoising import DenoisingInput
+from tomography_session_browser.domain.folder_type import TypeFoundBy
 from tomography_session_browser.domain.models import MrcMetadata
 from tomography_session_browser.domain.recorded_metrics import ProcessingEvidence
 from tomography_session_browser.domain.acquisition import AcquisitionEvidence
+
+#: The pipeline of a folder read by Warp's file names alone (rule 4, owner D7 b).
+WARP_OUTPUT = "Warp output"
+#: The pipeline of a folder whose volumes load as tomograms by the user's selection (rule 5).
+SELECTED_VOLUMES = "Selected volumes"
+#: What the window and reports call a pipeline, where that differs from its name (owner D16 a).
+#: The empty label means no pipeline is shown: the Context line says how the type was found.
+_PIPELINE_LABELS = {WARP_OUTPUT: "Warp", SELECTED_VOLUMES: ""}
+
+
+def pipeline_label(pipeline: str) -> str:
+    """The display name of ``pipeline``. Display only: the pipelines stay separate."""
+    return _PIPELINE_LABELS.get(pipeline, pipeline)
+
 
 UNRESOLVED_SPACING_WARNING = "Voxel spacing is unresolved. Voxel navigation is available; no physical scale bar is shown."
 SUSPICIOUS_SPACING_WARNING = "Header spacing includes 1 Å. Confirm calibration in Image settings before using a scale bar."
@@ -80,6 +95,13 @@ class ProcessingSource:
     job_root: Path | None = None
     #: What an alignment job (``pipeline="Alignment"``, no tomograms) offers, one per series folder.
     alignments: tuple[AlignmentOffer, ...] = ()
+    #: How the app found that the folder holds tomograms, when no record says it.
+    found_by: TypeFoundBy | None = None
+
+    @property
+    def display_pipeline(self) -> str:
+        """The pipeline as the window and reports show it (owner D16 a); empty shows none."""
+        return pipeline_label(self.pipeline)
 
     @property
     def protected_roots(self) -> tuple[Path, ...]:

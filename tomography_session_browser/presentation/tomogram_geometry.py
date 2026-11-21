@@ -92,13 +92,32 @@ def reserved_cursor_readouts(volume: Volume, recipe: RenderRecipe) -> tuple[str,
     return tuple("  ".join(f"{'XYZ'[i]}\u00a0{shape[i]}" for i in AXES[axis][:2]) for axis in AXES)
 
 
+def pointer_voxel(shape_xyz: tuple[int, int, int], axis: str, x: float, y: float, *,
+                  clamp: bool = True) -> tuple[int, int]:
+    """The zero-based (horizontal, vertical) voxel under display point ``(x, y)``.
+
+    Display rows go down and the volume's vertical axis goes up, so display
+    row ``[y, y + 1)`` shows voxel ``shape - 1 - floor(y)``. Placing the
+    intersection, the pointer readout and the crosshair all use this one
+    inverse. ``clamp`` keeps the voxel inside the volume.
+    """
+
+    h, v = AXES[axis][:2]
+    column, row = floor(x), shape_xyz[v] - 1 - floor(y)
+    if clamp:
+        column = max(0, min(shape_xyz[h] - 1, column))
+        row = max(0, min(shape_xyz[v] - 1, row))
+    return column, row
+
+
 def cursor_readout(volume: Volume, recipe: RenderRecipe, x: float, y: float) -> CursorReadout:
     """Use source mapping once for visible and complete accessible coordinates."""
     assert volume.grid is not None
     h, v, normal = AXES[recipe.axis]
     coordinates = [0, 0, 0]
-    coordinates[h] = int(x) + 1
-    coordinates[v] = volume.grid.shape_xyz[v] - int(y)
+    column, row = pointer_voxel(volume.grid.shape_xyz, recipe.axis, x, y, clamp=False)
+    coordinates[h] = column + 1
+    coordinates[v] = row + 1
     coordinates[normal] = recipe.plane + 1
     if source_mapped(recipe):
         from tomography_session_browser.services.volume.oblique import mapping

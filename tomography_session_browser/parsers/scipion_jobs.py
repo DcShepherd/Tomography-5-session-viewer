@@ -86,7 +86,8 @@ def scipion_job(root: Path) -> ScipionJob | None:
 def processing_root(path: Path) -> Path:
     """A job folder reads as its ``extra`` folder; any other path is unchanged.
 
-    Every place where a chosen path becomes a source key uses this, so the job
-    folder and its ``extra`` folder are one source.
+    ``processing_intake.source_root`` applies this wherever a chosen path
+    becomes a source key, so the job folder and its ``extra`` folder are one
+    source.
     """
     return path / OUTPUTS if job_of(path) is not None else path

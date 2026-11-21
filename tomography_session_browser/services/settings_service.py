@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tomography_session_browser.domain.folder_type import ReadAs
 from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.services.atomic_files import atomic_write
 
@@ -61,6 +62,9 @@ class Settings:
     # last chosen explicitly. Off the first time.
     report_tomograms: bool = False
     report_tomogram_slices: bool = False
+    # How the user selected to read a folder whose MRC files no record decides
+    # (owner D8 a): ``ReadAs`` values by folder identity key. Never in the folder.
+    read_as: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Settings":
@@ -90,6 +94,9 @@ class Settings:
             tomogram_movie={key: value for key, value in data["tomogram_movie"].items()
                             if isinstance(key, str) and type(value) in (str, bool)}
                 if isinstance(data.get("tomogram_movie"), dict) else {},
+            read_as={key: value for key, value in data["read_as"].items()
+                     if isinstance(key, str) and value in tuple(ReadAs)}
+                if isinstance(data.get("read_as"), dict) else {},
         )
 
 
@@ -148,6 +155,23 @@ def add_recent_session(settings: Settings, session_path: str, *, limit: int = 8)
     cleaned = [str(p) for p in settings.recent_sessions if p and p != session_path]
     cleaned.insert(0, session_path)
     settings.recent_sessions = cleaned[:limit]
+    return settings
+
+
+def read_as_selections(settings: Settings) -> dict[str, ReadAs]:
+    """The kept selections by folder identity key (``SessionLoader`` reads them)."""
+
+    return {key: ReadAs(value) for key, value in settings.read_as.items()}
+
+
+def keep_read_as(settings: Settings, path: str | Path, selection: ReadAs | None) -> Settings:
+    """Keep ``selection`` for the folder at ``path``; None forgets it, so the next load asks."""
+
+    key = path_identity_key(path)
+    if selection is None:
+        settings.read_as.pop(key, None)
+    else:
+        settings.read_as[key] = selection.value
     return settings
 
 

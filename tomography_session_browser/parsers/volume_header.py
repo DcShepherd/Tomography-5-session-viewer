@@ -10,6 +10,7 @@ from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.domain.models import MrcMetadata
 from tomography_session_browser.domain.tomograms import (SUSPICIOUS_SPACING_WARNING, UNRESOLVED_SPACING_WARNING, Volume,
                                                          VolumeFingerprint, VolumeGrid)
+from tomography_session_browser.parsers.mrc_metadata_parser import imod_unsigned_bytes
 
 
 def fingerprint(path: Path) -> VolumeFingerprint:
@@ -20,6 +21,18 @@ def fingerprint(path: Path) -> VolumeFingerprint:
 def is_cloud_placeholder(path: Path) -> bool:
     # Attribute queries do not open/dehydrate the file's contents.
     return bool(getattr(path.stat(), "st_file_attributes", 0) & (0x1000 | 0x40000 | 0x400000))
+
+
+def cloud_only(path: Path) -> bool:
+    """``is_cloud_placeholder`` for readers that must not open such a file; a missing file is not one."""
+    try:
+        return is_cloud_placeholder(path)
+    except OSError:
+        return False
+
+
+#: The warning a session-load reader gives instead of opening a cloud-only file.
+CLOUD_ONLY_FILE_WARNING = "Cloud-only file: make it available locally, then reload the folder."
 
 
 def records_volume(header: bytes) -> bool:
@@ -33,6 +46,9 @@ def records_volume(header: bytes) -> bool:
 
 
 def file_records_volume(path: Path) -> bool:
+    """Whether the file's header records a volume. A cloud-only file is not opened: False."""
+    if cloud_only(path):
+        return False
     with path.open("rb") as handle:
         header = handle.read(1024)
     return len(header) == 1024 and records_volume(header)
@@ -66,7 +82,7 @@ def read_volume(path: Path, version: str) -> Volume:
         nsymbt = struct.unpack_from(endian + "i", header, 92)[0]
         if nsymbt < 0:
             raise ValueError("Extended-header size is negative.")
-        dtype = np.dtype(endian + formats[mode])
+        dtype = np.dtype("u1" if mode == 0 and imod_unsigned_bytes(header, endian) else endian + formats[mode])
         offset = 1024 + nsymbt
         expected = offset + nx * ny * nz * dtype.itemsize
         counts = struct.unpack_from(endian + "3i", header, 28)

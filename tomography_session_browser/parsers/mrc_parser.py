@@ -11,6 +11,7 @@ from PIL import Image
 
 from tomography_session_browser.domain.models import MrcMetadata
 from tomography_session_browser.parsers.mrc_metadata_parser import MrcFrameMetadata, ParsedMrcMetadata, mrc_numpy_dtype, parse_mrc_metadata
+from tomography_session_browser.parsers.volume_header import CLOUD_ONLY_FILE_WARNING, cloud_only
 from tomography_session_browser.diagnostics.profiling import record_aggregate_phase
 
 
@@ -63,6 +64,16 @@ class MrcInspection:
     @property
     def data_offset(self) -> int:
         return MRC_HEADER_BYTES + self.extended_header_bytes
+
+    @property
+    def frame_bytes(self) -> int:
+        return max(1, self.nx) * max(1, self.ny) * self.dtype.itemsize
+
+    @property
+    def available_frames(self) -> int:
+        """Whole frames on disk: an incomplete data block keeps the frames it holds."""
+
+        return min(self.frame_count, max(0, self.size_bytes - self.data_offset) // self.frame_bytes)
 
 
 @dataclass(slots=True)
@@ -154,22 +165,34 @@ class MrcPreviewSource:
         return result
 
     def _read_frame(self, index: int) -> np.ndarray:
-        dtype = self.inspection.dtype
-        shape = self.inspection.shape
-        mapped = np.memmap(
+        """Map only frame ``index``, so a truncated stack still shows the frames it holds."""
+
+        inspection = self.inspection
+        self._check_index(index)
+        # A map past the end of the file faults on access (SIGBUS on Linux):
+        # check the file still holds this frame (owner decision 9).
+        end = inspection.data_offset + (index + 1) * inspection.frame_bytes
+        if self.path.stat().st_size < end:
+            raise IndexError(f"MRC frame {index + 1} is no longer on disk: the file is shorter than when it was "
+                             "read. Reload the folder.")
+        return np.memmap(
             self.path,
-            dtype=dtype,
+            dtype=inspection.dtype,
             mode="r",
-            offset=self.inspection.data_offset,
-            shape=shape,
+            offset=inspection.data_offset + index * inspection.frame_bytes,
+            shape=(inspection.ny, inspection.nx),
             order="C",
         )
-        frame_view = mapped[0] if self.inspection.nz == 1 else mapped[index]
-        return frame_view
 
     def _check_index(self, index: int) -> None:
         if index < 0 or index >= self.frame_count():
             raise IndexError(f"MRC frame index out of range: {index}")
+        available = self.inspection.available_frames
+        if index >= available:
+            raise IndexError(
+                f"MRC frame {index + 1} is not on disk: the file holds {available} of "
+                f"{self.frame_count()} frames (incomplete data block)."
+            )
 
 
 _INSPECT_CACHE: dict[tuple[str, int, int], "MrcInspection"] = {}
@@ -250,7 +273,8 @@ def inspect_mrc(path: Path) -> MrcInspection:
     warnings = list(parsed.warnings)
     nx, ny, nz, mode = main.nx, main.ny, main.nz, main.mode
     endian = main.endian
-    dtype = mrc_numpy_dtype(mode, endian)
+    # The header parse already read the IMOD unsigned-byte flag into its dtype.
+    dtype = mrc_numpy_dtype(mode, endian, unsigned_bytes=main.dtype == "uint8")
     if dtype is None:
         raise ValueError(f"MRC mode {mode} is not supported for preview.")
     tilt_angles = [frame.tilt_angle for frame in parsed.frame_metadata if frame.tilt_angle is not None]
@@ -311,6 +335,10 @@ def inspect_mrc(path: Path) -> MrcInspection:
 
 
 def read_mrc_metadata(path: Path) -> MrcMetadata:
+    if cloud_only(path):
+        # Opening a placeholder makes the provider download it; a session load
+        # must not do that. The stack is not unreadable, only not here yet.
+        return MrcMetadata(path=path, size_bytes=path.stat().st_size, warnings=[f"{path.name}: {CLOUD_ONLY_FILE_WARNING}"])
     try:
         inspection = inspect_mrc(path)
     except (OSError, ValueError) as exc:
@@ -319,11 +347,7 @@ def read_mrc_metadata(path: Path) -> MrcMetadata:
         except OSError:
             size_bytes = 0
         return MrcMetadata(path=path, size_bytes=size_bytes, warnings=[str(exc)], data_complete=False)
-    frame_bytes = inspection.nx * inspection.ny * inspection.dtype.itemsize
-    available_frames = min(
-        inspection.nz,
-        max(0, inspection.size_bytes - inspection.data_offset) // frame_bytes,
-    )
+    available_frames = min(inspection.nz, inspection.available_frames)
     return MrcMetadata(
         path=path,
         size_bytes=inspection.size_bytes,

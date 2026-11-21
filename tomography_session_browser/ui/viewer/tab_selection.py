@@ -501,13 +501,14 @@ class TabSelection:
             if MarkerType.EXPOSURE_AREA in self.view.parts.overlay_panel.unavailable_marker_types:
                 selected = next((marker for marker in markers if marker.id == self.selected_marker_id_override), None)
                 if selected is not None and selected.marker_type == MarkerType.EXPOSURE_AREA:
-                    area_name = str(selected.metadata.get("area_name") or "").strip().casefold()
+                    # The camera field drawn for this exposure: the link the
+                    # reverse lookup uses, never a shared area name.
                     camera = next(
                         (
                             marker
                             for marker in markers
                             if marker.marker_type == MarkerType.CAMERA_FOV
-                            and str(marker.metadata.get("area_name") or "").strip().casefold() == area_name
+                            and marker.metadata.get("exposure_marker_id") == selected.id
                         ),
                         None,
                     )

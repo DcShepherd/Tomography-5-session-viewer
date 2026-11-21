@@ -16,19 +16,22 @@ from reportlab.lib.units import inch
 from reportlab.platypus import CondPageBreak, Paragraph, Spacer, Table
 
 from tomography_session_browser.domain.display_names import count_phrase
+from tomography_session_browser.domain.folder_type import TypeFoundBy
 from tomography_session_browser.presentation.dashboard.summary import ProcessingSummary, summary_from_input
 from tomography_session_browser.presentation.dashboard.tag_summary import TagContent, dash_number_text, tag_summary
 from tomography_session_browser.presentation.dashboard.tomogram_summary_facts import outcome_facts
-from tomography_session_browser.presentation.recorded_metrics import METRIC_COLUMNS, metric_number, metric_row
+from tomography_session_browser.presentation.folder_type import warp_names_note_line
+from tomography_session_browser.presentation.recorded_metrics import METRIC_COLUMNS, metric_row
 from tomography_session_browser.presentation.report_tomograms import (
-    ReportRow, ScopedTomograms, TomogramSection, exclusion_reason, incomplete_note, print_source, print_warning,
-    section_input, section_sources,
+    NO_DATASET_LINK, ReportRow, ScopedTomograms, TomogramSection, exclusion_reason, incomplete_note, print_warning,
+    section_input, section_sources, unplaced_note,
 )
 from tomography_session_browser.presentation.tomogram_calibration import tomogram_warnings
 from tomography_session_browser.presentation.tomogram_versions import review_versions
 from tomography_session_browser.reports import graphics, styles
 from tomography_session_browser.reports.layout import longest_word, shrink_widths, spread_widths
 from tomography_session_browser.reports.pdf_export import PORTRAIT_USABLE_W
+from tomography_session_browser.reports.sections.recorded_sources import sources_block
 from tomography_session_browser.reports.sections.slices import central_slices, cover_cards as slice_cover_cards
 from tomography_session_browser.reports.tomogram_slices import ReportSlices
 from tomography_session_browser.services.tomogram_links import COUNT_LABELS
@@ -44,6 +47,9 @@ ENTRY_HEADING_STYLE = ParagraphStyle("ReportEntryHeading", parent=styles.SMALL_S
 #: Said once on the cover, so no tomogram block is read as current state.
 SNAPSHOT_NOTE = ("Tomogram values are from the time when the report dialog opened. "
                  "The acquisition warning totals do not include these notes.")
+#: The cover cards' notes (board 7, option A): where the counted tomograms are.
+LINKED_NOTE = "In the dataset tables and counts."
+NO_LINK_NOTE = "Listed with the cause. Not in the counts."
 
 
 # ------------------------------------------------------------------ tables
@@ -119,8 +125,7 @@ def folder_labels(scoped: ScopedTomograms) -> dict[str, str]:
 def section_meta(section: TomogramSection, scoped: ScopedTomograms, summary: ProcessingSummary | None) -> str:
     excluded = len({row.key for row in section.notes})
     if not section.members:
-        return " · ".join(part for part in ("0 linked tomograms", count_phrase(excluded, "not counted", "not counted")
-                                            if excluded else "") if part)
+        return " · ".join(part for part in ("0 linked tomograms", no_link_phrase(excluded)) if part)
     sources = section_sources(section, scoped)
     where = sources[0].label if len(sources) == 1 else count_phrase(len(sources), "folder")
     parts = [count_phrase(len(section.members), "linked tomogram"), where]
@@ -137,14 +142,9 @@ def coverage_line(section: TomogramSection) -> Paragraph | None:
 
 
 def facts_row(summary: ProcessingSummary) -> Table:
-    """Versions, Volume, Alignment and Parent link from the shared facts, with their detail lines."""
-    facts = outcome_facts(summary)
-    width = (PORTRAIT_USABLE_W - styles.CARD_GAP * (len(facts) - 1)) / len(facts)
-    cells = [graphics.card([Paragraph(graphics.html_escape(fact.value), styles.VALUE_STYLE),
-                            *([Paragraph(graphics.html_escape(fact.detail), styles.MUTED_STYLE)] if fact.detail else [])],
-                           width=width, title=fact.label)
-             for fact in facts]
-    return graphics.side_by_side(cells, [width] * len(cells))
+    """Versions, Volume, Alignment and Parent link from the shared facts: one height, detail lines level."""
+    return graphics.fact_card_row([graphics.FactCardData(fact.label, fact.value, fact.detail)
+                                   for fact in outcome_facts(summary)], total_width=PORTRAIT_USABLE_W)
 
 
 def versions_text(row: ReportRow) -> str:
@@ -161,53 +161,17 @@ def tomogram_table(section: TomogramSection, scoped: ScopedTomograms, *, folder_
 
 
 def recorded_values(rows: Sequence[ReportRow], scoped: ScopedTomograms) -> list:
-    """The recorded-values table, the absent-column line and the grouped sources."""
+    """The recorded-values table and its Sources. A column with no value is left out, not listed."""
     metric_rows = [metric_row(row.tomogram) for row in rows]
     present = [index for index, (definition, _) in enumerate(METRIC_COLUMNS)
                if any(metric.definition == definition for row in rows for metric in row.tomogram.processing.metrics)]
     if not present:
         return [labelled("Recorded values:", "none.")]
-    absent = [label.lower() for index, (_, label) in enumerate(METRIC_COLUMNS) if index not in present]
     header = ["Tomogram", *(METRIC_COLUMNS[index][1] for index in present)]
     # ``metric_row.values`` starts with the alignment cell.
     table_rows = [[row.name, *(row.values[index + 1] for index in present)] for row in metric_rows]
-    flowables: list = [_subheading("Recorded values"), Spacer(1, 3), data_table(header, table_rows)]
-    if absent:
-        flowables += [Spacer(1, 3), Paragraph(graphics.html_escape(f"Not recorded: {', '.join(absent)}."), styles.MUTED_STYLE)]
-    flowables += [Spacer(1, 6), _subheading("Sources"), *provenance(rows, scoped)]
-    return flowables
-
-
-def provenance(rows: Sequence[ReportRow], scoped: ScopedTomograms) -> list:
-    """Sources grouped by definition, recorded field and qualification; per row only for ambiguity."""
-    groups: dict[tuple[str, str, str], tuple[set[str], set[str]]] = defaultdict(lambda: (set(), set()))
-    ambiguous: list[str] = []
-    for row in rows:
-        metrics = row.tomogram.processing.metrics
-        for definition, label in METRIC_COLUMNS:
-            candidates = [metric for metric in metrics if metric.definition == definition]
-            if len(candidates) > 1:
-                values = ", ".join(f"{metric_number(metric)} {metric.unit}" for metric in candidates)
-                sources = ", ".join(dict.fromkeys(print_source(metric.source, scoped) for metric in candidates))
-                ambiguous.append(f"{row.tomogram.name}: {label} has {len(candidates)} values ({values}), "
-                                 f"so the report shows no value. Sources: {sources}.")
-            for metric in candidates:
-                names, files = groups[(metric.label, metric.field, metric.qualification)]
-                names.add(row.key)
-                files.add(print_source(metric.source, scoped))
-    qualifications = {qualification for (_, _, qualification) in groups}
-    shared = next(iter(qualifications)) if len(qualifications) == 1 else None
-    lines = []
-    for (label, field, qualification), (names, files) in groups.items():
-        text = f"{label}: {field}, {count_phrase(len(names), 'tomogram')}."
-        if len(files) == 1:
-            text += f" Source: {next(iter(files))}."
-        if shared is None and qualification:
-            text += f" {qualification}"
-        lines.append(text)
-    if shared:
-        lines.append(shared)
-    return [Paragraph(graphics.html_escape(line), styles.MUTED_STYLE) for line in (*lines, *ambiguous)]
+    return [_subheading("Recorded values"), Spacer(1, 3), data_table(header, table_rows),
+            Spacer(1, 6), _subheading("Sources"), Spacer(1, 2), *sources_block(rows, scoped)]
 
 
 def attention(section: TomogramSection, scoped: ScopedTomograms, summary: ProcessingSummary) -> list:
@@ -224,6 +188,9 @@ def attention(section: TomogramSection, scoped: ScopedTomograms, summary: Proces
         if warnings:                   # a link state alone is said once, in the table's Note
             lines.append(f"{row.tomogram.name} · {labels[row.tomogram.source_id]} · {' '.join(warnings)}")
     for source in section_sources(section, scoped):
+        # The PDF has no Context, so the no-project note stays a folder line here (owner D15 a).
+        if source.source.found_by == TypeFoundBy.WARP_NAMES:
+            lines.append(warp_names_note_line(source.label))
         lines += [f"{source.label} · {warning}" for warning in source.source.warnings]
     if not lines:
         return []
@@ -238,7 +205,7 @@ def exclusion_table(rows: Sequence[ReportRow], scoped: ScopedTomograms) -> Table
 
 
 def tomogram_section(section: TomogramSection, scoped: ScopedTomograms, slices: ReportSlices | None = None) -> list:
-    """The Tomograms subsection of one dataset: after the tilt-series table; central slices last."""
+    """The Tomograms subsection of one dataset: after the tilt-series table and its exposures; central slices last."""
     summary = summary_from_input(section_input(section, scoped)) if section.members else None
     notes = tuple({row.key: row for row in section.notes}.values())
     flowables: list = [CondPageBreak(1.3 * inch),
@@ -256,7 +223,9 @@ def tomogram_section(section: TomogramSection, scoped: ScopedTomograms, slices: 
     if flagged:
         flowables += [Spacer(1, 8), *flagged]
     if notes:
-        flowables += [Spacer(1, 8), labelled("Not counted:", count_phrase(len(notes), "tomogram") + "."),
+        flowables += [Spacer(1, 8), labelled(f"{NO_DATASET_LINK}:", (
+                          f"{count_phrase(len(notes), 'tomogram')}. The table and the counts above do not include "
+                          f"{'it' if len(notes) == 1 else 'them'}.")),
                       Spacer(1, 3), exclusion_table(notes, scoped)]
     tags = tags_and_notes(section, scoped)
     if tags:
@@ -370,12 +339,14 @@ def _notes(rows: Sequence[ReportRow], labels: dict[str, str], other: Sequence[st
 def cover_card(scoped: ScopedTomograms, slices: ReportSlices | None = None) -> list:
     """The cover's Linked tomograms card and its diagnostics, each said once."""
     members = scoped.members
-    excluded = len(scoped.excluded) + len(scoped.incomplete)
-    cards = [graphics.StatCardData("Linked", f"{len(members):,}", [], []),
-             graphics.StatCardData("Not counted", f"{excluded:,}", [], [])]
+    unplaced = len(scoped.excluded) + len(scoped.incomplete)
+    # Each card says what it counts and where those tomograms are; no empty band.
+    cards = [graphics.StatCardData("Linked", f"{len(members):,}", [], None, note=LINKED_NOTE if members else None)]
+    if unplaced:
+        cards.append(graphics.StatCardData(NO_DATASET_LINK, f"{unplaced:,}", [], None, note=NO_LINK_NOTE))
     if slices is not None:
         cards += slice_cover_cards(slices)
-    rows: list = [graphics.stat_card_row(cards, total_width=PORTRAIT_USABLE_W - 2 * styles.CARD_PADDING, columns=4)]
+    rows: list = [graphics.stat_card_row(cards, total_width=PORTRAIT_USABLE_W - 2 * styles.CARD_PADDING, columns=3)]
     if not members:
         rows.append(Paragraph("0 linked tomograms in the selected datasets.", styles.SMALL_STYLE))
     linked: dict[str, int] = defaultdict(int)
@@ -388,12 +359,16 @@ def cover_card(scoped: ScopedTomograms, slices: ReportSlices | None = None) -> l
             f"The report does not include {count_phrase(scoped.folders_left_out, 'other loaded folder')}.")) if part)
     if folders:
         rows.append(labelled("Processing folders:", folders))
+    unplaced_line = unplaced_note(scoped)
+    if unplaced_line:
+        label, _, text = unplaced_line.partition(": ")
+        rows.append(labelled(label + ":", text))
     labels = folder_labels(scoped)
     for note in scoped.session_notes:
         for row in note.rows:
             rows.append(labelled(f"{note.session_name}:", (
                 f"{row.tomogram.name} ({labels[row.tomogram.source_id]}) has a link to a tilt series of the session, "
-                "not of a grid. It is not in a dataset section." if row.state == "unrepresented_owner"
+                "not of a grid." if row.state == "unrepresented_owner"
                 else f"{row.tomogram.name} ({labels[row.tomogram.source_id]}): {exclusion_reason(row)}")))
     incomplete = incomplete_note(scoped.incomplete, len(scoped.sources))
     if incomplete:
@@ -410,9 +385,14 @@ def cover_card(scoped: ScopedTomograms, slices: ReportSlices | None = None) -> l
 
 
 def contents_detail(section: TomogramSection | None) -> str:
-    """The contents line's tomogram count for one dataset: "12 linked tomograms · 3 not counted"."""
+    """The contents line's tomogram count for one dataset: "12 linked tomograms · 3 with no dataset link"."""
     if section is None:
         return ""
     notes = len({row.key for row in section.notes})
     return " · ".join(part for part in (count_phrase(len(section.members), "linked tomogram"),
-                                        f"{notes} not counted" if notes else "") if part)
+                                        no_link_phrase(notes)) if part)
+
+
+def no_link_phrase(count: int) -> str:
+    """ "3 with no dataset link" for the contents and section lines; empty at 0."""
+    return f"{count:,} with no dataset link" if count else ""

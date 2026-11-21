@@ -20,6 +20,8 @@ from tomography_session_browser.reports.graphics.atlas_figure import PT_PER_DP
 from tomography_session_browser.reports.graphics.anchors import PageRef
 from tomography_session_browser.reports.graphics.status import ProjectBadge
 from tomography_session_browser.reports.graphics.atlas_figure import RasterCrop
+from tomography_session_browser.reports.graphics.cards import FactCard
+from tomography_session_browser.reports.graphics.cards import FactCardData
 from tomography_session_browser.reports.graphics.cards import StatCard
 from tomography_session_browser.reports.graphics.cards import StatCardData
 from tomography_session_browser.reports.graphics.status import StatusGlyph
@@ -40,6 +42,7 @@ from tomography_session_browser.reports.graphics.text import caption_width
 from tomography_session_browser.reports.graphics.cards import card
 from tomography_session_browser.reports.graphics.cards import card_header
 from tomography_session_browser.reports.graphics.cards import draw_brand_mark
+from tomography_session_browser.reports.graphics.cards import fact_card_row
 from tomography_session_browser.reports.graphics.text import draw_caption
 from tomography_session_browser.reports.graphics.status import draw_dot
 from tomography_session_browser.reports.graphics.atlas_figure import draw_pdf_cluster
@@ -70,6 +73,8 @@ __all__ = [
     "Chips",
     "CompletionBar",
     "Dot",
+    "FactCard",
+    "FactCardData",
     "NORMAL_STATUS_GLYPHS",
     "OverlayKey",
     "OverlayKeyItem",
@@ -87,6 +92,7 @@ __all__ = [
     "draw_caption",
     "draw_pdf_cluster",
     "draw_status_band",
+    "fact_card_row",
     "fit_text",
     "keep_with_caption",
     "mark_page",

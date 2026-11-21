@@ -103,6 +103,8 @@ def parse_warp_xml(text: str, base: Path) -> tuple[Path, ...]:
 def timestamp(value: str) -> str:
     """Canonical naive time, with recorded year width retained; no timezone/century guess."""
     value = ' '.join(value.split())
+    # Tomography 5 writes 7 fractional digits; keep microseconds and drop the rest (never round).
+    value = re.sub(r'(:\d{2}\.\d{6})\d+$', r'\1', value)
     # Only formats evidenced by MDOC fixtures: English month names and ISO dates.
     match = re.fullmatch(r'(\d{1,2})-([A-Za-z]{3})-(\d{2}|\d{4}) (\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)', value)
     if match:

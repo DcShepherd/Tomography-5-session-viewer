@@ -15,7 +15,7 @@ from tomography_session_browser.ui.theme import current_palette
 import logging
 LOGGER = logging.getLogger("tomography_session_browser.ui.image_viewer")
 from tomography_session_browser.ui.viewer.constants import ARRIVAL_FRAME_SHARE, BUTTON_ZOOM_STEP, FIT_IN_VIEW_MARGIN_PX, PULSE_MAX_RADIUS_PX, PULSE_MIN_RADIUS_PX, REFIT_EASE_ARM_S, VIEWPORT_MEMORY_LIMIT
-from tomography_session_browser.ui.viewer.marker_paint import marker_scene_geometry
+from tomography_session_browser.ui.viewer.marker_paint import absolute_point, marker_scene_geometry, relative_point
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from tomography_session_browser.ui.viewer.preview_interaction import PreviewInteraction
@@ -592,6 +592,41 @@ class PreviewCamera:
             self.scroll_policies = None
             self.view.setHorizontalScrollBarPolicy(horizontal)
             self.view.setVerticalScrollBarPolicy(vertical)
+
+    def motion_across_level(self, old_rect: QRectF) -> Callable[[QRectF], None] | None:
+        """Keep a flight or eased wheel zoom across a new level of the same image.
+
+        A pyramid upgrade replaces the scene with more pixels, so the motion
+        stops with the old scene. The returned callable starts it again on
+        the new scene: the same target, remapped by its place in the image,
+        at the same zoom relative to fit. An arrival resumes through
+        ``retry_arrival`` instead, so it is not captured here.
+        """
+
+        if old_rect.width() <= 0 or old_rect.height() <= 0 or self.arrival_in_flight is not None:
+            return None
+        if self.flight_to is not None:
+            scale, centre, zoom = self.flight_to
+            target, landed = relative_point(old_rect, centre), self.flight_landed
+
+            def fly_on(new_rect: QRectF) -> None:
+                ratio = old_rect.width() / (new_rect.width() or old_rect.width())
+                self.fly_to(absolute_point(new_rect, target), scale * ratio, zoom=zoom, on_landed=landed)
+
+            return fly_on
+        if self.wheel_zoom.is_animating and self.wheel_anchor is not None:
+            log_target = self.wheel_zoom.target
+            anchor_view, anchor_scene = self.wheel_anchor
+            anchor = relative_point(old_rect, anchor_scene)
+
+            def zoom_on(new_rect: QRectF) -> None:
+                # Zoom is relative to fit, so it holds across levels.
+                self.wheel_zoom.reset(math.log(max(self.zoom, 1e-6)))
+                self.wheel_anchor = (anchor_view, absolute_point(new_rect, anchor))
+                self.wheel_zoom.set_target(log_target)
+
+            return zoom_on
+        return None
 
     def stop_view_motion(self, *, finish_fit: bool = False) -> None:
         """Stop any eased zoom, refit or flight; something else moves the view now.

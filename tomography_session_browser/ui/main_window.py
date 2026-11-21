@@ -319,9 +319,21 @@ class MainWindow(QMainWindow):
 
 
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt signature
-        if not self.ui.tomogram_tab.tags.lifecycle.request(self.close) or not self.ui.tomogram_tab.movie.confirm_close():
+        tomograms = self.ui.tomogram_tab
+        lifecycle = tomograms.tags.lifecycle
+        # Every question first: the tag preflight retires tag projects once it
+        # approves, so nothing may veto the close after it. While the
+        # preflight waits, the movie question was already answered.
+        if not lifecycle.active and not tomograms.movie.confirm_close():
             event.ignore()
             return
+        if not lifecycle.request(self.close):
+            event.ignore()
+            return
+        if self.parts.report.active:
+            # The worker stops at its next check; a PDF already being
+            # written finishes first (ReportLab cannot stop).
+            self.parts.report.cancel_report()
         self.parts.theme.finish_theme_reveal()
         self.parts.loading.cancel_pending()
         self.parts.viewers.scope_preparation.invalidate()

@@ -1,5 +1,6 @@
 """Selected-row edits compose the shared project service and the panel."""
 from dataclasses import dataclass, replace
+import os
 from pathlib import Path
 import uuid
 
@@ -15,7 +16,8 @@ from tomography_session_browser.ui.widgets.literal_text import literal_mnemonic
 from tomography_session_browser.domain.tomogram_tags import TagAssignment, TagSource
 from tomography_session_browser.domain.tomograms import ProcessingSource, Tomogram, Volume
 from tomography_session_browser.services.tomogram_tags.binding import (
-    AcceptanceProposal, ProjectKey, bind_row, bind_rows, commit_acceptance, propose_acceptance, reference, suggested_path,
+    AcceptanceProposal, NameCorrection, ProjectKey, bind_row, bind_rows, commit_acceptance, project_file_name, propose_acceptance,
+    reference, suggested_path,
 )
 from tomography_session_browser.presentation.tomogram_tag_changes import change_notice
 from tomography_session_browser.services.tomogram_tags.project import (
@@ -26,6 +28,9 @@ from tomography_session_browser.services.tomogram_tags.store import ProjectStatu
 from tomography_session_browser.ui.window_parts.tag_projects import TagProjects
 from tomography_session_browser.ui.tomograms.tags.panel import TagsPanel
 from tomography_session_browser.ui.tomograms.tags.column import TagsColumn
+
+
+PROJECT_FILTER = "Tag projects (*.json)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,14 +238,50 @@ class TagOwner(QWidget):
         folder = self.tab.settings.tomogram_snapshot_folder
         suggested = suggested_path(target.folder.path, Path(folder) if folder else None)
         if folder and not suggested.exists():
-            path = str(suggested)
+            path: Path | None = suggested
         else:
-            path, _ = QFileDialog.getSaveFileName(self.tab, "Create tag project outside source folders", str(suggested), "Tag projects (*.tags.json)")
-        if not path or target != self.target():
+            path = self.choose_new_project("Create tag project outside source folders", str(suggested))
+        if path is None or target != self.target():
             return False
         self.panel.pending_flash = tag.id
-        self.projects.open(Path(path), target.folder.path, create=True, project=project)
+        self.projects.open(path, target.folder.path, create=True, project=project)
         return True
+
+    def choose_new_project(self, title: str, start: str) -> Path | None:
+        """The one Save dialog for a new project file: adds .json, asks about a typo and refuses an existing file."""
+        while True:
+            chosen, _ = QFileDialog.getSaveFileName(self.tab, title, start, PROJECT_FILTER,
+                                                    options=QFileDialog.Option.DontConfirmOverwrite)
+            if not chosen:
+                return None
+            start = chosen
+            name = project_file_name(Path(chosen))
+            if name is None:
+                if self.choose_again(MessageContent("Type a file name", "Type a name before .json. No project was created.")):
+                    continue
+                return None
+            if isinstance(name, NameCorrection):
+                answer = message_sheet.choose_action(self.tab, ActionPrompt(
+                    MessageContent("Check the file extension", "Tag project files end in .json.",
+                                   (f"Name: {name.typed.name}", f"Corrected name: {name.corrected.name}")),
+                    (MessageAction("use", "Use corrected name"), MessageAction("again", "Choose again"),
+                     MessageAction("cancel", "Cancel")), "use", "cancel"))
+                if answer == "again":
+                    continue
+                if answer != "use":
+                    return None
+                name = name.corrected
+            if os.path.lexists(name):
+                start = str(name)
+                if self.choose_again(MessageContent("A file already exists with this name",
+                        "Choose a different name. The existing file stays unchanged.", (str(name),))):
+                    continue
+                return None
+            return name
+
+    def choose_again(self, content: MessageContent) -> bool:
+        return message_sheet.choose_action(self.tab, ActionPrompt(content,
+            (MessageAction("again", "Choose again"), MessageAction("cancel", "Cancel")), "again", "cancel")) == "again"
 
     def mutate_row(self, operation, target=None) -> None:
         target = target or self.target()
@@ -292,14 +333,19 @@ class TagOwner(QWidget):
         target = self.target()
         if target is None:
             return
-        choose = QFileDialog.getSaveFileName if create else QFileDialog.getOpenFileName
-        path, _ = choose(self.tab, "Create tag project" if create else "Open tag project", "", "Tag projects (*.json)")
-        if path and self.resolve_old(target.session):
-            if target.session and target.session.dirty:
-                self.projects.reload_session(target.session)
-                if path_identity_key(Path(path).resolve()) == path_identity_key(target.session.store.path.resolve()):
-                    return
-            self.projects.open(Path(path), target.folder.path, create=create)
+        if create:
+            path = self.choose_new_project("Create tag project", "")
+        else:
+            chosen, _ = QFileDialog.getOpenFileName(self.tab, "Open tag project", "", PROJECT_FILTER)
+            path = Path(chosen) if chosen else None
+        # The chooser's own sheets may run while the selection changes.
+        if path is None or target != self.target() or not self.resolve_old(target.session):
+            return
+        if target.session and target.session.dirty:
+            self.projects.reload_session(target.session)
+            if path_identity_key(path.resolve()) == path_identity_key(target.session.store.path.resolve()):
+                return
+        self.projects.open(path, target.folder.path, create=create)
 
     def resolve_old(self, session) -> bool:
         if session is None:
@@ -346,19 +392,31 @@ class TagOwner(QWidget):
         session = session if isinstance(session, TagSession) else target.session if target else None
         if session is None or session.project is None:
             return
+        if reason := self.save_as_blocked(session):
+            self.tab.status.message.setText(reason)
+            return
+        path = self.choose_new_project("Save tag project as", str(session.store.path))
+        if path is None:
+            return
+        # The dialog and its sheets are modal: the project can change while they are open.
+        reason = self.save_as_blocked(session)
+        if not reason and (session.project is None or session.suspended or self.projects.sessions.get(session.store.identity) is not session):
+            reason = "The project changed. Choose Save As again."
+        if reason:
+            self.tab.status.message.setText(reason)
+            return
+        folder = next((s.path for s in session.project.sources if self.projects.session_for(s.path) is session), None)
+        if folder is None and session.project.sources:
+            folder = session.project.sources[0].path
+        if folder is not None:
+            self.projects.open(path, folder, create=True, project=session.project, relocating=session)
+
+    def save_as_blocked(self, session: TagSession) -> str:
         if self.capture_links.busy(session) or session in self.projects.binding_tasks or (not session.dirty and any(s is session for _, s in self.projects.pending_bindings.values())):
-            self.tab.status.message.setText("Resolve this project's pending captures and folder binding before Save As.")
-            return
+            return "Resolve this project's pending captures and folder binding before Save As."
         if session.writer and not session.writer.flush(0):
-            self.tab.status.message.setText("The project is still saving. Try Save As when it finishes.")
-            return
-        path, _ = QFileDialog.getSaveFileName(self.tab, "Save tag project as", str(session.store.path), "Tag projects (*.tags.json)")
-        if path:
-            folder = next((s.path for s in session.project.sources if self.projects.session_for(s.path) is session), None)
-            if folder is None and session.project.sources:
-                folder = session.project.sources[0].path
-            if folder is not None:
-                self.projects.open(Path(path), folder, create=True, project=session.project, relocating=session)
+            return "The project is still saving. Try Save As when it finishes."
+        return ""
 
     def save_project_as(self, key: ProjectKey) -> None:
         session = self.projects.sessions.get(key.path)

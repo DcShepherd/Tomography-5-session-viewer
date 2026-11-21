@@ -159,6 +159,8 @@ class MovieExport:
         #: (picture key, source, the generation it serves): a reused source cancels on its newest request.
         self.preview_source: tuple[tuple, FrameSource, list[int]] | None = None
         self.clips = itertools.count(1)
+        #: Set once by shutdown(): every clip still running stops at its next frame.
+        self.closing = threading.Event()
         if not MovieExport.started:
             MovieExport.started = True
             clear_previews(preview_base())
@@ -282,6 +284,8 @@ class MovieExport:
 
     # The dialog's preview lane: one frame at a time; a newer request supersedes an older one.
     def request_frame(self, view: FrozenView, settings: MovieSettings, index: int) -> None:
+        if self.closing.is_set():
+            return  # A closed tab starts no preview: its lanes are already drained.
         self.preview_generation += 1
         generation = self.preview_generation
         try:
@@ -312,7 +316,7 @@ class MovieExport:
 
     def preview_clip(self, view: FrozenView, settings: MovieSettings, index: int) -> None:
         encoder = MovieExport.encoder
-        if encoder is None or not encoder.available:
+        if self.closing.is_set() or encoder is None or not encoder.available:
             return
         number = next(self.clips)
         try:
@@ -321,7 +325,7 @@ class MovieExport:
             self.tab.status.message.setText(str(exc))
             return
         path = preview_base() / f"preview-{os.getpid()}-{number}.mp4"
-        self.preview_pool.start(MovieTask(lambda: run_preview(request, encoder, index, path, cancelled=lambda: False),
+        self.preview_pool.start(MovieTask(lambda: run_preview(request, encoder, index, path, cancelled=self.closing.is_set),
                                           "clip", number, self.signals))
 
     # The export lane.
@@ -435,6 +439,7 @@ class MovieExport:
         """Cancel movie work before its lanes are joined."""
         self.waiting = None
         self.preview_generation += 1
+        self.closing.set()
         if self.running is not None:
             self.running.cancelled.set()
         if self.progress is not None:

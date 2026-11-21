@@ -292,26 +292,6 @@ def test_warning_summary_counts_long_scoped_names_as_one_affected_object() -> No
     assert rows[0].affected_items == 1
 
 
-def test_warning_classification_ignores_failed_text_in_object_name() -> None:
-    rows = summarise_warnings(
-        ["Sample / failed_control_1: Could not read MDOC file: permission denied"]
-    )
-
-    assert [(row.category, row.severity) for row in rows] == [
-        ("Missing MDOC file", "warning")
-    ]
-
-
-def test_orphan_mdoc_warning_is_a_missing_mrc_error() -> None:
-    rows = summarise_warnings(
-        ["Sample / stack: orphan.mdoc has no matching MRC stack and was skipped."]
-    )
-
-    assert [(row.category, row.severity) for row in rows] == [
-        ("Missing MRC file", "error")
-    ]
-
-
 # Real parser/service templates, scoped the way ``session_warnings`` scopes
 # them, and the category each must land in. Several used to land in the wrong
 # one: a bare "failed" made any warning a failed tilt series, and a bare
@@ -340,6 +320,8 @@ _CLASSIFIED_TEMPLATES = [
     ("S / Search 3: Search-map tile association used fallback matching: nearest tile.", "Search-tile link used a fallback", "info"),
     ("Failed batch violet_9 could not be associated with a search map from explicit links or image-stage metadata (violet_9_2).", "Failed tilt series collection", "error"),
     ("S / TS_01: No matching MDOC file found.", "Missing MDOC file", "warning"),
+    # "failed" in an object's name must not make it a failed tilt series.
+    ("Sample / failed_control_1: Could not read MDOC file: permission denied", "Missing MDOC file", "warning"),
     ("S / stack: orphan.mdoc has no matching MRC stack and was skipped.", "Missing MRC file", "error"),
     ("S / Session: Folder did not match a known Tomography 5 layout.", "Unrecognised folder layout", "warning"),
 ]

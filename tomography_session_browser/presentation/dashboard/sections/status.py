@@ -27,7 +27,6 @@ from tomography_session_browser.services.item_status import (
     ItemStatusContext,
     display_status_label,
     item_list_status,
-    search_map_tile_counts,
 )
 from tomography_session_browser.services.tilt_series_validation import SOURCE_NONE, TiltSeriesValidation, tilt_range_evidence
 
@@ -118,20 +117,26 @@ def overview_status(overview: Overview) -> str:
         return TILE_STATUS_MISSING
 
 
-def search_map_status(search_map: SearchMap) -> str:
-    """Search-map status from the planned/acquired tile counts."""
+#: A list row's verdict as a card tile, so the card reads what the row reads.
+_ROW_TILE_STATUS: dict[str, str] = {
+    RowStatus.DONE: TILE_STATUS_COMPLETE,
+    RowStatus.PARTIAL: TILE_STATUS_WARNING,
+    RowStatus.INCOMPLETE: TILE_STATUS_WARNING,
+    RowStatus.FAILED: TILE_STATUS_FAILED,
+    RowStatus.MISSING: TILE_STATUS_MISSING,
+}
 
-    planned, acquired = search_map_tile_counts(search_map)
-    if planned <= 0:
-        # Nothing planned — treat as neutral ("unknown"); we have no completion
-        # signal to flag this against. Most often this happens when the
-        # parser couldn't read GridSize from the XML.
-        return TILE_STATUS_NEUTRAL
-    if acquired >= planned:
-        return TILE_STATUS_COMPLETE
-    if acquired <= 0:
-        return TILE_STATUS_MISSING
-    return TILE_STATUS_WARNING
+
+def search_map_status(search_map: SearchMap, context: ItemStatusContext) -> str:
+    """The Search maps card's tile for ``search_map``: its list row's verdict.
+
+    The verdict folds the mosaic's tile counts and the outcome of the map's
+    tilt series together (``item_status.item_list_status``), as the Search
+    map list and Needs attention do, so the card cannot read healthy while
+    Needs attention lists the same map.
+    """
+
+    return _ROW_TILE_STATUS.get(item_list_status(search_map, context).status, TILE_STATUS_NEUTRAL)
 
 
 def batch_position_status(batch: BatchPosition) -> str:

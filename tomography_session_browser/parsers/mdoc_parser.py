@@ -8,6 +8,7 @@ from typing import Any
 
 from tomography_session_browser.domain.models import MdocSection
 from tomography_session_browser.diagnostics.profiling import record_aggregate_phase
+from tomography_session_browser.parsers.volume_header import CLOUD_ONLY_FILE_WARNING, cloud_only
 
 
 SECTION_RE = re.compile(r"^\[ZValue\s*=\s*(\d+)\]\s*$")
@@ -20,6 +21,10 @@ def parse_mdoc(path: Path) -> tuple[dict[str, Any], list[MdocSection], list[str]
     sections: list[MdocSection] = []
     current: MdocSection | None = None
 
+    if cloud_only(path):
+        # Not opened: opening a placeholder downloads it.
+        record_aggregate_phase("parse_mdoc", time.perf_counter() - started)
+        return {}, [], [f"{path.name}: {CLOUD_ONLY_FILE_WARNING}"]
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:

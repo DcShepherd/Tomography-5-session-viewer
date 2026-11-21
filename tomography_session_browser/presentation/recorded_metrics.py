@@ -5,11 +5,13 @@ from tomography_session_browser.domain.recorded_metrics import RecordedMetric
 from tomography_session_browser.domain.tomograms import Tomogram
 
 #: Warp writes CTF defocus to about 16 digits; displays show two decimals (10 nm).
-TWO_DECIMALS = frozenset({"warp.ctf.defocus", "warp.ctf.defocus_delta"})
+#: IMOD alignment residuals show two decimals too ("0.95 nm"), on the screen and in the PDF.
+TWO_DECIMALS = frozenset({"warp.ctf.defocus", "warp.ctf.defocus_delta",
+                          "imod.tiltalign.mean", "imod.tiltalign.weighted_mean"})
 
 
 def value_text(definition: str, value: float) -> str:
-    """A displayed value of this definition: defocus and astigmatism to two decimals, others as recorded.
+    """A displayed value of this definition: defocus, astigmatism and residuals to two decimals, others as recorded.
 
     Evidence keeps the recorded value.
     """

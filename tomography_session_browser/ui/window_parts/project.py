@@ -18,9 +18,13 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QTreeWidgetItem,
+    QWidget,
 )
 from tomography_session_browser.domain.identity import path_identity_key
 from tomography_session_browser.domain.display_names import count_phrase
+from tomography_session_browser.domain.folder_type import ReadAs, TypeFoundBy
+from tomography_session_browser.presentation.folder_type import SelectionChange
+from tomography_session_browser.services.settings_service import keep_read_as
 from tomography_session_browser.presentation.messages import ActionPrompt, ActionRole, MessageAction, MessageContent, TextAccepted
 from tomography_session_browser.ui.widgets import message_sheet
 from tomography_session_browser.domain.traversal import (
@@ -49,6 +53,7 @@ from tomography_session_browser.ui.shell.chrome import TAB_LABELS
 from tomography_session_browser.presentation.scope_identity import scope_key
 from tomography_session_browser.presentation.tomogram_selection import AllTomograms, FolderTomograms
 from tomography_session_browser.ui.file_actions import add_source_actions
+from tomography_session_browser.ui.context.processing_sources import selection_menu_button
 from tomography_session_browser.ui.project_tree.widgets import (
     OBJECT_ROLE,
     RECENT_PATH_ROLE,
@@ -328,6 +333,63 @@ class ProjectActions(QObject):
             group = ProjectTreeGroup(key, 'processing', source.name, source.name, [],
                                      name_lookup_keys=(key,), processing_source=source)
             self.remove_project_group(group)
+
+    def read_as_button(self, folder: str) -> QWidget | None:
+        """Context's "Change…" for the session folder at ``folder``, when the user's selection read it (D15 a).
+
+        ``folder`` is a session's or a sample's path. Only one session can own
+        it; otherwise there is no button.
+        """
+
+        key = path_identity_key(folder)
+        owners = [session for session in self.state.review.workspace.sessions
+                  if session.found_by == TypeFoundBy.SELECTION and (path_identity_key(session.path) == key
+                      or any(path_identity_key(sample.path) == key for sample in session.samples))]
+        if len(owners) != 1:
+            return None
+        session = owners[0]
+        return selection_menu_button(None, ReadAs.TILT_SERIES, session.name,
+                                     lambda change: self.parts.project.change_read_as(session.path, change))
+
+    def change_source_read_as(self, source_id: str, change: SelectionChange) -> None:
+        sources = [source for source in self.state.review.workspace.processing_sources if source.id == source_id]
+        if len(sources) == 1:
+            self.parts.project.change_read_as(sources[0].path, change)
+
+    def change_read_as(self, path: Path, change: SelectionChange) -> None:
+        """Apply a "Change…" item for a folder that the user's selection read (owner D15 a).
+
+        A new selection, or "Select again at next load" (which forgets it, so
+        the load asks), takes the folder out of the project and loads it again:
+        no confirmation, as the source does not leave the review. "Do not load
+        this folder" is Remove, asked first; the selection is forgotten only
+        when the folder leaves. The settings hold the selection, never the folder.
+        """
+
+        workspace = self.state.review.workspace
+        key = path_identity_key(path)
+        sessions = [session for session in workspace.sessions if path_identity_key(session.path) == key]
+        sources = [source for source in workspace.processing_sources if path_identity_key(source.path) == key]
+        if len(sessions) + len(sources) != 1:
+            return
+        settings = self.state.review.settings
+        if change.remove:
+            if sources:
+                self.parts.project.remove_processing_source(sources[0].id)
+            else:
+                self.parts.project.remove_session_from_project(sessions[0])
+            current = self.state.review.workspace
+            if not any(path_identity_key(item.path) == key for item in (*current.sessions, *current.processing_sources)):
+                keep_read_as(settings, path, None)
+                self.state.review.save_settings(settings)
+            return
+        keep_read_as(settings, path, change.selection)
+        self.state.review.save_settings(settings)
+        leaving = {id(item) for item in (*sessions, *sources)}
+        self.parts.project.refresh_project_state_after_edit(
+            [session for session in workspace.sessions if id(session) not in leaving],
+            processing_sources=tuple(source for source in workspace.processing_sources if id(source) not in leaving))
+        self.parts.loading.load_session(str(path), replace=False)
 
     def rename_project_group(self, group: ProjectTreeGroup) -> None:
         answer = message_sheet.request_text(self.window,

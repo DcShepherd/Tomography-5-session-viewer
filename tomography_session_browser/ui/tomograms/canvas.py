@@ -39,7 +39,6 @@ class VolumeCanvas(QWidget):
         self.position = (0, 0)
         self.region: tuple[float, float, float, float] | None = None
         self.drag: QPoint | None = None
-        self.press: QPoint | None = None
         self.rotating = False
         self.rolling = False
         self.bar_drag: tuple[QPoint, QRect] | None = None
@@ -248,7 +247,6 @@ class VolumeCanvas(QWidget):
         if event.button() == Qt.MouseButton.LeftButton or self.rotating:
             self.activated.emit()
             self.drag = event.position().toPoint()
-            self.press = self.drag
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             event.accept()
 
@@ -293,10 +291,9 @@ class VolumeCanvas(QWidget):
                                     max(0., min(1., point.y()/max(1, self.image_size().height()-24-rect.height()))))
             event.accept()
             return
-        if self.press is not None and not self.rotating and (event.position().toPoint()-self.press).manhattanLength() < 3:
-            self.mouseDoubleClickEvent(event)
+        # A click without a drag does nothing: only a double-click places the
+        # intersection, so a click to focus the canvas never moves it.
         self.drag = None
-        self.press = None
         self.rotating = False
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
